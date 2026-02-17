@@ -46,6 +46,31 @@ app.get('/', (req, res) => {
   res.sendFile(templateFile);
 });
 
+// POST /api/create-user — proxy to server service to persist user in Firestore
+app.post('/api/create-user', (req, res) => {
+  const http = require('http');
+  const payload = JSON.stringify(req.body);
+  const proxyReq = http.request({
+    hostname: process.env.SERVER_HOST || 'server',
+    port: 4000,
+    path: '/create-user',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+  }, (proxyRes) => {
+    let data = '';
+    proxyRes.on('data', (chunk) => { data += chunk; });
+    proxyRes.on('end', () => {
+      res.status(proxyRes.statusCode).set('Content-Type', 'application/json').send(data);
+    });
+  });
+  proxyReq.on('error', (err) => {
+    console.error('[PROXY ERROR]', err.message);
+    res.status(502).json({ success: false, message: 'Could not reach server' });
+  });
+  proxyReq.write(payload);
+  proxyReq.end();
+});
+
 // POST /submit — log guest data, return auto-submit form to Aruba cloud auth
 app.post('/submit', (req, res) => {
   const { name, email, mac, ip, url, post } = req.body;

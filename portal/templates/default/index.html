@@ -121,12 +121,42 @@
     document.getElementById('url').value = params.get('url') || '';
     document.getElementById('post').value = params.get('post') || '';
 
-    document.getElementById('portalForm').addEventListener('submit', function(e) {
+    document.getElementById('portalForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
       const name = document.getElementById('name').value.trim();
       const email = document.getElementById('email').value.trim();
       if (!name || !email) {
-        e.preventDefault();
+        document.getElementById('errorMsg').textContent = 'Please fill in all fields.';
         document.getElementById('errorMsg').style.display = 'block';
+        return;
+      }
+
+      const btn = this.querySelector('button');
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+      document.getElementById('errorMsg').style.display = 'none';
+
+      try {
+        const res = await fetch('/api/create-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            email,
+            mac: document.getElementById('mac').value,
+            ip: document.getElementById('ip').value,
+            url: document.getElementById('url').value,
+            post: document.getElementById('post').value,
+          }),
+        });
+        if (!res.ok) throw new Error('Server error');
+        // User created in Firestore — now submit to portal /submit for Aruba auth
+        this.submit();
+      } catch (err) {
+        document.getElementById('errorMsg').textContent = 'Something went wrong. Please try again.';
+        document.getElementById('errorMsg').style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Connect to Internet';
       }
     });
   </script>
