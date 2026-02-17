@@ -93,7 +93,7 @@
       <input type="hidden" id="mac" name="mac">
       <input type="hidden" id="ip" name="ip">
       <input type="hidden" id="url" name="url">
-      <input type="hidden" id="apip" name="apip">
+      <input type="hidden" id="post" name="post">
 
       <p class="error" id="errorMsg">Please fill in all fields.</p>
       <button type="submit">Connect to Internet</button>
@@ -101,12 +101,12 @@
   </div>
 
   <script>
-    // Extract Aruba query params from the URL and populate hidden fields
+    // Extract Aruba Instant On query params from the URL
     const params = new URLSearchParams(window.location.search);
     document.getElementById('mac').value = params.get('mac') || '';
     document.getElementById('ip').value = params.get('ip') || '';
     document.getElementById('url').value = params.get('url') || '';
-    document.getElementById('apip').value = params.get('switchip') || '';
+    document.getElementById('post').value = params.get('post') || '';
 
     document.getElementById('portalForm').addEventListener('submit', function(e) {
       const name = document.getElementById('name').value.trim();
