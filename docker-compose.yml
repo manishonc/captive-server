@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  freeradius:
+    build: ./freeradius
+    container_name: freeradius
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    restart: unless-stopped
+
+  portal:
+    build: ./portal
+    container_name: portal
+    ports:
+      - "80:3000"
+    environment:
+      - NODE_ENV=production
+      - PORTAL_DOMAIN=${PORTAL_DOMAIN:-167.71.229.249.nip.io}
+    restart: unless-stopped
