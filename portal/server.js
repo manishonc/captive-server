@@ -60,7 +60,8 @@ app.post('/submit', (req, res) => {
   }));
 
   const switchUrl = `https://${post}/swarm.cgi`;
-  const redirectUrl = url || 'http://www.google.com';
+  const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
+  const redirectUrl = `http://${portalDomain}/success`;
 
   res.send(`<!DOCTYPE html>
 <html>
@@ -76,6 +77,11 @@ app.post('/submit', (req, res) => {
   <script>document.getElementById('loginForm').submit();</script>
 </body>
 </html>`);
+});
+
+// GET /success — shown after authentication, lets user open real browser
+app.get('/success', (req, res) => {
+  res.sendFile(path.join(__dirname, 'templates', 'success', 'index.html'));
 });
 
 // Health check

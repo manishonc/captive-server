@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connected!</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 40px 32px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+      text-align: center;
+    }
+    .checkmark {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 24px;
+      background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: pop 0.4s ease-out;
+    }
+    .checkmark svg {
+      width: 40px;
+      height: 40px;
+      stroke: #fff;
+      stroke-width: 3;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    @keyframes pop {
+      0% { transform: scale(0); }
+      70% { transform: scale(1.1); }
+      100% { transform: scale(1); }
+    }
+    @keyframes draw {
+      to { stroke-dashoffset: 0; }
+    }
+    .checkmark svg path {
+      stroke-dasharray: 30;
+      stroke-dashoffset: 30;
+      animation: draw 0.4s ease-out 0.3s forwards;
+    }
+    h1 {
+      font-size: 24px;
+      color: #333;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      font-size: 15px;
+      color: #888;
+      margin-bottom: 32px;
+      line-height: 1.5;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      text-decoration: none;
+      text-align: center;
+    }
+    .btn:hover { opacity: 0.9; }
+    .hint {
+      font-size: 12px;
+      color: #aaa;
+      margin-top: 16px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="checkmark">
+      <svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
+    </div>
+    <h1>You're Connected!</h1>
+    <p class="subtitle">You now have internet access.<br>Tap below to start browsing.</p>
+    <a id="continueBtn" class="btn" href="https://www.google.com" target="_blank">Continue to Browse</a>
+    <p class="hint">If the button doesn't work, close this window and open your browser.</p>
+  </div>
+
+  <script>
+    document.getElementById('continueBtn').addEventListener('click', function(e) {
+      e.preventDefault();
+
+      var url = 'https://www.google.com';
+      var ua = navigator.userAgent || '';
+      var isIOS = /iPhone|iPad|iPod/.test(ua);
+      var isAndroid = /Android/.test(ua);
+
+      if (isAndroid) {
+        // Android intent to open in Chrome, falls back to default browser
+        var intentUrl = 'intent://' + url.replace(/^https?:\/\//, '') +
+          '#Intent;scheme=https;package=com.android.chrome;end';
+        window.location.href = intentUrl;
+      } else {
+        // iOS and others: window.open opens in Safari/default browser outside CNA
+        var w = window.open(url, '_blank');
+        if (!w) {
+          // Popup blocked — fall back to direct navigation
+          window.location.href = url;
+        }
+      }
+
+      // After a short delay, try to dismiss the CNA by hitting Apple's detect URL
+      // This triggers iOS to re-check connectivity and close the CNA sheet
+      if (isIOS) {
+        setTimeout(function() {
+          window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+        }, 500);
+      }
+    });
+  </script>
+</body>
+</html>
