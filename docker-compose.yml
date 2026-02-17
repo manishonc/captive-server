@@ -16,3 +16,10 @@ services:
       - NODE_ENV=production
       - PORTAL_DOMAIN=${PORTAL_DOMAIN:-167.71.229.249.nip.io}
     restart: unless-stopped
+
+  server:
+    build: ./server
+    container_name: server
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
