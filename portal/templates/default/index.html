@@ -1,3 +1,16 @@
+<!--
+  TEMPLATE CONTRACT
+  =================
+  Every restaurant template index.html MUST:
+  1. Have a <form> that POSTs to "/submit" with fields: name, email, mac, ip, url, post
+  2. Include JS that reads Aruba query params (mac, ip, url, post) into hidden fields
+     using: new URLSearchParams(window.location.search)
+  3. The "name" and "email" fields should be visible inputs filled by the guest
+  4. The "mac", "ip", "url", "post" fields should be hidden inputs populated from query params
+
+  Static assets for this template live in the same directory and are served at:
+    /static/default/  (e.g. /static/default/logo.png)
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>

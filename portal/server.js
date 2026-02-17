@@ -1,21 +1,47 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = 3000;
 
+// Load restaurant MAC-to-slug mapping
+const restaurantsPath = path.join(__dirname, 'restaurants.json');
+let restaurants = {};
+try {
+  restaurants = JSON.parse(fs.readFileSync(restaurantsPath, 'utf8'));
+} catch (err) {
+  console.error('[WARN] Could not load restaurants.json, all requests will use default template:', err.message);
+}
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
-// GET / — serve portal, log Aruba Instant On query params
+// Serve per-restaurant static assets: /static/<slug>/* → templates/<slug>/*
+app.use('/static/:slug', (req, res, next) => {
+  const slug = req.params.slug.replace(/[^a-z0-9_-]/gi, '');
+  const templateDir = path.join(__dirname, 'templates', slug);
+  express.static(templateDir)(req, res, next);
+});
+
+// GET / — look up restaurant by apmac, serve its template
 app.get('/', (req, res) => {
   const { cmd, mac, ip, network, apmac, site, post, url } = req.query;
   if (cmd) {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+
+  const slug = (apmac && restaurants[apmac]) || 'default';
+  const templateFile = path.join(__dirname, 'templates', slug, 'index.html');
+
+  // Fall back to default if the resolved template doesn't exist
+  if (slug !== 'default' && !fs.existsSync(templateFile)) {
+    console.warn(`[WARN] Template not found for slug "${slug}", falling back to default`);
+    return res.sendFile(path.join(__dirname, 'templates', 'default', 'index.html'));
+  }
+
+  res.sendFile(templateFile);
 });
 
 // POST /submit — log guest data, return auto-submit form to Aruba cloud auth
