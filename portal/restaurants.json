@@ -1,3 +1,9 @@
 {
-  "54:f0:b1:c8:7f:00": "default"
+  "defaultSessionTimeout": 36000,
+  "aps": {
+    "54:f0:b1:c8:7f:00": {
+      "slug": "default",
+      "sessionTimeout": 36000
+    }
+  }
 }

@@ -19,13 +19,34 @@ Examples: `pizza-place`, `cafe-downtown`, `burger-joint`
 
 ## Step 3: Register the MAC in `restaurants.json`
 
-Edit `portal/restaurants.json` and add the MAC-to-slug mapping:
+Edit `portal/restaurants.json` and add an entry in the `aps` object:
 
 ```json
 {
-  "54:f0:b1:c8:7f:00": "default",
-  "aa:bb:cc:dd:ee:ff": "pizza-place"
+  "defaultSessionTimeout": 36000,
+  "aps": {
+    "54:f0:b1:c8:7f:00": {
+      "slug": "default",
+      "sessionTimeout": 36000
+    },
+    "aa:bb:cc:dd:ee:ff": {
+      "slug": "pizza-place",
+      "sessionTimeout": 7200
+    }
+  }
 }
+```
+
+Each AP entry has:
+- `slug` — the template directory name (required)
+- `sessionTimeout` — seconds before the guest is disconnected and must re-authenticate (optional, falls back to `defaultSessionTimeout`)
+
+The `defaultSessionTimeout` at the top level applies to any AP not listed (default: 36000 = 10 hours).
+
+The `sessionTimeout` is enforced by FreeRADIUS. After editing `restaurants.json`, regenerate the FreeRADIUS users file:
+
+```bash
+node generate-users.js
 ```
 
 ## Step 4: Create the template
@@ -90,7 +111,16 @@ Reference them using the `/static/<slug>/` path:
 <img src="/static/pizza-place/logo.png">
 ```
 
-## Step 5: Deploy
+## Step 5: Regenerate FreeRADIUS config
+
+After editing `restaurants.json`, regenerate the FreeRADIUS users file so session timeouts take effect:
+
+```bash
+node generate-users.js
+```
+
+## Step 6: Deploy
+
 
 Rebuild and restart on your VPS:
 
@@ -98,7 +128,7 @@ Rebuild and restart on your VPS:
 docker compose up -d --build
 ```
 
-## Step 6: Test
+## Step 7: Test
 
 ```bash
 # Should serve the pizza-place template
@@ -115,7 +145,8 @@ curl "http://YOUR_SERVER/?apmac=xx:xx:xx:xx:xx:xx"
 
 | What | Where |
 |------|-------|
-| MAC mapping | `portal/restaurants.json` |
+| AP config & session timeouts | `portal/restaurants.json` |
 | Templates | `portal/templates/<slug>/index.html` |
 | Static assets | `portal/templates/<slug>/` (served at `/static/<slug>/`) |
 | Default fallback | `portal/templates/default/index.html` |
+| FreeRADIUS users (auto-generated) | `freeradius/users` — run `node generate-users.js` to regenerate |

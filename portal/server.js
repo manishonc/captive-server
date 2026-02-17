@@ -6,11 +6,12 @@ const fs = require('fs');
 const app = express();
 const PORT = 3000;
 
-// Load restaurant MAC-to-slug mapping
+// Load restaurant config
 const restaurantsPath = path.join(__dirname, 'restaurants.json');
-let restaurants = {};
+let aps = {};
 try {
-  restaurants = JSON.parse(fs.readFileSync(restaurantsPath, 'utf8'));
+  const config = JSON.parse(fs.readFileSync(restaurantsPath, 'utf8'));
+  aps = config.aps || {};
 } catch (err) {
   console.error('[WARN] Could not load restaurants.json, all requests will use default template:', err.message);
 }
@@ -32,7 +33,8 @@ app.get('/', (req, res) => {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
   }
 
-  const slug = (apmac && restaurants[apmac]) || 'default';
+  const apConfig = apmac && aps[apmac];
+  const slug = (apConfig && apConfig.slug) || 'default';
   const templateFile = path.join(__dirname, 'templates', slug, 'index.html');
 
   // Fall back to default if the resolved template doesn't exist
