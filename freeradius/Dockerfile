@@ -1,4 +1,4 @@
-FROM freeradius/freeradius-server:3.2-alpine
+FROM freeradius/freeradius-server:latest-3.2-alpine
 
 COPY clients.conf /etc/raddb/clients.conf
 COPY users /etc/raddb/users
