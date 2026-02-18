@@ -4,6 +4,7 @@ export interface CreateUserRequestBody {
   name?: string;
   email?: string;
   mac?: string;
+  apmac?: string;
   ip?: string;
   url?: string;
   post?: string;

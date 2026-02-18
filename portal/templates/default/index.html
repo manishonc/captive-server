@@ -3,10 +3,12 @@
   =================
   Every restaurant template index.html MUST:
   1. Have a <form> that POSTs to "/submit" with fields: name, email, mac, ip, url, post
-  2. Include JS that reads Aruba query params (mac, ip, url, post) into hidden fields
+  2. Include JS that reads Aruba query params (mac, ip, url, post, apmac) into hidden fields
      using: new URLSearchParams(window.location.search)
   3. The "name" and "email" fields should be visible inputs filled by the guest
-  4. The "mac", "ip", "url", "post" fields should be hidden inputs populated from query params
+  4. The "mac", "ip", "url", "post", "apmac" fields should be hidden inputs populated from query params
+     - mac:   guest device MAC (used for identification)
+     - apmac: AP/router MAC (used to look up CaptivePortal_AccessPoints in Firestore)
 
   Static assets for this template live in the same directory and are served at:
     /static/default/  (e.g. /static/default/logo.png)
@@ -107,6 +109,7 @@
       <input type="hidden" id="ip" name="ip">
       <input type="hidden" id="url" name="url">
       <input type="hidden" id="post" name="post">
+      <input type="hidden" id="apmac" name="apmac">
 
       <p class="error" id="errorMsg">Please fill in all fields.</p>
       <button type="submit">Connect to Internet</button>
@@ -120,6 +123,7 @@
     document.getElementById('ip').value = params.get('ip') || '';
     document.getElementById('url').value = params.get('url') || '';
     document.getElementById('post').value = params.get('post') || '';
+    document.getElementById('apmac').value = params.get('apmac') || '';
 
     document.getElementById('portalForm').addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -147,6 +151,7 @@
             ip: document.getElementById('ip').value,
             url: document.getElementById('url').value,
             post: document.getElementById('post').value,
+            apmac: document.getElementById('apmac').value,
           }),
         });
         if (!res.ok) throw new Error('Server error');

@@ -6,7 +6,7 @@ import { CreateUserRequestBody, CaptivePortalUserDocument } from '../types/capti
 const router = Router();
 
 router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, res: Response) => {
-  const { name, email, mac, ip, url, post } = req.body;
+  const { name, email, mac, apmac, ip, url, post } = req.body;
   const timestamp = req.body.timestamp || new Date().toISOString();
 
   let captivePortalAccessPointId: string | null = null;
@@ -14,17 +14,17 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   try {
     const snapshot = await db
       .collection('CaptivePortal_AccessPoints')
-      .where('mac', '==', mac || '')
+      .where('mac', '==', apmac || '')
       .limit(1)
       .get();
 
     if (!snapshot.empty) {
       captivePortalAccessPointId = snapshot.docs[0].id;
     } else {
-      console.warn('[MAC LOOKUP] No access point found for MAC:', mac);
+      console.warn('[APMAC LOOKUP] No access point found for apmac:', apmac);
     }
   } catch (err) {
-    console.error('[MAC LOOKUP ERROR]', err);
+    console.error('[APMAC LOOKUP ERROR]', err);
   }
 
   const doc: CaptivePortalUserDocument = {
