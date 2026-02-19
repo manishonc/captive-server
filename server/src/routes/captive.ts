@@ -1,12 +1,32 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, ConsentRecord } from '../types/captive';
 
 const router = Router();
 
+const defaultConsent = (): ConsentRecord => ({
+  given: false,
+  timestamp: new Date().toISOString(),
+  version: '1.0',
+});
+
 router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, res: Response) => {
-  const { name, email, mac, apmac, ip, url, post } = req.body;
+  const {
+    firstName,
+    lastName,
+    email,
+    phone,
+    phoneCountryCode,
+    mac,
+    apmac,
+    ip,
+    url,
+    post,
+    privacyPolicyConsent,
+    termsConsent,
+    marketingConsent,
+  } = req.body;
   const timestamp = req.body.timestamp || new Date().toISOString();
 
   let captivePortalAccessPointId: string | null = null;
@@ -28,8 +48,11 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   }
 
   const doc: CaptivePortalUserDocument = {
-    name: name || '',
+    firstName: firstName || '',
+    lastName: lastName || '',
     email: email || '',
+    phone: phone || '',
+    phoneCountryCode: phoneCountryCode || '',
     mac: mac || '',
     ip: ip || '',
     url: url || '',
@@ -37,6 +60,9 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     timestamp,
     createdAt: FieldValue.serverTimestamp(),
     captivePortalAccessPointId,
+    privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
+    termsConsent: termsConsent || defaultConsent(),
+    marketingConsent: marketingConsent || defaultConsent(),
   };
 
   try {
@@ -46,6 +72,20 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   } catch (err) {
     console.error('[FIRESTORE ERROR]', err);
     res.status(500).json({ success: false, message: 'Failed to save user' });
+  }
+});
+
+router.get('/privacy-policy', async (_req, res) => {
+  try {
+    const doc = await db
+      .collection('CaptivePortal_Documents')
+      .doc('rNhSj8HUmTNpwOaDgpTC')
+      .get();
+    if (!doc.exists) return res.status(404).json({ success: false });
+    const data = doc.data();
+    res.json({ success: true, title: data?.title, content: data?.latestContent });
+  } catch (err) {
+    res.status(500).json({ success: false });
   }
 });
 

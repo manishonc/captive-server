@@ -2,16 +2,12 @@
   TEMPLATE CONTRACT
   =================
   Every restaurant template index.html MUST:
-  1. Have a <form> that POSTs to "/submit" with fields: name, email, mac, ip, url, post
+  1. Have a <form> that POSTs to "/submit" with fields: firstName, lastName, email, mac, ip, url, post
   2. Include JS that reads Aruba query params (mac, ip, url, post, apmac) into hidden fields
-     using: new URLSearchParams(window.location.search)
-  3. The "name" and "email" fields should be visible inputs filled by the guest
-  4. The "mac", "ip", "url", "post", "apmac" fields should be hidden inputs populated from query params
-     - mac:   guest device MAC (used for identification)
-     - apmac: AP/router MAC (used to look up CaptivePortal_AccessPoints in Firestore)
+  3. The "firstName", "lastName", "email", "phone" fields are visible inputs filled by the guest
+  4. The "mac", "ip", "url", "post", "apmac" fields are hidden inputs from query params
 
-  Static assets for this template live in the same directory and are served at:
-    /static/default/  (e.g. /static/default/logo.png)
+  Static assets served at /static/default/ (e.g. /static/default/headerLogo.png)
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -21,149 +17,746 @@
   <title>Guest WiFi</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       min-height: 100vh;
+      background: #f4f4f4;
       display: flex;
-      align-items: center;
       justify-content: center;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      padding: 20px;
+      align-items: flex-start;
     }
-    .card {
-      background: #fff;
-      border-radius: 16px;
-      padding: 40px 32px;
+
+    /* ── Outer shell ── */
+    .page {
       width: 100%;
-      max-width: 400px;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+      max-width: 420px;
+      min-height: 100vh;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
     }
-    h1 {
-      font-size: 24px;
-      color: #333;
-      margin-bottom: 8px;
+
+    /* ── Step: shared flex fill ── */
+    .step {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+    .step.hidden { display: none; }
+
+    /* ── Logo ── */
+    .logo-wrap {
+      padding: 36px 24px 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .logo-wrap img {
+      max-height: 110px;
+      max-width: 280px;
+      object-fit: contain;
+    }
+
+    /* ═══════════════════════════════════════
+       STEP 1 — Consent / Agreement
+    ═══════════════════════════════════════ */
+    .consent-body {
+      padding: 0 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .consent-heading {
+      font-size: 26px;
+      font-weight: 400;
+      color: #1a1a1a;
       text-align: center;
+      margin-bottom: 10px;
+      line-height: 1.3;
     }
-    .subtitle {
+
+    .consent-subtitle {
       font-size: 14px;
-      color: #888;
+      color: #777;
       text-align: center;
-      margin-bottom: 32px;
+      margin-bottom: 28px;
+      line-height: 1.55;
     }
-    label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
+
+    .consent-box {
+      background: #f0eeee;
+      border-radius: 12px;
+      padding: 22px 20px;
+      margin-bottom: 30px;
+      font-size: 14px;
       color: #555;
+      line-height: 1.7;
+      text-align: center;
+      flex: 1;
+    }
+    .consent-box p + p { margin-top: 14px; }
+
+    .btn-accept {
+      width: 100%;
+      padding: 16px;
+      background: #1c2b4a;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      text-transform: uppercase;
+      cursor: pointer;
+      margin-bottom: 14px;
+      transition: background 0.15s;
+    }
+    .btn-accept:hover { background: #253662; }
+
+    .btn-decline {
+      width: 100%;
+      padding: 10px;
+      background: none;
+      border: none;
+      font-size: 14px;
+      color: #666;
+      text-align: center;
+      cursor: pointer;
+      margin-bottom: 24px;
+    }
+    .btn-decline:hover { color: #222; }
+
+    /* ── Footer shared ── */
+    .page-footer {
+      padding: 18px 24px 24px;
+      border-top: 1px solid #f0f0f0;
+      text-align: center;
+      font-size: 11px;
+      color: #aaa;
+      line-height: 1.8;
+    }
+    .page-footer a {
+      color: #667eea;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .page-footer a:hover { text-decoration: underline; }
+
+    /* ═══════════════════════════════════════
+       STEP 2 — WiFi Form
+    ═══════════════════════════════════════ */
+    .form-body {
+      padding: 0 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .form-heading {
+      font-size: 21px;
+      font-weight: 600;
+      color: #1a1a1a;
+      text-align: center;
+      margin-bottom: 4px;
+    }
+
+    .form-subtitle {
+      font-size: 13px;
+      color: #999;
+      text-align: center;
+      margin-bottom: 26px;
+    }
+
+    .field-group { margin-bottom: 16px; }
+
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
       margin-bottom: 6px;
     }
+
     input[type="text"],
-    input[type="email"] {
+    input[type="email"],
+    input[type="tel"] {
       width: 100%;
-      padding: 12px 16px;
-      border: 2px solid #e0e0e0;
+      padding: 12px 14px;
+      border: 1.5px solid #e8e8e8;
       border-radius: 10px;
-      font-size: 16px;
-      transition: border-color 0.2s;
-      margin-bottom: 20px;
+      font-size: 15px;
+      color: #222;
+      background: #fff;
       -webkit-appearance: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
     input:focus {
       outline: none;
       border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
     }
-    button {
+
+    /* Name row side-by-side */
+    .name-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 0;
+    }
+    .name-row .field-group { flex: 1; min-width: 0; }
+    @media (max-width: 300px) {
+      .name-row { flex-direction: column; gap: 0; }
+    }
+
+    /* ── Phone ── */
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 10px;
+      border: 1.5px solid #e8e8e8;
+      border-radius: 10px;
+      background: #fafafa;
+      cursor: pointer;
+      font-size: 13px;
+      white-space: nowrap;
+      min-width: 82px;
+      transition: border-color 0.15s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover,
+    .country-btn.open { border-color: #667eea; }
+    #selectedFlag { font-size: 19px; line-height: 1; }
+    #selectedCode { font-weight: 700; color: #444; font-size: 13px; }
+    .caret { font-size: 8px; color: #bbb; }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    /* Country dropdown */
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 300;
+      background: #fff;
+      border: 1.5px solid #e8e8e8;
+      border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.13);
+      width: 256px;
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 10px 12px;
+      border: none;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 14px;
+      outline: none;
+      border-radius: 12px 12px 0 0;
+    }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #333;
+    }
+    .country-option:hover { background: #f5f3ff; }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: #aaa; font-size: 12px; }
+
+    /* ── Connect button ── */
+    .btn-connect {
       width: 100%;
-      padding: 14px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 15px;
+      background: #1c2b4a;
       color: #fff;
       border: none;
       border-radius: 10px;
-      font-size: 16px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: background 0.15s;
+    }
+    .btn-connect:hover { background: #253662; }
+
+    .error-msg {
+      font-size: 13px;
+      color: #e53e3e;
+      margin-bottom: 10px;
+      display: none;
+    }
+
+    .form-disclaimer {
+      font-size: 11px;
+      color: #bbb;
+      text-align: center;
+      margin-top: 14px;
+      margin-bottom: 8px;
+      line-height: 1.6;
+    }
+    .form-disclaimer a {
+      color: #667eea;
+      cursor: pointer;
+    }
+
+    /* Powered-by footer */
+    .powered-footer {
+      padding: 16px 24px 22px;
+      border-top: 1px solid #f0f0f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      font-size: 11px;
+      color: #ccc;
+    }
+    .powered-footer img {
+      height: 18px;
+      object-fit: contain;
+    }
+
+    /* ═══════════════════════════════════════
+       Privacy Policy Modal
+    ═══════════════════════════════════════ */
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.48);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #fff;
+      border-radius: 16px;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-hdr {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid #f0f0f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-hdr h2 { font-size: 17px; font-weight: 700; color: #222; }
+    .modal-close-x {
+      background: none;
+      border: none;
+      font-size: 24px;
+      color: #bbb;
+      cursor: pointer;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .modal-close-x:hover { color: #555; }
+    #ppContent {
+      padding: 18px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      color: #444;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 20px;
+      border-top: 1px solid #f0f0f0;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 9px 22px;
+      background: #1c2b4a;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
       font-weight: 600;
       cursor: pointer;
-      transition: opacity 0.2s;
-    }
-    button:hover { opacity: 0.9; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .error {
-      color: #e53e3e;
-      font-size: 13px;
-      margin-bottom: 12px;
-      display: none;
     }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Welcome</h1>
-    <p class="subtitle">Connect to our guest WiFi</p>
-    <form id="portalForm" action="/submit" method="POST">
-      <label for="name">Full Name</label>
-      <input type="text" id="name" name="name" placeholder="John Doe" required>
+<div class="page">
 
-      <label for="email">Email Address</label>
-      <input type="email" id="email" name="email" placeholder="john@example.com" required>
+  <!-- ═══════════════════════════════════════
+       STEP 1 — Privacy & Consent Agreement
+  ═══════════════════════════════════════ -->
+  <div id="step1" class="step">
+    <div class="logo-wrap">
+      <img src="/static/default/headerLogo.png" alt="Guest WiFi">
+    </div>
 
-      <input type="hidden" id="mac" name="mac">
-      <input type="hidden" id="ip" name="ip">
-      <input type="hidden" id="url" name="url">
-      <input type="hidden" id="post" name="post">
-      <input type="hidden" id="apmac" name="apmac">
+    <div class="consent-body">
+      <h1 class="consent-heading">We care about your privacy</h1>
+      <p class="consent-subtitle">Stay in touch with us and find out more about<br>the best offers</p>
 
-      <p class="error" id="errorMsg">Please fill in all fields.</p>
-      <button type="submit">Connect to Internet</button>
-    </form>
+      <div class="consent-box">
+        <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+        <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+      </div>
+
+      <button class="btn-accept" onclick="handleConsent(true)">Accept</button>
+      <button class="btn-decline" onclick="handleConsent(false)">I don't want to stay in touch.</button>
+    </div>
+
+    <div class="page-footer">
+      This site uses cookies in accordance with your browser's settings.<br>
+      For more information see <a onclick="openModal(event)">Privacy Policy</a> and <a onclick="openModal(event)">Terms of Service</a>.
+    </div>
   </div>
 
-  <script>
-    // Extract Aruba Instant On query params from the URL
-    const params = new URLSearchParams(window.location.search);
-    document.getElementById('mac').value = params.get('mac') || '';
-    document.getElementById('ip').value = params.get('ip') || '';
-    document.getElementById('url').value = params.get('url') || '';
-    document.getElementById('post').value = params.get('post') || '';
-    document.getElementById('apmac').value = params.get('apmac') || '';
+  <!-- ═══════════════════════════════════════
+       STEP 2 — WiFi Details Form
+  ═══════════════════════════════════════ -->
+  <div id="step2" class="step hidden">
+    <div class="logo-wrap" style="padding-top:28px;padding-bottom:12px">
+      <img src="/static/default/headerLogo.png" alt="Guest WiFi" style="max-height:80px">
+    </div>
 
-    document.getElementById('portalForm').addEventListener('submit', async function(e) {
-      e.preventDefault();
-      const name = document.getElementById('name').value.trim();
-      const email = document.getElementById('email').value.trim();
-      if (!name || !email) {
-        document.getElementById('errorMsg').textContent = 'Please fill in all fields.';
-        document.getElementById('errorMsg').style.display = 'block';
-        return;
-      }
+    <div class="form-body">
+      <h2 class="form-heading">Connect to WiFi</h2>
+      <p class="form-subtitle">Enter your details to get online</p>
 
-      const btn = this.querySelector('button');
-      btn.disabled = true;
-      btn.textContent = 'Connecting...';
-      document.getElementById('errorMsg').style.display = 'none';
+      <form id="portalForm" action="/submit" method="POST">
 
-      try {
-        const res = await fetch('/api/create-user', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name,
-            email,
-            mac: document.getElementById('mac').value,
-            ip: document.getElementById('ip').value,
-            url: document.getElementById('url').value,
-            post: document.getElementById('post').value,
-            apmac: document.getElementById('apmac').value,
-          }),
-        });
-        if (!res.ok) throw new Error('Server error');
-        // User created in Firestore — now submit to portal /submit for Aruba auth
-        this.submit();
-      } catch (err) {
-        document.getElementById('errorMsg').textContent = 'Something went wrong. Please try again.';
-        document.getElementById('errorMsg').style.display = 'block';
-        btn.disabled = false;
-        btn.textContent = 'Connect to Internet';
-      }
+        <!-- Name -->
+        <div class="name-row">
+          <div class="field-group">
+            <label class="field-label" for="firstName">First Name</label>
+            <input type="text" id="firstName" name="firstName" placeholder="Jane" autocomplete="given-name" required>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="lastName">Last Name</label>
+            <input type="text" id="lastName" name="lastName" placeholder="Smith" autocomplete="family-name" required>
+          </div>
+        </div>
+
+        <!-- Email -->
+        <div class="field-group">
+          <label class="field-label" for="email">Email Address</label>
+          <input type="email" id="email" name="email" placeholder="jane@example.com" autocomplete="email" required>
+        </div>
+
+        <!-- Phone -->
+        <div class="field-group">
+          <label class="field-label">Phone Number</label>
+          <div class="phone-wrap" id="phoneWrapper">
+            <button type="button" class="country-btn" id="countryBtn" aria-haspopup="listbox" aria-expanded="false">
+              <span id="selectedFlag">🇬🇧</span>
+              <span id="selectedCode">+44</span>
+              <span class="caret">▼</span>
+            </button>
+            <input type="hidden" id="phoneCountryCode" name="phoneCountryCode" value="+44">
+            <div id="countryDropdown" class="country-dropdown" role="listbox">
+              <input type="text" id="countrySearch" class="country-search" placeholder="Search country…" autocomplete="off">
+              <div id="countryList" class="country-list"></div>
+            </div>
+            <input type="tel" id="phone" name="phone" placeholder="7911 123456" autocomplete="tel-national">
+          </div>
+        </div>
+
+        <!-- Hidden Aruba fields -->
+        <input type="hidden" id="mac"   name="mac">
+        <input type="hidden" id="ip"    name="ip">
+        <input type="hidden" id="url"   name="url">
+        <input type="hidden" id="post"  name="post">
+        <input type="hidden" id="apmac" name="apmac">
+
+        <p class="error-msg" id="errorMsg"></p>
+        <button type="submit" class="btn-connect" id="connectBtn">Connect to WiFi</button>
+      </form>
+
+      <p class="form-disclaimer">
+        By connecting you agree to our <a onclick="openModal(event)">Privacy Policy</a> and Terms of Service.
+      </p>
+    </div>
+
+    <div class="powered-footer">
+      <span>Powered by</span>
+      <img src="/static/default/askheidi-logo.png" alt="AskHeidi">
+    </div>
+  </div>
+
+</div>
+
+<!-- Privacy Policy Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 1. Aruba params ────────────────────────────────────────────────────────
+(function () {
+  var p = new URLSearchParams(window.location.search);
+  ['mac', 'ip', 'url', 'post', 'apmac'].forEach(function (k) {
+    var el = document.getElementById(k);
+    if (el) el.value = p.get(k) || '';
+  });
+})();
+
+// ── 2. Consent state ───────────────────────────────────────────────────────
+var marketingAccepted = false;
+
+var CONSENT_TEXT =
+  'I consent to the collection and use of my personal data, provided via ' +
+  'WiFi portal registration, by this venue for marketing purposes. I understand ' +
+  'that I may withdraw my consent at any time, and that this will not affect the ' +
+  'legality of any processing carried out prior to my withdrawal.\n\n' +
+  'I also consent to receiving marketing communications from this venue via email ' +
+  'or other electronic means. I understand that I can unsubscribe at any time ' +
+  'using the method provided in each communication.';
+
+function handleConsent(marketing) {
+  marketingAccepted = marketing;
+  document.getElementById('step1').classList.add('hidden');
+  document.getElementById('step2').classList.remove('hidden');
+}
+
+// ── 3. Country selector ────────────────────────────────────────────────────
+var COUNTRIES = [
+  { code: 'GB', name: 'United Kingdom',   dial: '+44'  },
+  { code: 'US', name: 'United States',    dial: '+1'   },
+  { code: 'IN', name: 'India',            dial: '+91'  },
+  { code: 'AU', name: 'Australia',        dial: '+61'  },
+  { code: 'CA', name: 'Canada',           dial: '+1'   },
+  { code: 'DE', name: 'Germany',          dial: '+49'  },
+  { code: 'FR', name: 'France',           dial: '+33'  },
+  { code: 'ES', name: 'Spain',            dial: '+34'  },
+  { code: 'IT', name: 'Italy',            dial: '+39'  },
+  { code: 'NL', name: 'Netherlands',      dial: '+31'  },
+  { code: 'AE', name: 'UAE',              dial: '+971' },
+  { code: 'SA', name: 'Saudi Arabia',     dial: '+966' },
+  { code: 'SG', name: 'Singapore',        dial: '+65'  },
+  { code: 'JP', name: 'Japan',            dial: '+81'  },
+  { code: 'CN', name: 'China',            dial: '+86'  },
+  { code: 'BR', name: 'Brazil',           dial: '+55'  },
+  { code: 'MX', name: 'Mexico',           dial: '+52'  },
+  { code: 'ZA', name: 'South Africa',     dial: '+27'  },
+  { code: 'NG', name: 'Nigeria',          dial: '+234' },
+  { code: 'PK', name: 'Pakistan',         dial: '+92'  },
+  { code: 'BD', name: 'Bangladesh',       dial: '+880' },
+  { code: 'PH', name: 'Philippines',      dial: '+63'  },
+  { code: 'TR', name: 'Turkey',           dial: '+90'  },
+  { code: 'PL', name: 'Poland',           dial: '+48'  },
+  { code: 'SE', name: 'Sweden',           dial: '+46'  },
+  { code: 'NO', name: 'Norway',           dial: '+47'  },
+  { code: 'DK', name: 'Denmark',          dial: '+45'  },
+  { code: 'CH', name: 'Switzerland',      dial: '+41'  },
+  { code: 'NZ', name: 'New Zealand',      dial: '+64'  },
+  { code: 'IE', name: 'Ireland',          dial: '+353' },
+  { code: 'PT', name: 'Portugal',         dial: '+351' },
+  { code: 'RU', name: 'Russia',           dial: '+7'   },
+  { code: 'KR', name: 'South Korea',      dial: '+82'  },
+  { code: 'EG', name: 'Egypt',            dial: '+20'  },
+  { code: 'GH', name: 'Ghana',            dial: '+233' },
+  { code: 'KE', name: 'Kenya',            dial: '+254' },
+  { code: 'TZ', name: 'Tanzania',         dial: '+255' },
+  { code: 'MY', name: 'Malaysia',         dial: '+60'  },
+  { code: 'TH', name: 'Thailand',         dial: '+66'  },
+  { code: 'VN', name: 'Vietnam',          dial: '+84'  },
+  { code: 'ID', name: 'Indonesia',        dial: '+62'  },
+  { code: 'HK', name: 'Hong Kong',        dial: '+852' },
+  { code: 'QA', name: 'Qatar',            dial: '+974' },
+  { code: 'KW', name: 'Kuwait',           dial: '+965' },
+  { code: 'BH', name: 'Bahrain',          dial: '+973' },
+  { code: 'OM', name: 'Oman',             dial: '+968' },
+  { code: 'JO', name: 'Jordan',           dial: '+962' },
+  { code: 'LB', name: 'Lebanon',          dial: '+961' },
+  { code: 'MA', name: 'Morocco',          dial: '+212' },
+  { code: 'TN', name: 'Tunisia',          dial: '+216' },
+];
+
+function toFlag(code) {
+  return code.toUpperCase().replace(/./g, function (c) {
+    return String.fromCodePoint(0x1F1E6 - 65 + c.charCodeAt(0));
+  });
+}
+
+function renderCountries(q) {
+  var list = document.getElementById('countryList');
+  var ql = (q || '').toLowerCase();
+  var html = '';
+  COUNTRIES.forEach(function (c) {
+    if (ql && c.name.toLowerCase().indexOf(ql) === -1 && c.dial.indexOf(ql) === -1) return;
+    var f = toFlag(c.code);
+    html += '<div class="country-option" onclick="selectCountry(\'' +
+      c.dial.replace(/'/g, '') + '\',\'' + f + '\')" role="option">' +
+      '<span class="opt-flag">' + f + '</span>' +
+      '<span class="opt-name">' + c.name + '</span>' +
+      '<span class="opt-code">' + c.dial + '</span>' +
+      '</div>';
+  });
+  list.innerHTML = html ||
+    '<div style="padding:12px 14px;color:#bbb;font-size:13px">No results</div>';
+}
+
+function selectCountry(dial, flag) {
+  document.getElementById('selectedFlag').textContent = flag;
+  document.getElementById('selectedCode').textContent = dial;
+  document.getElementById('phoneCountryCode').value = dial;
+  closeDropdown();
+  document.getElementById('phone').focus();
+}
+
+function openDropdown() {
+  document.getElementById('countryDropdown').classList.add('open');
+  document.getElementById('countryBtn').classList.add('open');
+  document.getElementById('countryBtn').setAttribute('aria-expanded', 'true');
+  document.getElementById('countrySearch').value = '';
+  renderCountries('');
+  setTimeout(function () { document.getElementById('countrySearch').focus(); }, 50);
+}
+
+function closeDropdown() {
+  document.getElementById('countryDropdown').classList.remove('open');
+  document.getElementById('countryBtn').classList.remove('open');
+  document.getElementById('countryBtn').setAttribute('aria-expanded', 'false');
+}
+
+document.getElementById('countryBtn').addEventListener('click', function (e) {
+  e.stopPropagation();
+  var isOpen = document.getElementById('countryDropdown').classList.contains('open');
+  if (isOpen) closeDropdown(); else openDropdown();
+});
+
+document.getElementById('countrySearch').addEventListener('input', function () {
+  renderCountries(this.value);
+});
+
+document.addEventListener('click', function (e) {
+  if (!document.getElementById('phoneWrapper').contains(e.target)) closeDropdown();
+});
+
+renderCountries('');
+
+// ── 4. Privacy Policy modal ────────────────────────────────────────────────
+var ppLoaded = false;
+
+function openModal(e) {
+  if (e) e.preventDefault();
+  document.getElementById('ppModal').classList.add('open');
+  if (!ppLoaded) {
+    document.getElementById('ppContent').textContent = 'Loading\u2026';
+    fetch('/api/privacy-policy')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        document.getElementById('ppContent').textContent =
+          d.content || 'Privacy policy not available.';
+        ppLoaded = true;
+      })
+      .catch(function () {
+        document.getElementById('ppContent').textContent =
+          'Unable to load policy. Please ask staff for a copy.';
+      });
+  }
+}
+
+function closeModal() {
+  document.getElementById('ppModal').classList.remove('open');
+}
+
+document.getElementById('ppModal').addEventListener('click', function (e) {
+  if (e.target === this) closeModal();
+});
+
+// ── 5. Form submit ─────────────────────────────────────────────────────────
+document.getElementById('portalForm').addEventListener('submit', async function (e) {
+  e.preventDefault();
+
+  var firstName = document.getElementById('firstName').value.trim();
+  var lastName  = document.getElementById('lastName').value.trim();
+  var email     = document.getElementById('email').value.trim();
+
+  if (!firstName || !lastName || !email) {
+    var err = document.getElementById('errorMsg');
+    err.textContent = 'Please fill in your name and email to continue.';
+    err.style.display = 'block';
+    return;
+  }
+
+  var btn = document.getElementById('connectBtn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting\u2026';
+  document.getElementById('errorMsg').style.display = 'none';
+
+  var now = new Date().toISOString();
+  var ver = '1.0';
+
+  var privacyPolicyConsent = { given: true,             timestamp: now, version: ver, text: CONSENT_TEXT };
+  var termsConsent         = { given: true,             timestamp: now, version: ver, text: CONSENT_TEXT };
+  var marketingConsent     = { given: marketingAccepted, timestamp: now, version: ver, text: CONSENT_TEXT };
+
+  // GDPR audit cookie — 1 year
+  document.cookie = 'gdpr_consent=' + encodeURIComponent(JSON.stringify({
+    privacyPolicy: privacyPolicyConsent,
+    terms:         termsConsent,
+    marketing:     marketingConsent,
+  })) + '; max-age=31536000; path=/; SameSite=Lax';
+
+  try {
+    var res = await fetch('/api/create-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firstName,
+        lastName,
+        email,
+        phone:                document.getElementById('phone').value.trim(),
+        phoneCountryCode:     document.getElementById('phoneCountryCode').value,
+        mac:                  document.getElementById('mac').value,
+        ip:                   document.getElementById('ip').value,
+        url:                  document.getElementById('url').value,
+        post:                 document.getElementById('post').value,
+        apmac:                document.getElementById('apmac').value,
+        privacyPolicyConsent,
+        termsConsent,
+        marketingConsent,
+      }),
     });
-  </script>
+    if (!res.ok) throw new Error('Server error');
+    this.submit();
+  } catch (err) {
+    var errEl = document.getElementById('errorMsg');
+    errEl.textContent = 'Something went wrong. Please try again.';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Connect to WiFi';
+  }
+});
+</script>
 </body>
 </html>

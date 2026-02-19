@@ -46,6 +46,25 @@ app.get('/', (req, res) => {
   res.sendFile(templateFile);
 });
 
+// GET /api/privacy-policy — proxy to server service to fetch privacy policy from Firestore
+app.get('/api/privacy-policy', (req, res) => {
+  const http = require('http');
+  const proxyReq = http.request({
+    hostname: process.env.SERVER_HOST || 'server',
+    port: 4000,
+    path: '/privacy-policy',
+    method: 'GET',
+  }, (proxyRes) => {
+    let data = '';
+    proxyRes.on('data', (chunk) => { data += chunk; });
+    proxyRes.on('end', () => {
+      res.status(proxyRes.statusCode).set('Content-Type', 'application/json').send(data);
+    });
+  });
+  proxyReq.on('error', () => res.status(502).json({ success: false }));
+  proxyReq.end();
+});
+
 // POST /api/create-user — proxy to server service to persist user in Firestore
 app.post('/api/create-user', (req, res) => {
   const http = require('http');
@@ -73,12 +92,13 @@ app.post('/api/create-user', (req, res) => {
 
 // POST /submit — log guest data, return auto-submit form to Aruba cloud auth
 app.post('/submit', (req, res) => {
-  const { name, email, mac, ip, url, post } = req.body;
+  const { firstName, lastName, email, mac, ip, url, post } = req.body;
   const ua = req.headers['user-agent'] || '';
   const isAndroid = /Android/i.test(ua);
 
   console.log('[GUEST SUBMIT]', JSON.stringify({
-    name,
+    firstName,
+    lastName,
     email,
     mac,
     ip,
