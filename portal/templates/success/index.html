@@ -98,47 +98,39 @@
       <svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
     </div>
     <h1>You're Connected!</h1>
-    <p class="subtitle">You now have internet access.<br>Opening askheidi.app…</p>
+    <p class="subtitle">You now have internet access.<br>Tap the button to open the site.</p>
+    <!-- target="_blank" is key: macOS CNA opens _blank links in the real browser (Safari/Chrome) -->
     <a id="continueBtn" class="btn" href="https://askheidi.app/" target="_blank">Open askheidi.app</a>
-    <p class="hint">If it doesn't open automatically, tap the button above.</p>
+    <p class="hint">If the button doesn't work, close this window and open your browser.</p>
   </div>
 
   <script>
     var TARGET = 'https://askheidi.app/';
+    var ua = navigator.userAgent || '';
+    var isIOS = /iPhone|iPad|iPod/.test(ua);
 
-    function openInBrowser() {
-      var ua = navigator.userAgent || '';
-      var isIOS = /iPhone|iPad|iPod/.test(ua);
-      var isAndroid = /Android/.test(ua);
+    if (isIOS) {
+      // iOS: auto-trigger — window.open opens Safari outside the CNA sheet
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          var w = window.open(TARGET, '_blank');
+          if (!w) { window.location.href = TARGET; }
+          // Poke Apple's detect URL to trigger CNA dismissal
+          setTimeout(function() {
+            window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+          }, 600);
+        }, 500);
+      });
 
-      if (isAndroid) {
-        // Android intent: try Chrome first, fall back to system browser
-        var intentUrl = 'intent://askheidi.app/#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(TARGET) + ';end';
-        window.location.href = intentUrl;
-      } else if (isIOS) {
-        // iOS: window.open launches Safari outside the CNA sheet
+      // Override button click for iOS too
+      document.getElementById('continueBtn').addEventListener('click', function(e) {
+        e.preventDefault();
         var w = window.open(TARGET, '_blank');
         if (!w) { window.location.href = TARGET; }
-        // Poke Apple's detect URL so iOS re-checks and dismisses the CNA
-        setTimeout(function() {
-          window.location.href = 'http://captive.apple.com/hotspot-detect.html';
-        }, 600);
-      } else {
-        // macOS / Windows: navigate directly
-        window.location.href = TARGET;
-      }
+      });
     }
-
-    // Auto-open on page load
-    window.addEventListener('load', function() {
-      setTimeout(openInBrowser, 800);
-    });
-
-    // Manual button fallback
-    document.getElementById('continueBtn').addEventListener('click', function(e) {
-      e.preventDefault();
-      openInBrowser();
-    });
+    // macOS/Windows: don't intercept the click — let <a href target="_blank"> work naturally.
+    // macOS CNA opens target="_blank" links in the real system browser (Safari/Chrome).
   </script>
 </body>
 </html>

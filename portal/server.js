@@ -74,6 +74,8 @@ app.post('/api/create-user', (req, res) => {
 // POST /submit — log guest data, return auto-submit form to Aruba cloud auth
 app.post('/submit', (req, res) => {
   const { name, email, mac, ip, url, post } = req.body;
+  const ua = req.headers['user-agent'] || '';
+  const isAndroid = /Android/i.test(ua);
 
   console.log('[GUEST SUBMIT]', JSON.stringify({
     name,
@@ -81,12 +83,19 @@ app.post('/submit', (req, res) => {
     mac,
     ip,
     post,
+    platform: isAndroid ? 'android' : 'other',
     timestamp: new Date().toISOString()
   }));
 
   const switchUrl = `https://${post}/swarm.cgi`;
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
-  const redirectUrl = `http://${portalDomain}/success`;
+
+  // Android: pass an intent URL so Aruba redirects straight into Chrome after auth.
+  // The Android WebView handling swarm.cgi's redirect will fire the intent before
+  // the CNA closes, opening askheidi.app in Chrome (or the default browser).
+  const redirectUrl = isAndroid
+    ? 'intent://askheidi.app/#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=https%3A%2F%2Faskheidi.app%2F;end'
+    : `http://${portalDomain}/success`;
 
   res.send(`<!DOCTYPE html>
 <html>
