@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { CreateUserRequestBody, CaptivePortalUserDocument, ConsentRecord } from '../types/captive';
+import { scheduleSms, toE164 } from '../services/twilio';
 
 const router = Router();
 
@@ -69,12 +70,46 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   try {
     const ref = await db.collection('CaptivePortal_Users').add(doc);
     console.log('[NEW CONNECTION]', ref.id, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
+
+    // Fire-and-forget: schedule SMS if marketing opted in and AP has SMS enabled
+    if (doc.marketingOptIn && captivePortalAccessPointId) {
+      scheduleSmsForUser(
+        captivePortalAccessPointId,
+        phone || '',
+        phoneCountryCode || ''
+      ).catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
+    }
+
     res.json({ success: true, id: ref.id });
   } catch (err) {
     console.error('[FIRESTORE ERROR]', err);
     res.status(500).json({ success: false, message: 'Failed to save user' });
   }
 });
+
+async function scheduleSmsForUser(
+  accessPointId: string,
+  phone: string,
+  phoneCountryCode: string
+): Promise<void> {
+  const to = toE164(phoneCountryCode, phone);
+  if (!to) {
+    console.warn('[SMS] Skipping: no valid phone for E.164');
+    return;
+  }
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) return;
+  const data = apDoc.data();
+  const smsConfig = data?.marketing?.sms;
+  if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
+
+  for (const msg of smsConfig.messages) {
+    if (msg.content) {
+      await scheduleSms(to, msg.content, msg.delayMinutes ?? 0);
+    }
+  }
+}
 
 // ── Field names in CaptivePortal_Documents — update if your schema differs ──
 const DOC_TYPE_FIELD      = 'type';        // field that identifies the document kind

@@ -24,6 +24,22 @@ export interface CreateUserRequestBody {
   marketingConsent?: ConsentRecord;
 }
 
+export interface MarketingSmsMessage {
+  content: string;
+  delayMinutes: number;
+}
+
+export interface MarketingChannelConfig<T> {
+  enabled: boolean;
+  messages: T[];
+}
+
+export interface AccessPointMarketing {
+  sms?: MarketingChannelConfig<MarketingSmsMessage>;
+  email?: MarketingChannelConfig<unknown>;
+  whatsapp?: MarketingChannelConfig<unknown>;
+}
+
 export interface CaptivePortalUserDocument {
   firstName: string;
   lastName: string;

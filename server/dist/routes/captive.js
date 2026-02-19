@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const firebase_1 = require("../firebase");
 const firestore_1 = require("firebase-admin/firestore");
+const twilio_1 = require("../services/twilio");
 const router = (0, express_1.Router)();
 const defaultConsent = () => ({
     given: false,
@@ -50,6 +51,10 @@ router.post('/create-user', async (req, res) => {
     try {
         const ref = await firebase_1.db.collection('CaptivePortal_Users').add(doc);
         console.log('[NEW CONNECTION]', ref.id, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
+        // Fire-and-forget: schedule SMS if marketing opted in and AP has SMS enabled
+        if (doc.marketingOptIn && captivePortalAccessPointId) {
+            scheduleSmsForUser(captivePortalAccessPointId, phone || '', phoneCountryCode || '').catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
+        }
         res.json({ success: true, id: ref.id });
     }
     catch (err) {
@@ -57,6 +62,25 @@ router.post('/create-user', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to save user' });
     }
 });
+async function scheduleSmsForUser(accessPointId, phone, phoneCountryCode) {
+    const to = (0, twilio_1.toE164)(phoneCountryCode, phone);
+    if (!to) {
+        console.warn('[SMS] Skipping: no valid phone for E.164');
+        return;
+    }
+    const apDoc = await firebase_1.db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+    if (!apDoc.exists)
+        return;
+    const data = apDoc.data();
+    const smsConfig = data?.marketing?.sms;
+    if (!smsConfig?.enabled || !smsConfig?.messages?.length)
+        return;
+    for (const msg of smsConfig.messages) {
+        if (msg.content) {
+            await (0, twilio_1.scheduleSms)(to, msg.content, msg.delayMinutes ?? 0);
+        }
+    }
+}
 // ── Field names in CaptivePortal_Documents — update if your schema differs ──
 const DOC_TYPE_FIELD = 'type'; // field that identifies the document kind
 const DOC_PUBLISHED_FIELD = 'published'; // boolean field — true means live
