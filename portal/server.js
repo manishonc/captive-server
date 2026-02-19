@@ -46,13 +46,13 @@ app.get('/', (req, res) => {
   res.sendFile(templateFile);
 });
 
-// GET /api/privacy-policy — proxy to server service to fetch privacy policy from Firestore
-app.get('/api/privacy-policy', (req, res) => {
+// Generic proxy helper for GET requests to the backend server
+function proxyGet(backendPath, res) {
   const http = require('http');
   const proxyReq = http.request({
     hostname: process.env.SERVER_HOST || 'server',
     port: 4000,
-    path: '/privacy-policy',
+    path: backendPath,
     method: 'GET',
   }, (proxyRes) => {
     let data = '';
@@ -63,7 +63,13 @@ app.get('/api/privacy-policy', (req, res) => {
   });
   proxyReq.on('error', () => res.status(502).json({ success: false }));
   proxyReq.end();
-});
+}
+
+// GET /api/privacy-policy — proxies to backend GET /privacy-policy
+app.get('/api/privacy-policy', (_req, res) => proxyGet('/privacy-policy', res));
+
+// GET /api/terms — proxies to backend GET /terms
+app.get('/api/terms', (_req, res) => proxyGet('/terms', res));
 
 // POST /api/create-user — proxy to server service to persist user in Firestore
 app.post('/api/create-user', (req, res) => {

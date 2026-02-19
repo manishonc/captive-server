@@ -76,16 +76,48 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   }
 });
 
+// ── Field names in CaptivePortal_Documents — update if your schema differs ──
+const DOC_TYPE_FIELD      = 'type';        // field that identifies the document kind
+const DOC_PUBLISHED_FIELD = 'published';   // boolean field — true means live
+const DOC_TYPE_PRIVACY    = 'privacy_policy';
+const DOC_TYPE_TERMS      = 'terms_of_service';
+
+async function fetchDocument(type: string): Promise<{ title?: string; content?: string } | null> {
+  const snapshot = await db
+    .collection('CaptivePortal_Documents')
+    .where(DOC_TYPE_FIELD, '==', type)
+    .where(DOC_PUBLISHED_FIELD, '==', true)
+    .limit(1)
+    .get();
+
+  if (snapshot.empty) {
+    console.warn(`[DOCUMENTS] No published document found for type="${type}"`);
+    return null;
+  }
+
+  const data = snapshot.docs[0].data();
+  console.log(`[DOCUMENTS] Fetched type="${type}" doc=${snapshot.docs[0].id}`);
+  return { title: data?.title, content: data?.latestContent };
+}
+
 router.get('/privacy-policy', async (_req, res) => {
   try {
-    const doc = await db
-      .collection('CaptivePortal_Documents')
-      .doc('rNhSj8HUmTNpwOaDgpTC')
-      .get();
-    if (!doc.exists) return res.status(404).json({ success: false });
-    const data = doc.data();
-    res.json({ success: true, title: data?.title, content: data?.latestContent });
+    const doc = await fetchDocument(DOC_TYPE_PRIVACY);
+    if (!doc) return res.status(404).json({ success: false });
+    res.json({ success: true, ...doc });
   } catch (err) {
+    console.error('[PRIVACY POLICY ERROR]', err);
+    res.status(500).json({ success: false });
+  }
+});
+
+router.get('/terms', async (_req, res) => {
+  try {
+    const doc = await fetchDocument(DOC_TYPE_TERMS);
+    if (!doc) return res.status(404).json({ success: false });
+    res.json({ success: true, ...doc });
+  } catch (err) {
+    console.error('[TERMS ERROR]', err);
     res.status(500).json({ success: false });
   }
 });

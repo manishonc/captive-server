@@ -436,8 +436,8 @@
   <div class="site-footer">
     <div class="footer-privacy">
       This site uses cookies in accordance with your browser's settings.<br>
-      For more information see <a onclick="openModal(event)">Privacy Policy</a>
-      and <a onclick="openModal(event)">Terms of Service</a>.
+      For more information see <a onclick="openDoc(event,'privacy')">Privacy Policy</a>
+      and <a onclick="openDoc(event,'terms')">Terms of Service</a>.
     </div>
     <div class="footer-powered">
       <span class="footer-powered-text">Powered by</span>
@@ -690,26 +690,39 @@ async function submitConsent(marketing) {
   }
 }
 
-// ── 6. Privacy Policy modal ────────────────────────────────────────────────
-var ppLoaded = false;
+// ── 6. Document modal (Privacy Policy + Terms of Service) ─────────────────
+var docCache = {};   // keyed by 'privacy' | 'terms'
 
-function openModal(e) {
+var DOC_CONFIG = {
+  privacy: { api: '/api/privacy-policy', label: 'Privacy Policy' },
+  terms:   { api: '/api/terms',          label: 'Terms of Service' },
+};
+
+function openDoc(e, type) {
   if (e) e.preventDefault();
+  var cfg = DOC_CONFIG[type];
+  if (!cfg) return;
+
+  document.getElementById('ppTitle').textContent = cfg.label;
   document.getElementById('ppModal').classList.add('open');
-  if (!ppLoaded) {
-    document.getElementById('ppContent').textContent = 'Loading\u2026';
-    fetch('/api/privacy-policy')
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        document.getElementById('ppContent').textContent =
-          d.content || 'Privacy policy not available.';
-        ppLoaded = true;
-      })
-      .catch(function() {
-        document.getElementById('ppContent').textContent =
-          'Unable to load policy. Please ask staff for a copy.';
-      });
+
+  if (docCache[type]) {
+    document.getElementById('ppContent').textContent = docCache[type];
+    return;
   }
+
+  document.getElementById('ppContent').textContent = 'Loading\u2026';
+  fetch(cfg.api)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var text = d.content || (cfg.label + ' not available.');
+      docCache[type] = text;
+      document.getElementById('ppContent').textContent = text;
+    })
+    .catch(function() {
+      document.getElementById('ppContent').textContent =
+        'Unable to load document. Please ask staff for a copy.';
+    });
 }
 
 function closeModal() {
