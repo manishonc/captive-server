@@ -90,11 +90,10 @@ app.post('/submit', (req, res) => {
   const switchUrl = `https://${post}/swarm.cgi`;
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
 
-  // Android: pass an intent URL so Aruba redirects straight into Chrome after auth.
-  // The Android WebView handling swarm.cgi's redirect will fire the intent before
-  // the CNA closes, opening askheidi.app in Chrome (or the default browser).
+  // Android: redirect straight to the destination within the CNA browser.
+  // iOS/macOS: go through /success which handles opening the real browser.
   const redirectUrl = isAndroid
-    ? 'intent://askheidi.app/#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=https%3A%2F%2Faskheidi.app%2F;end'
+    ? 'https://askheidi.app/'
     : `http://${portalDomain}/success`;
 
   res.send(`<!DOCTYPE html>
