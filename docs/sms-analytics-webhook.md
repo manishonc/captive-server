@@ -74,6 +74,37 @@ If `SERVER_PUBLIC_URL` is not set, signature validation is silently skipped (use
 
 ---
 
+## Deployment URLs (current server)
+
+The portal and API server are two separate services on the same host:
+
+| Service | Container | External URL |
+|---|---|---|
+| Portal (Next.js) | `portal` | `http://167.71.229.249.nip.io` (port 80) |
+| API server (Express) | `server` | `http://167.71.229.249.nip.io:4000` (port 4000) |
+
+`SERVER_PUBLIC_URL` must point to the **API server**, not the portal:
+
+```
+SERVER_PUBLIC_URL=http://167.71.229.249.nip.io:4000
+```
+
+The full Twilio callback URL is therefore:
+
+```
+http://167.71.229.249.nip.io:4000/webhook/twilio/sms-status
+```
+
+### Note on HTTP vs HTTPS
+
+Twilio strongly prefers HTTPS for webhook URLs and will warn if the URL is plain HTTP. Options:
+
+- **HTTP (current)** — works and is fine for testing; Twilio logs a warning but still delivers callbacks.
+- **Add nginx with TLS** — put a reverse proxy in front of the `server` container on port 443; `SERVER_PUBLIC_URL` then becomes `https://167.71.229.249.nip.io` with no port.
+- **Cloudflare Tunnel / ngrok** — gets you HTTPS without managing certificates, useful if a full nginx setup is too much overhead right now.
+
+---
+
 ## Environment Variables
 
 Add to your `.env`:
@@ -86,7 +117,7 @@ TWILIO_MESSAGING_SERVICE_SID=MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # Optional — enables webhook signature validation
 # No trailing slash
-SERVER_PUBLIC_URL=https://your-server.example.com:4000
+SERVER_PUBLIC_URL=http://167.71.229.249.nip.io:4000
 ```
 
 ---
@@ -97,7 +128,7 @@ SERVER_PUBLIC_URL=https://your-server.example.com:4000
 2. Select your Messaging Service
 3. Under **Integration**, set the **Status Callback URL** to:
    ```
-   https://your-server.example.com:4000/webhook/twilio/sms-status
+   http://167.71.229.249.nip.io:4000/webhook/twilio/sms-status
    ```
 4. Save. Twilio will POST to this URL for every status transition.
 
