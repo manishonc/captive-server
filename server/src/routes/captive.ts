@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument, ConsentRecord } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, ConsentRecord } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 
 const router = Router();
@@ -75,6 +75,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     if (doc.marketingOptIn && captivePortalAccessPointId) {
       scheduleSmsForUser(
         captivePortalAccessPointId,
+        ref.id,
         phone || '',
         phoneCountryCode || ''
       ).catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
@@ -89,6 +90,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
 async function scheduleSmsForUser(
   accessPointId: string,
+  userId: string,
   phone: string,
   phoneCountryCode: string
 ): Promise<void> {
@@ -104,9 +106,32 @@ async function scheduleSmsForUser(
   const smsConfig = data?.marketing?.sms;
   if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
 
-  for (const msg of smsConfig.messages) {
-    if (msg.content) {
-      await scheduleSms(to, msg.content, msg.delayMinutes ?? 0);
+  for (let i = 0; i < smsConfig.messages.length; i++) {
+    const msg = smsConfig.messages[i];
+    if (!msg.content) continue;
+
+    const delayMinutes = msg.delayMinutes ?? 0;
+    const messageSid = await scheduleSms(to, msg.content, delayMinutes);
+
+    if (messageSid) {
+      const record: CaptivePortalMarketingDocument = {
+        channel: 'sms',
+        accessPointId,
+        userId,
+        messageSid,
+        to,
+        content: msg.content,
+        messageIndex: i,
+        delayMinutes,
+        sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+        scheduledAt: FieldValue.serverTimestamp(),
+        deliveryStatus: 'scheduled',
+      };
+      try {
+        await db.collection('CaptivePortal_Marketing').add(record);
+      } catch (err) {
+        console.error('[MARKETING ANALYTICS ERROR]', err);
+      }
     }
   }
 }

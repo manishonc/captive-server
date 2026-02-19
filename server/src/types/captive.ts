@@ -40,6 +40,21 @@ export interface AccessPointMarketing {
   whatsapp?: MarketingChannelConfig<unknown>;
 }
 
+export interface CaptivePortalMarketingDocument {
+  channel: 'sms';
+  accessPointId: string;
+  userId: string;
+  messageSid: string;
+  to: string;
+  content: string;
+  messageIndex: number;
+  delayMinutes: number;
+  sendAt: string;
+  scheduledAt: FieldValue;
+  deliveryStatus: string;
+  statusUpdatedAt?: FieldValue;
+}
+
 export interface CaptivePortalUserDocument {
   firstName: string;
   lastName: string;

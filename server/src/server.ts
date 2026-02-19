@@ -2,13 +2,16 @@ import express, { Request, Response } from 'express';
 import bodyParser from 'body-parser';
 import captiveRoutes from './routes/captive';
 import smsRoutes from './routes/sms';
+import twilioWebhookRoutes from './routes/twilioWebhook';
 
 const app = express();
 const PORT = 4000;
 
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use('/', captiveRoutes);
 app.use('/schedule-sms', smsRoutes);
+app.use('/webhook/twilio/sms-status', twilioWebhookRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
