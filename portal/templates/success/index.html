@@ -98,41 +98,46 @@
       <svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
     </div>
     <h1>You're Connected!</h1>
-    <p class="subtitle">You now have internet access.<br>Tap below to start browsing.</p>
-    <a id="continueBtn" class="btn" href="https://www.google.com" target="_blank">Continue to Browse</a>
-    <p class="hint">If the button doesn't work, close this window and open your browser.</p>
+    <p class="subtitle">You now have internet access.<br>Opening askheidi.app…</p>
+    <a id="continueBtn" class="btn" href="https://askheidi.app/" target="_blank">Open askheidi.app</a>
+    <p class="hint">If it doesn't open automatically, tap the button above.</p>
   </div>
 
   <script>
-    document.getElementById('continueBtn').addEventListener('click', function(e) {
-      e.preventDefault();
+    var TARGET = 'https://askheidi.app/';
 
-      var url = 'https://www.google.com';
+    function openInBrowser() {
       var ua = navigator.userAgent || '';
       var isIOS = /iPhone|iPad|iPod/.test(ua);
       var isAndroid = /Android/.test(ua);
 
       if (isAndroid) {
-        // Android intent to open in Chrome, falls back to default browser
-        var intentUrl = 'intent://' + url.replace(/^https?:\/\//, '') +
-          '#Intent;scheme=https;package=com.android.chrome;end';
+        // Android intent: try Chrome first, fall back to system browser
+        var intentUrl = 'intent://askheidi.app/#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(TARGET) + ';end';
         window.location.href = intentUrl;
-      } else {
-        // iOS and others: window.open opens in Safari/default browser outside CNA
-        var w = window.open(url, '_blank');
-        if (!w) {
-          // Popup blocked — fall back to direct navigation
-          window.location.href = url;
-        }
-      }
-
-      // After a short delay, try to dismiss the CNA by hitting Apple's detect URL
-      // This triggers iOS to re-check connectivity and close the CNA sheet
-      if (isIOS) {
+      } else if (isIOS) {
+        // iOS: window.open launches Safari outside the CNA sheet
+        var w = window.open(TARGET, '_blank');
+        if (!w) { window.location.href = TARGET; }
+        // Poke Apple's detect URL so iOS re-checks and dismisses the CNA
         setTimeout(function() {
           window.location.href = 'http://captive.apple.com/hotspot-detect.html';
-        }, 500);
+        }, 600);
+      } else {
+        // macOS / Windows: navigate directly
+        window.location.href = TARGET;
       }
+    }
+
+    // Auto-open on page load
+    window.addEventListener('load', function() {
+      setTimeout(openInBrowser, 800);
+    });
+
+    // Manual button fallback
+    document.getElementById('continueBtn').addEventListener('click', function(e) {
+      e.preventDefault();
+      openInBrowser();
     });
   </script>
 </body>
