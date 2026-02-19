@@ -42,6 +42,7 @@ router.post('/create-user', async (req, res) => {
         timestamp,
         createdAt: firestore_1.FieldValue.serverTimestamp(),
         captivePortalAccessPointId,
+        marketingOptIn: marketingConsent?.given ?? false,
         privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
         termsConsent: termsConsent || defaultConsent(),
         marketingConsent: marketingConsent || defaultConsent(),

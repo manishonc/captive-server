@@ -37,6 +37,7 @@ export interface CaptivePortalUserDocument {
   timestamp: string;
   createdAt: FieldValue;
   captivePortalAccessPointId: string | null;
+  marketingOptIn: boolean;
   privacyPolicyConsent: ConsentRecord;
   termsConsent: ConsentRecord;
   marketingConsent: ConsentRecord;
