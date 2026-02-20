@@ -2,20 +2,28 @@
 
 ## Overview
 
-When a user opts into marketing at the captive portal, the server schedules SMS messages via Twilio and writes an analytics record to Firestore. Twilio then posts delivery status updates back to a webhook endpoint, keeping those records current.
+When a user opts into marketing at the captive portal, the server detects whether they are a new or returning visitor, schedules SMS messages via Twilio for the appropriate WiFi event, and writes analytics records to Firestore. Twilio then posts delivery status updates back to a webhook endpoint, keeping those records current.
 
 ```
-User opts in
+User submits form
     │
-    ▼
-scheduleSmsForUser()
-    │
-    ├─► scheduleSms() ──► Twilio (message scheduled)
+    ├─► Reconnect detection query (email + accessPointId)
     │         │
-    │         └─► messageSid returned
+    │         ├─ first visit  → wifiEvent: "onConnect"   → create CaptivePortal_Users doc
+    │         └─ returning    → wifiEvent: "onReconnect" → increment connectionCount
     │
-    └─► CaptivePortal_Marketing doc written
-              deliveryStatus: "scheduled"
+    ├─► CaptivePortal_Sessions doc written (every visit)
+    │
+    └─► scheduleSmsForEvent(wifiEvent)   [if marketingOptIn]
+              │
+              ├─► reads events.[wifiEvent].sms from AP config
+              │
+              ├─► scheduleSms() ──► Twilio (message scheduled)
+              │         │
+              │         └─► messageSid returned
+              │
+              └─► CaptivePortal_Marketing doc written
+                        deliveryStatus: "scheduled"
 
 Later...
 
@@ -27,12 +35,71 @@ Twilio POST /webhook/twilio/sms-status
 
 ---
 
+## WiFi Events
+
+SMS scheduling is driven by the `wifiEvent` detected at form submission time.
+
+| Event | When triggered | AP config key |
+|---|---|---|
+| `onConnect` | User's email not seen at this AP before | `events.onConnect.sms` |
+| `onReconnect` | User's email already exists for this AP | `events.onReconnect.sms` |
+
+Each event reads its own independent SMS config from the Access Point document. You can configure different messages, delays, or enable/disable each event independently.
+
+### Access Point SMS config shape
+
+```json
+{
+  "events": {
+    "onConnect": {
+      "sms": {
+        "enabled": true,
+        "messages": [
+          { "content": "Welcome! Here's 10% off your first visit.", "delayMinutes": 0 }
+        ]
+      }
+    },
+    "onReconnect": {
+      "sms": {
+        "enabled": true,
+        "messages": [
+          { "content": "Welcome back! Show this for a free coffee.", "delayMinutes": 5 }
+        ]
+      }
+    }
+  }
+}
+```
+
+If a key is absent or `enabled: false`, no SMS is sent for that event.
+
+---
+
+## Firestore Collection: `CaptivePortal_Sessions`
+
+One document is written per connection event (new and returning). Acts as a connection history log.
+
+| Field | Type | Description |
+|---|---|---|
+| `wifiEvent` | `"onConnect"` \| `"onReconnect"` | Event type for this session |
+| `userId` | string | Ref to `CaptivePortal_Users` doc |
+| `accessPointId` | string | Firestore doc ID of the access point |
+| `mac` | string | Client MAC address at time of this session |
+| `ip` | string | Client IP address at time of this session |
+| `timestamp` | string | ISO 8601 — form submission time |
+| `createdAt` | Timestamp | Firestore server timestamp |
+
+This write is fire-and-forget — a failure does not affect the HTTP response.
+
+---
+
 ## Firestore Collection: `CaptivePortal_Marketing`
 
 One document is created per scheduled SMS.
 
 | Field | Type | Description |
 |---|---|---|
+| `wifiEvent` | `"onConnect"` \| `"onReconnect"` | Event that triggered this SMS |
 | `channel` | `"sms"` | Always `"sms"` for this flow |
 | `accessPointId` | string | Firestore doc ID of the access point |
 | `userId` | string | Firestore doc ID of the `CaptivePortal_Users` record |
@@ -165,7 +232,29 @@ curl -X POST http://localhost:4000/create-user \
 
 Check Firestore → `CaptivePortal_Marketing` for a new document with `deliveryStatus: "scheduled"`.
 
-### 2. Simulate a Twilio status callback
+### 2. Trigger a reconnect
+
+Submit the same email + apmac a second time. Expect:
+- No new `CaptivePortal_Users` doc
+- `connectionCount` incremented on the existing doc
+- A new `CaptivePortal_Sessions` doc with `wifiEvent: "onReconnect"`
+- An onReconnect SMS scheduled (if `events.onReconnect.sms` is configured and enabled)
+
+```bash
+curl -X POST http://localhost:4000/create-user \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Test",
+    "lastName": "User",
+    "email": "test@example.com",
+    "phone": "5551234567",
+    "phoneCountryCode": "1",
+    "apmac": "<your-ap-mac>",
+    "marketingConsent": { "given": true, "timestamp": "2024-01-01T00:00:00Z", "version": "1.0" }
+  }'
+```
+
+### 3. Simulate a Twilio status callback
 
 ```bash
 curl -X POST http://localhost:4000/webhook/twilio/sms-status \
@@ -174,7 +263,7 @@ curl -X POST http://localhost:4000/webhook/twilio/sms-status \
 
 Confirm the matching document's `deliveryStatus` updates to `"delivered"`.
 
-### 3. Test signature validation rejection
+### 4. Test signature validation rejection
 
 ```bash
 curl -X POST http://localhost:4000/webhook/twilio/sms-status \

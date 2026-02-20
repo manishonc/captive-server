@@ -44,7 +44,7 @@ export type WifiEvent = 'onConnect' | 'onReconnect' | 'onDisconnect';
 
 export interface AccessPointEvents {
   onConnect?: AccessPointMarketing;
-  // TODO: onReconnect – implement when reconnect event is supported
+  onReconnect?: AccessPointMarketing;
   // TODO: onDisconnect – implement when disconnect event is supported
 }
 
@@ -77,8 +77,19 @@ export interface CaptivePortalUserDocument {
   timestamp: string;
   createdAt: FieldValue;
   captivePortalAccessPointId: string | null;
+  connectionCount: number;
   marketingOptIn: boolean;
   privacyPolicyConsent: ConsentRecord;
   termsConsent: ConsentRecord;
   marketingConsent: ConsentRecord;
+}
+
+export interface CaptivePortalSessionDocument {
+  wifiEvent: WifiEvent;
+  userId: string;
+  accessPointId: string | null;
+  mac: string;
+  ip: string;
+  timestamp: string;
+  createdAt: FieldValue;
 }

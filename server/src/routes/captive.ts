@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, ConsentRecord } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 
 const router = Router();
@@ -48,51 +48,94 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     console.error('[APMAC LOOKUP ERROR]', err);
   }
 
-  const doc: CaptivePortalUserDocument = {
-    firstName: firstName || '',
-    lastName: lastName || '',
-    email: email || '',
-    phone: phone || '',
-    phoneCountryCode: phoneCountryCode || '',
-    mac: mac || '',
-    ip: ip || '',
-    url: url || '',
-    post: post || '',
-    timestamp,
-    createdAt: FieldValue.serverTimestamp(),
-    captivePortalAccessPointId,
-    marketingOptIn: marketingConsent?.given ?? false,
-    privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
-    termsConsent: termsConsent || defaultConsent(),
-    marketingConsent: marketingConsent || defaultConsent(),
-  };
-
-  try {
-    const ref = await db.collection('CaptivePortal_Users').add(doc);
-    console.log('[NEW CONNECTION]', ref.id, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
-
-    // Fire-and-forget: schedule SMS if marketing opted in and AP has SMS enabled
-    if (doc.marketingOptIn && captivePortalAccessPointId) {
-      scheduleSmsForUser(
-        captivePortalAccessPointId,
-        ref.id,
-        phone || '',
-        phoneCountryCode || ''
-      ).catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
+  // Reconnect detection
+  let existingUserId: string | null = null;
+  if (email && captivePortalAccessPointId) {
+    try {
+      const existingSnap = await db
+        .collection('CaptivePortal_Users')
+        .where('email', '==', email)
+        .where('captivePortalAccessPointId', '==', captivePortalAccessPointId)
+        .limit(1)
+        .get();
+      if (!existingSnap.empty) existingUserId = existingSnap.docs[0].id;
+    } catch (err) {
+      console.error('[RECONNECT LOOKUP ERROR]', err); // non-fatal, falls through as onConnect
     }
-
-    res.json({ success: true, id: ref.id });
-  } catch (err) {
-    console.error('[FIRESTORE ERROR]', err);
-    res.status(500).json({ success: false, message: 'Failed to save user' });
   }
+
+  const wifiEvent: WifiEvent = existingUserId ? 'onReconnect' : 'onConnect';
+  const marketingOptIn = marketingConsent?.given ?? false;
+
+  let userId: string;
+
+  if (!existingUserId) {
+    const doc: CaptivePortalUserDocument = {
+      firstName: firstName || '',
+      lastName: lastName || '',
+      email: email || '',
+      phone: phone || '',
+      phoneCountryCode: phoneCountryCode || '',
+      mac: mac || '',
+      ip: ip || '',
+      url: url || '',
+      post: post || '',
+      timestamp,
+      createdAt: FieldValue.serverTimestamp(),
+      captivePortalAccessPointId,
+      connectionCount: 1,
+      marketingOptIn,
+      privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
+      termsConsent: termsConsent || defaultConsent(),
+      marketingConsent: marketingConsent || defaultConsent(),
+    };
+
+    try {
+      const ref = await db.collection('CaptivePortal_Users').add(doc);
+      userId = ref.id;
+      console.log('[NEW CONNECTION]', userId, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
+    } catch (err) {
+      console.error('[FIRESTORE ERROR]', err);
+      return res.status(500).json({ success: false, message: 'Failed to save user' });
+    }
+  } else {
+    userId = existingUserId;
+    console.log('[RECONNECT]', userId, email, captivePortalAccessPointId);
+    db.collection('CaptivePortal_Users').doc(userId)
+      .update({ connectionCount: FieldValue.increment(1) })
+      .catch((err) => console.error('[RECONNECT COUNT ERROR]', err));
+  }
+
+  // Session history log (fire-and-forget)
+  if (captivePortalAccessPointId) {
+    const sessionDoc: CaptivePortalSessionDocument = {
+      wifiEvent,
+      userId,
+      accessPointId: captivePortalAccessPointId,
+      mac: mac || '',
+      ip: ip || '',
+      timestamp,
+      createdAt: FieldValue.serverTimestamp(),
+    };
+    db.collection('CaptivePortal_Sessions').add(sessionDoc)
+      .catch((err) => console.error('[SESSION LOG ERROR]', err));
+  }
+
+  // SMS scheduling (event-aware)
+  if (marketingOptIn && captivePortalAccessPointId) {
+    scheduleSmsForEvent(captivePortalAccessPointId, userId, phone || '', phoneCountryCode || '', wifiEvent)
+      .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
+  }
+
+  res.json({ success: true, id: userId });
 });
 
-async function scheduleSmsForUser(
+async function scheduleSmsForEvent(
   accessPointId: string,
   userId: string,
   phone: string,
-  phoneCountryCode: string
+  phoneCountryCode: string,
+  wifiEvent: WifiEvent
 ): Promise<void> {
   const to = toE164(phoneCountryCode, phone);
   if (!to) {
@@ -103,7 +146,7 @@ async function scheduleSmsForUser(
   const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
   if (!apDoc.exists) return;
   const data = apDoc.data();
-  const smsConfig = data?.events?.onConnect?.sms;
+  const smsConfig = data?.events?.[wifiEvent]?.sms;
   if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
 
   for (let i = 0; i < smsConfig.messages.length; i++) {
@@ -115,7 +158,7 @@ async function scheduleSmsForUser(
 
     if (messageSid) {
       const record: CaptivePortalMarketingDocument = {
-        wifiEvent: 'onConnect',
+        wifiEvent,
         channel: 'sms',
         accessPointId,
         userId,
@@ -137,8 +180,6 @@ async function scheduleSmsForUser(
   }
 }
 
-// TODO: onReconnect – call scheduleSmsForEvent(accessPointId, userId, phone, phoneCountryCode, 'onReconnect')
-//       when a user reconnects to the WiFi network.
 // TODO: onDisconnect – call scheduleSmsForEvent(accessPointId, userId, phone, phoneCountryCode, 'onDisconnect')
 //       when a user disconnects from the WiFi network.
 
