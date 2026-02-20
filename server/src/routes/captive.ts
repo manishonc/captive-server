@@ -103,7 +103,7 @@ async function scheduleSmsForUser(
   const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
   if (!apDoc.exists) return;
   const data = apDoc.data();
-  const smsConfig = data?.marketing?.sms;
+  const smsConfig = data?.events?.onConnect?.sms;
   if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
 
   for (let i = 0; i < smsConfig.messages.length; i++) {
@@ -115,6 +115,7 @@ async function scheduleSmsForUser(
 
     if (messageSid) {
       const record: CaptivePortalMarketingDocument = {
+        wifiEvent: 'onConnect',
         channel: 'sms',
         accessPointId,
         userId,
@@ -135,6 +136,11 @@ async function scheduleSmsForUser(
     }
   }
 }
+
+// TODO: onReconnect – call scheduleSmsForEvent(accessPointId, userId, phone, phoneCountryCode, 'onReconnect')
+//       when a user reconnects to the WiFi network.
+// TODO: onDisconnect – call scheduleSmsForEvent(accessPointId, userId, phone, phoneCountryCode, 'onDisconnect')
+//       when a user disconnects from the WiFi network.
 
 // ── Field names in CaptivePortal_Documents — update if your schema differs ──
 const DOC_TYPE_FIELD      = 'type';        // field that identifies the document kind

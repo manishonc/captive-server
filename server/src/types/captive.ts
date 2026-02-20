@@ -40,7 +40,16 @@ export interface AccessPointMarketing {
   whatsapp?: MarketingChannelConfig<unknown>;
 }
 
+export type WifiEvent = 'onConnect' | 'onReconnect' | 'onDisconnect';
+
+export interface AccessPointEvents {
+  onConnect?: AccessPointMarketing;
+  // TODO: onReconnect – implement when reconnect event is supported
+  // TODO: onDisconnect – implement when disconnect event is supported
+}
+
 export interface CaptivePortalMarketingDocument {
+  wifiEvent: WifiEvent;
   channel: 'sms';
   accessPointId: string;
   userId: string;
