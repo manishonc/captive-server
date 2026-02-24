@@ -347,6 +347,8 @@
     <div class="body-pad">
       <h1 class="section-heading">Connect to WiFi</h1>
       <p class="section-sub">Enter your details to get online</p>
+      <!-- DEBUG: remove once config pipeline is verified -->
+      <p id="configDebugBadge" style="font-size:10px;text-align:center;color:#aaa;margin-bottom:12px;font-family:monospace"></p>
 
       <!-- Not a real <form> submit yet — we validate here then move to step 2 -->
       <div class="field-group">
@@ -504,6 +506,10 @@ if (!CONFIG.collectEmail) {
 // Footer links
 if (!CONFIG.showPrivacyPolicy)  document.getElementById('privacyLink').style.display = 'none';
 if (!CONFIG.showTermsOfService) document.getElementById('termsLink').style.display   = 'none';
+
+// DEBUG badge — remove once pipeline is verified
+var _src = (typeof window.PORTAL_CONFIG !== 'undefined') ? 'firebase' : 'default';
+document.getElementById('configDebugBadge').textContent = '[config: ' + _src + ' | title: "' + CONFIG.title + '"]';
 
 // ── 1. Aruba params ────────────────────────────────────────────────────────
 var _params = new URLSearchParams(window.location.search);
