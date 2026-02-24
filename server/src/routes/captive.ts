@@ -259,7 +259,7 @@ router.get('/splash-config', async (req: Request, res: Response) => {
     const ap = apSnap.docs[0].data();
     const configId = `${ap.entityType}_${ap.entityId}`;
 
-    const configDoc = await db.collection('CaptivePortal_SplashScreen').doc(configId).get();
+    const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
     if (!configDoc.exists) return res.json({ success: true, config: SPLASH_DEFAULTS });
 
     const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...configDoc.data() };
