@@ -12,6 +12,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Guest WiFi</title>
   <style>
+    :root { --primary: #1c2b4a; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
@@ -174,7 +175,7 @@
     .btn-primary {
       width: 100%;
       padding: 15px;
-      background: #1c2b4a;
+      background: var(--primary);
       color: #fff;
       border: none;
       border-radius: 10px;
@@ -184,7 +185,7 @@
       cursor: pointer;
       transition: background 0.15s;
     }
-    .btn-primary:hover { background: #253662; }
+    .btn-primary:hover { background: color-mix(in srgb, var(--primary) 80%, black); }
     .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .btn-text {
@@ -252,7 +253,7 @@
       text-align: center;
       line-height: 1.8;
     }
-    .footer-privacy a { color: #667eea; text-decoration: none; cursor: pointer; }
+    .footer-privacy a { color: var(--primary); text-decoration: none; cursor: pointer; }
     .footer-privacy a:hover { text-decoration: underline; }
 
     .footer-powered {
@@ -322,7 +323,7 @@
     }
     .modal-ftr button {
       padding: 9px 22px;
-      background: #1c2b4a;
+      background: var(--primary);
       color: #fff;
       border: none;
       border-radius: 8px;
@@ -436,8 +437,8 @@
   <div class="site-footer">
     <div class="footer-privacy">
       This site uses cookies in accordance with your browser's settings.<br>
-      For more information see <a onclick="openDoc(event,'privacy')">Privacy Policy</a>
-      and <a onclick="openDoc(event,'terms')">Terms of Service</a>.
+      For more information see <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+      and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
     </div>
     <div class="footer-powered">
       <span class="footer-powered-text">Powered by</span>
@@ -462,6 +463,48 @@
 </div>
 
 <script>
+// ── 0. Portal branding config (injected server-side; fallback for direct loads) ──
+var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFIG : {
+  title: 'Connect to WiFi',
+  subtitle: 'Enter your details to get online',
+  logoUrl: '',
+  primaryColor: '#1c2b4a',
+  backgroundColor: '#ffffff',
+  collectEmail: true,
+  collectName: true,
+  showMarketingOptIn: true,
+  showPrivacyPolicy: true,
+  showTermsOfService: true,
+};
+
+// Apply branding immediately (synchronous, no flash)
+document.documentElement.style.setProperty('--primary', CONFIG.primaryColor);
+document.body.style.background = CONFIG.backgroundColor;
+
+// Logo
+var _logoEls = document.querySelectorAll('.logo-wrap img');
+if (CONFIG.logoUrl) _logoEls.forEach(function(el) { el.src = CONFIG.logoUrl; });
+
+// Text
+document.querySelector('.section-heading').textContent = CONFIG.title;
+document.querySelector('.section-sub').textContent     = CONFIG.subtitle;
+
+// Conditional fields
+if (!CONFIG.collectName) {
+  ['firstName', 'lastName'].forEach(function(id) {
+    var fg = document.getElementById(id).closest('.field-group');
+    if (fg) fg.style.display = 'none';
+  });
+}
+if (!CONFIG.collectEmail) {
+  var emailFg = document.getElementById('email').closest('.field-group');
+  if (emailFg) emailFg.style.display = 'none';
+}
+
+// Footer links
+if (!CONFIG.showPrivacyPolicy)  document.getElementById('privacyLink').style.display = 'none';
+if (!CONFIG.showTermsOfService) document.getElementById('termsLink').style.display   = 'none';
+
 // ── 1. Aruba params ────────────────────────────────────────────────────────
 var _params = new URLSearchParams(window.location.search);
 function param(k) { return _params.get(k) || ''; }
@@ -586,12 +629,21 @@ function goToConsent() {
   var email     = document.getElementById('email').value.trim();
   var err       = document.getElementById('step1Error');
 
-  if (!firstName) { showErr(err, 'Please enter your first name.'); return; }
-  if (!lastName)  { showErr(err, 'Please enter your last name.');  return; }
-  if (!email || !email.includes('@')) {
-    showErr(err, 'Please enter a valid email address.'); return;
+  if (CONFIG.collectName) {
+    if (!firstName) { showErr(err, 'Please enter your first name.'); return; }
+    if (!lastName)  { showErr(err, 'Please enter your last name.');  return; }
+  }
+  if (CONFIG.collectEmail) {
+    if (!email || !email.includes('@')) {
+      showErr(err, 'Please enter a valid email address.'); return;
+    }
   }
   err.style.display = 'none';
+
+  if (!CONFIG.showMarketingOptIn) {
+    submitConsent(false);
+    return;
+  }
 
   document.getElementById('step1').classList.add('hidden');
   document.getElementById('step2').classList.remove('hidden');

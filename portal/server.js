@@ -26,8 +26,31 @@ app.use('/static/:slug', (req, res, next) => {
   express.static(templateDir)(req, res, next);
 });
 
-// GET / — look up restaurant by apmac, serve its template
-app.get('/', (req, res) => {
+// Fetch splash config from backend (server-to-server, not CNA-side)
+function fetchSplashConfig(apmac) {
+  return new Promise((resolve) => {
+    const reqPath = '/splash-config' + (apmac ? '?apmac=' + encodeURIComponent(apmac) : '');
+    const http = require('http');
+    const r = http.request({
+      hostname: process.env.SERVER_HOST || 'server',
+      port: 4000,
+      path: reqPath,
+      method: 'GET',
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data).config || null); } catch { resolve(null); }
+      });
+    });
+    r.on('error', () => resolve(null));
+    r.setTimeout(2000, () => { r.destroy(); resolve(null); });
+    r.end();
+  });
+}
+
+// GET / — look up restaurant by apmac, serve its template with injected config
+app.get('/', async (req, res) => {
   const { cmd, mac, ip, network, apmac, site, post, url } = req.query;
   if (cmd) {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
@@ -38,12 +61,25 @@ app.get('/', (req, res) => {
   const templateFile = path.join(__dirname, 'templates', slug, 'index.html');
 
   // Fall back to default if the resolved template doesn't exist
-  if (slug !== 'default' && !fs.existsSync(templateFile)) {
+  const resolvedFile = (slug !== 'default' && !fs.existsSync(templateFile))
+    ? path.join(__dirname, 'templates', 'default', 'index.html')
+    : templateFile;
+
+  if (slug !== 'default' && resolvedFile !== templateFile) {
     console.warn(`[WARN] Template not found for slug "${slug}", falling back to default`);
-    return res.sendFile(path.join(__dirname, 'templates', 'default', 'index.html'));
   }
 
-  res.sendFile(templateFile);
+  try {
+    const config = await fetchSplashConfig(apmac);
+    const html = fs.readFileSync(resolvedFile, 'utf8');
+    const injected = config
+      ? html.replace('</head>', `<script>window.PORTAL_CONFIG = ${JSON.stringify(config)};</script>\n</head>`)
+      : html;
+    res.send(injected);
+  } catch (err) {
+    console.error('[PORTAL RENDER ERROR]', err);
+    res.sendFile(resolvedFile);
+  }
 });
 
 // Generic proxy helper for GET requests to the backend server

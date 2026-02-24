@@ -229,4 +229,49 @@ router.get('/terms', async (_req, res) => {
   }
 });
 
+const SPLASH_DEFAULTS = {
+  title: 'Connect to WiFi',
+  subtitle: 'Enter your details to get online',
+  logoUrl: '',
+  primaryColor: '#1c2b4a',
+  backgroundColor: '#ffffff',
+  collectEmail: true,
+  collectName: true,
+  showMarketingOptIn: true,
+  showPrivacyPolicy: true,
+  showTermsOfService: true,
+  redirectUrl: '',
+};
+
+router.get('/splash-config', async (req: Request, res: Response) => {
+  const { apmac } = req.query as { apmac?: string };
+
+  if (!apmac) return res.json({ success: true, config: SPLASH_DEFAULTS });
+
+  try {
+    const apSnap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', apmac)
+      .limit(1)
+      .get();
+
+    if (apSnap.empty) return res.json({ success: true, config: SPLASH_DEFAULTS });
+
+    const ap = apSnap.docs[0].data();
+    const configId = `${ap.entityType}_${ap.entityId}`;
+
+    const configDoc = await db.collection('CaptivePortal_SplashScreen').doc(configId).get();
+    if (!configDoc.exists) return res.json({ success: true, config: SPLASH_DEFAULTS });
+
+    const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...configDoc.data() };
+    // strip Firestore-internal fields
+    delete config.createdAt;
+    delete config.updatedAt;
+
+    res.json({ success: true, config });
+  } catch (err) {
+    console.error('[SPLASH CONFIG ERROR]', err);
+    res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
+  }
+});
+
 export default router;
