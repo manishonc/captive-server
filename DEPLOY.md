@@ -145,3 +145,4 @@ docker compose logs -f freeradius
 ```bash
 docker compose down
 ```
+compose up -d --build 
