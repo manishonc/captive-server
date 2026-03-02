@@ -1,31 +1,16 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
-const fs = require('fs');
 const ejs = require('ejs');
 
 const app = express();
 const PORT = 3000;
 
-// Load restaurant config
-const restaurantsPath = path.join(__dirname, 'restaurants.json');
-let aps = {};
-try {
-  const config = JSON.parse(fs.readFileSync(restaurantsPath, 'utf8'));
-  aps = config.aps || {};
-} catch (err) {
-  console.error('[WARN] Could not load restaurants.json, all requests will use default template:', err.message);
-}
-
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve per-restaurant static assets: /static/<slug>/* → templates/<slug>/*
-app.use('/static/:slug', (req, res, next) => {
-  const slug = req.params.slug.replace(/[^a-z0-9_-]/gi, '');
-  const templateDir = path.join(__dirname, 'templates', slug);
-  express.static(templateDir)(req, res, next);
-});
+const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 
 // Fetch splash config from backend (server-to-server, not CNA-side)
 function fetchSplashConfig(apmac) {
@@ -50,36 +35,41 @@ function fetchSplashConfig(apmac) {
   });
 }
 
-// GET / — look up restaurant by apmac, serve its template with injected config
+// GET / — captive portal entry point
 app.get('/', async (req, res) => {
   const { cmd, mac, ip, network, apmac, site, post, url } = req.query;
   if (cmd) {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
   }
 
-  const apConfig = apmac && aps[apmac];
-  const slug = (apConfig && apConfig.slug) || 'default';
-  const templateFile = path.join(__dirname, 'templates', slug, 'index.html');
-
-  // Fall back to default if the resolved template doesn't exist
-  const resolvedFile = (slug !== 'default' && !fs.existsSync(templateFile))
-    ? path.join(__dirname, 'templates', 'default', 'index.html')
-    : templateFile;
-
-  if (slug !== 'default' && resolvedFile !== templateFile) {
-    console.warn(`[WARN] Template not found for slug "${slug}", falling back to default`);
-  }
-
   try {
     const config = await fetchSplashConfig(apmac);
-    const html = await ejs.renderFile(resolvedFile, {
+    const html = await ejs.renderFile(PORTAL_HTML, {
       portalConfig: config,
       portalConfigJson: config ? JSON.stringify(config) : 'undefined',
     });
     res.send(html);
   } catch (err) {
     console.error('[PORTAL RENDER ERROR]', err);
-    res.sendFile(resolvedFile);
+    res.sendFile(PORTAL_HTML);
+  }
+});
+
+// GET /preview — dashboard preview with amber banner
+app.get('/preview', async (req, res) => {
+  const { apmac } = req.query;
+
+  try {
+    const config = await fetchSplashConfig(apmac);
+    const html = await ejs.renderFile(PORTAL_HTML, {
+      portalConfig: config,
+      portalConfigJson: config ? JSON.stringify(config) : 'undefined',
+      previewMode: true,
+    });
+    res.send(html);
+  } catch (err) {
+    console.error('[PREVIEW RENDER ERROR]', err);
+    res.sendFile(PORTAL_HTML);
   }
 });
 
@@ -236,7 +226,7 @@ app.post('/submit', (req, res) => {
 
 // GET /success — shown after authentication, lets user open real browser
 app.get('/success', (req, res) => {
-  res.sendFile(path.join(__dirname, 'templates', 'success', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'success', 'index.html'));
 });
 
 // Health check
