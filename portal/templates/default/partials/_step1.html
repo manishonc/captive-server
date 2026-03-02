@@ -1,0 +1,47 @@
+    <div class="body-pad">
+      <h1 class="section-heading">Connect to WiFi</h1>
+      <p class="section-sub">Enter your details to get online</p>
+      <!-- DEBUG: remove once config pipeline is verified -->
+      <p id="configDebugBadge"></p>
+
+      <!-- Not a real <form> submit yet — we validate here then move to step 2 -->
+      <div class="field-group">
+        <label class="field-label" for="firstName">First Name</label>
+        <input type="text" id="firstName" name="firstName"
+               placeholder="Jane" autocomplete="given-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="lastName">Last Name</label>
+        <input type="text" id="lastName" name="lastName"
+               placeholder="Smith" autocomplete="family-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="email">Email Address</label>
+        <input type="email" id="email" name="email"
+               placeholder="jane@example.com" autocomplete="email">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label">Phone Number</label>
+        <div class="phone-wrap" id="phoneWrapper">
+          <button type="button" class="country-btn" id="countryBtn"
+                  aria-haspopup="listbox" aria-expanded="false">
+            <span id="selectedFlag">🇬🇧</span>
+            <span id="selectedCode">+44</span>
+            <span class="caret">▼</span>
+          </button>
+          <div id="countryDropdown" class="country-dropdown" role="listbox">
+            <input type="text" id="countrySearch" class="country-search"
+                   placeholder="Search country…" autocomplete="off">
+            <div id="countryList" class="country-list"></div>
+          </div>
+          <input type="tel" id="phone" placeholder="7911 123456"
+                 autocomplete="tel-national">
+        </div>
+      </div>
+
+      <p class="error-msg" id="step1Error"></p>
+      <button class="btn-primary" id="btnNext" onclick="goToConsent()">Continue</button>
+    </div>

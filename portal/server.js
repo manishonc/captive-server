@@ -2,6 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
 const fs = require('fs');
+const ejs = require('ejs');
 
 const app = express();
 const PORT = 3000;
@@ -44,7 +45,7 @@ function fetchSplashConfig(apmac) {
       });
     });
     r.on('error', () => resolve(null));
-    r.setTimeout(2000, () => { r.destroy(); resolve(null); });
+    r.setTimeout(5000, () => { r.destroy(); resolve(null); });
     r.end();
   });
 }
@@ -71,11 +72,11 @@ app.get('/', async (req, res) => {
 
   try {
     const config = await fetchSplashConfig(apmac);
-    const html = fs.readFileSync(resolvedFile, 'utf8');
-    const injected = config
-      ? html.replace('</head>', `<script>window.PORTAL_CONFIG = ${JSON.stringify(config)};</script>\n</head>`)
-      : html;
-    res.send(injected);
+    const html = await ejs.renderFile(resolvedFile, {
+      portalConfig: config,
+      portalConfigJson: config ? JSON.stringify(config) : 'undefined',
+    });
+    res.send(html);
   } catch (err) {
     console.error('[PORTAL RENDER ERROR]', err);
     res.sendFile(resolvedFile);

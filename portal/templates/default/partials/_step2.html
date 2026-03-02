@@ -1,0 +1,33 @@
+    <div class="logo-wrap compact">
+      <img src="/static/default/headerLogo.png" alt="Guest WiFi">
+    </div>
+
+    <div class="body-pad">
+      <h2 class="consent-heading">We care about your privacy</h2>
+      <p class="consent-sub">Stay in touch with us and find out more about<br>the best offers</p>
+
+      <div class="consent-box">
+        <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+        <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+      </div>
+
+      <p class="error-msg" id="step2Error"></p>
+      <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+      <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+        I don't want to stay in touch.
+      </button>
+    </div>
+
+    <!-- Hidden real form — submitted programmatically for Aruba auth -->
+    <form id="portalForm" action="/submit" method="POST" style="display:none">
+      <input type="hidden" id="f_firstName"        name="firstName">
+      <input type="hidden" id="f_lastName"         name="lastName">
+      <input type="hidden" id="f_email"            name="email">
+      <input type="hidden" id="f_phone"            name="phone">
+      <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+      <input type="hidden" id="f_mac"              name="mac">
+      <input type="hidden" id="f_ip"               name="ip">
+      <input type="hidden" id="f_url"              name="url">
+      <input type="hidden" id="f_post"             name="post">
+      <input type="hidden" id="f_apmac"            name="apmac">
+    </form>
