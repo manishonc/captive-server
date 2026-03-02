@@ -8,7 +8,7 @@ const PORT = 3000;
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 
