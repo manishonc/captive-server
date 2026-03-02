@@ -40,8 +40,8 @@ if (!CONFIG.collectEmail) {
 if (!CONFIG.showPrivacyPolicy)  document.getElementById('privacyLink').style.display = 'none';
 if (!CONFIG.showTermsOfService) document.getElementById('termsLink').style.display   = 'none';
 
-// DEBUG badge — remove once pipeline is verified
-var _src = (typeof window.PORTAL_CONFIG !== 'undefined') ? 'firebase' : 'default';
-var _badge = document.getElementById('configDebugBadge');
-_badge.style.cssText = 'font-size:10px;text-align:left;color:#555;margin:0 0 12px;font-family:monospace;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all';
-_badge.textContent = '[source: ' + _src + ']\n' + JSON.stringify(CONFIG, null, 2);
+// DEBUG badge — hidden, remove once pipeline is verified
+// var _src = (typeof window.PORTAL_CONFIG !== 'undefined') ? 'firebase' : 'default';
+// var _badge = document.getElementById('configDebugBadge');
+// _badge.style.cssText = 'font-size:10px;text-align:left;color:#555;margin:0 0 12px;font-family:monospace;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-all';
+// _badge.textContent = '[source: ' + _src + ']\n' + JSON.stringify(CONFIG, null, 2);
