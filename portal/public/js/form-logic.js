@@ -53,6 +53,11 @@ var CONSENT_TEXT =
 
 // ── 5. Step 2 → Submit ────────────────────────────────────────────────────
 async function submitConsent(marketing) {
+  if (window.PREVIEW_MODE) {
+    window.location.href = '/success?preview=1';
+    return;
+  }
+
   var btnAccept  = document.getElementById('btnAccept');
   var btnDecline = document.getElementById('btnDecline');
   var err        = document.getElementById('step2Error');

@@ -305,8 +305,7 @@
   <% } %>
 </head>
 <body>
-<% const DISABLE_PREVIEW_BANNER = true; %>
-<% if (!DISABLE_PREVIEW_BANNER && typeof previewMode !== 'undefined' && previewMode) { %>
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
 <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
             text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
   &#9888; PREVIEW MODE — not a live session
@@ -433,6 +432,7 @@
   </div>
 </div>
 
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
 <script src="/js/config.js"></script>
 <script src="/js/country-selector.js"></script>
 <script src="/js/form-logic.js"></script>

@@ -90,9 +90,22 @@
       margin-top: 16px;
       line-height: 1.4;
     }
+    .back-link {
+      display: block;
+      margin-top: 12px;
+      font-size: 13px;
+      color: #888;
+      text-decoration: none;
+    }
+    .back-link:hover { color: #555; }
   </style>
 </head>
 <body>
+  <div id="previewBanner" style="display:none; position:fixed;top:0;left:0;right:0;z-index:9999;
+       background:#f59e0b;color:#000;text-align:center;font-size:12px;font-weight:700;
+       padding:6px;letter-spacing:.5px;">
+    &#9888; PREVIEW MODE &#8212; no data stored, internet not actually connected
+  </div>
   <div class="card">
     <div class="checkmark">
       <svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>
@@ -102,14 +115,23 @@
     <!-- target="_blank" is key: macOS CNA opens _blank links in the real browser (Safari/Chrome) -->
     <a id="continueBtn" class="btn" href="https://askheidi.app/" target="_blank">Open askheidi.app</a>
     <p class="hint">If the button doesn't work, close this window and open your browser.</p>
+    <a id="backLink" class="back-link" href="/?preview=1" style="display:none;">&#8592; Back to Portal</a>
   </div>
 
   <script>
+    var isPreview = new URLSearchParams(location.search).get('preview') === '1';
+
+    if (isPreview) {
+      document.getElementById('previewBanner').style.display = 'block';
+      document.body.style.paddingTop = '30px';
+      document.getElementById('backLink').style.display = 'block';
+    }
+
     var TARGET = 'https://askheidi.app/';
     var ua = navigator.userAgent || '';
     var isIOS = /iPhone|iPad|iPod/.test(ua);
 
-    if (isIOS) {
+    if (!isPreview && isIOS) {
       // iOS: auto-trigger — window.open opens Safari outside the CNA sheet
       window.addEventListener('load', function() {
         setTimeout(function() {
