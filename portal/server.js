@@ -36,8 +36,10 @@ function fetchSplashConfig(apmac) {
 }
 
 // GET / — captive portal entry point
+// Pass ?preview=1 to render with the preview banner (dashboard use only).
+// Aruba never appends this param so real users are unaffected.
 app.get('/', async (req, res) => {
-  const { cmd, mac, ip, network, apmac, site, post, url } = req.query;
+  const { cmd, mac, ip, network, apmac, site, post, url, preview } = req.query;
   if (cmd) {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
   }
@@ -47,28 +49,11 @@ app.get('/', async (req, res) => {
     const html = await ejs.renderFile(PORTAL_HTML, {
       portalConfig: config,
       portalConfigJson: config ? JSON.stringify(config) : 'undefined',
+      previewMode: preview === '1',
     });
     res.send(html);
   } catch (err) {
     console.error('[PORTAL RENDER ERROR]', err);
-    res.sendFile(PORTAL_HTML);
-  }
-});
-
-// GET /preview — dashboard preview with amber banner
-app.get('/preview', async (req, res) => {
-  const { apmac } = req.query;
-
-  try {
-    const config = await fetchSplashConfig(apmac);
-    const html = await ejs.renderFile(PORTAL_HTML, {
-      portalConfig: config,
-      portalConfigJson: config ? JSON.stringify(config) : 'undefined',
-      previewMode: true,
-    });
-    res.send(html);
-  } catch (err) {
-    console.error('[PREVIEW RENDER ERROR]', err);
     res.sendFile(PORTAL_HTML);
   }
 });
