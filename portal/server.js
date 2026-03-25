@@ -125,7 +125,7 @@ app.post('/submit', (req, res) => {
     timestamp: new Date().toISOString()
   }));
 
-  const switchUrl = `http://${post}/swarm.cgi`;
+  const switchUrl = `https://${post}/swarm.cgi`;
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
   const redirectUrl = `http://${portalDomain}/success`;
 
