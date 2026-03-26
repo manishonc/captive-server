@@ -1,0 +1,10 @@
+services:
+  portal:
+    build:
+      context: ./portal
+    container_name: portal
+    environment:
+      - NODE_ENV=production
+      - PORTAL_DOMAIN=${PORTAL_DOMAIN}
+      - SERVER_HOST=${SERVER_HOST}
+    restart: unless-stopped
