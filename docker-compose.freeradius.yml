@@ -1,0 +1,9 @@
+services:
+  freeradius:
+    build:
+      context: ./freeradius
+    container_name: freeradius
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    restart: unless-stopped
