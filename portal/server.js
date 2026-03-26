@@ -5,6 +5,7 @@ const ejs = require('ejs');
 
 const app = express();
 const PORT = 3000;
+const SERVER_PORT = parseInt(process.env.SERVER_PORT || '4000', 10);
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
@@ -19,7 +20,7 @@ function fetchSplashConfig(apmac) {
     const http = require('http');
     const r = http.request({
       hostname: process.env.SERVER_HOST || 'server',
-      port: 4000,
+      port: SERVER_PORT,
       path: reqPath,
       method: 'GET',
     }, (res) => {
