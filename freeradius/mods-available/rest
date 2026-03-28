@@ -1,5 +1,5 @@
 rest {
-	connect_uri = "http://server:4000"
+	connect_uri = "https://api.heidifi.ai"
 
 	connect_timeout = 4.0
 	timeout = 4.0
