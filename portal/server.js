@@ -17,7 +17,8 @@ const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 function fetchSplashConfig(apmac) {
   return new Promise((resolve) => {
     const reqPath = '/splash-config' + (apmac ? '?apmac=' + encodeURIComponent(apmac) : '');
-    const http = require('http');
+    const useHttps = SERVER_PORT === 443;
+    const http = require(useHttps ? 'https' : 'http');
     const r = http.request({
       hostname: process.env.SERVER_HOST || 'server',
       port: SERVER_PORT,
@@ -68,10 +69,11 @@ app.get('/', async (req, res) => {
 
 // Generic proxy helper for GET requests to the backend server
 function proxyGet(backendPath, res) {
-  const http = require('http');
+  const useHttps = SERVER_PORT === 443;
+  const http = require(useHttps ? 'https' : 'http');
   const proxyReq = http.request({
     hostname: process.env.SERVER_HOST || 'server',
-    port: 4000,
+    port: SERVER_PORT,
     path: backendPath,
     method: 'GET',
   }, (proxyRes) => {
@@ -93,11 +95,12 @@ app.get('/api/terms', (_req, res) => proxyGet('/terms', res));
 
 // POST /api/create-user — proxy to server service to persist user in Firestore
 app.post('/api/create-user', (req, res) => {
-  const http = require('http');
+  const useHttps = SERVER_PORT === 443;
+  const http = require(useHttps ? 'https' : 'http');
   const payload = JSON.stringify(req.body);
   const proxyReq = http.request({
     hostname: process.env.SERVER_HOST || 'server',
-    port: 4000,
+    port: SERVER_PORT,
     path: '/create-user',
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
