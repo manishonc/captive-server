@@ -12,6 +12,9 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
+const TEMPLATES_DIR = path.join(__dirname, 'public', 'templates');
+const VALID_TEMPLATES = ['classic', 'minimal', 'dark'];
+const DEFAULT_TEMPLATE = 'classic';
 
 // Fetch splash config from backend (server-to-server, not CNA-side)
 function fetchSplashConfig(apmac) {
@@ -55,7 +58,10 @@ app.get('/', async (req, res) => {
     }
 
     const config = (result && result.config) || null;
-    const html = await ejs.renderFile(PORTAL_HTML, {
+    const rawId = config?.templateId || DEFAULT_TEMPLATE;
+    const templateId = VALID_TEMPLATES.includes(rawId) ? rawId : DEFAULT_TEMPLATE;
+    const templatePath = path.join(TEMPLATES_DIR, `${templateId}.html`);
+    const html = await ejs.renderFile(templatePath, {
       portalConfig: config,
       portalConfigJson: config ? JSON.stringify(config) : 'undefined',
       previewMode: preview === '1',

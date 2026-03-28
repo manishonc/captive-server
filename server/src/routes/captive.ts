@@ -230,6 +230,7 @@ router.get('/terms', async (_req, res) => {
 });
 
 const SPLASH_DEFAULTS = {
+  templateId: 'classic',
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
   logoUrl: '',
