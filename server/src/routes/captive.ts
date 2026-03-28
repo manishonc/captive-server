@@ -281,16 +281,23 @@ router.post('/radius/authorize', async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
 
-    // Called-Station-Id arrives as { value: "AA-BB-CC-DD-EE-FF:SSID" } or plain string
-    const rawCalledStation: string =
-      (typeof body['Called-Station-Id'] === 'object'
-        ? body['Called-Station-Id']?.value
-        : body['Called-Station-Id']) || '';
+    // Called-Station-Id can arrive as plain string, { value: "..." }, or { value: ["..."] }
+    let rawValue = typeof body['Called-Station-Id'] === 'object'
+      ? body['Called-Station-Id']?.value
+      : body['Called-Station-Id'];
+    if (Array.isArray(rawValue)) rawValue = rawValue[0];
+    const rawCalledStation: string = String(rawValue || '');
 
-    // Strip SSID suffix (everything after last colon that follows a 2-char hex pair)
-    // e.g. "AA-BB-CC-DD-EE-FF:MySSID" → "AA:BB:CC:DD:EE:FF"
-    const macPart = rawCalledStation.split(':').slice(0, 6).join(':');
-    const normalizedMac = macPart.replace(/-/g, ':').toLowerCase();
+    // Normalize to AA:BB:CC:DD:EE:FF
+    // Handles: "AA-BB-CC-DD-EE-FF:SSID", "AA:BB:CC:DD:EE:FF", "aabbccddeeff"
+    let normalizedMac: string;
+    const macPart = rawCalledStation.split(':').slice(0, 6).join(':').replace(/-/g, ':').toLowerCase();
+    if (/^[0-9a-f]{12}$/.test(macPart)) {
+      // no separators — insert colons every 2 chars
+      normalizedMac = macPart.match(/.{2}/g)!.join(':');
+    } else {
+      normalizedMac = macPart;
+    }
 
     console.log('[RADIUS AUTH]', { rawCalledStation, normalizedMac });
 
