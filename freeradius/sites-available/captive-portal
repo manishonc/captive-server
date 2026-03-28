@@ -1,0 +1,45 @@
+server captive-portal {
+	listen {
+		type = auth
+		ipaddr = *
+		port = 1812
+	}
+
+	listen {
+		type = acct
+		ipaddr = *
+		port = 1813
+	}
+
+	authorize {
+		rest
+		if (ok || updated) {
+			update control {
+				Auth-Type := Accept
+			}
+		}
+	}
+
+	authenticate {
+		Auth-Type Accept {
+			ok
+		}
+	}
+
+	accounting {
+		ok
+	}
+
+	session {
+	}
+
+	post-auth {
+		ok
+	}
+
+	pre-proxy {
+	}
+
+	post-proxy {
+	}
+}

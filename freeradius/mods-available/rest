@@ -1,0 +1,21 @@
+rest {
+	connect_uri = "http://server:4000"
+
+	connect_timeout = 4.0
+	timeout = 4.0
+
+	authorize {
+		uri = "${..connect_uri}/radius/authorize"
+		method = 'post'
+		body = 'json'
+		tls = ${..tls}
+	}
+
+	# Not used — all auth is Accept/Reject from authorize
+	authenticate {
+		uri = "${..connect_uri}/radius/authorize"
+		method = 'post'
+		body = 'json'
+		tls = ${..tls}
+	}
+}

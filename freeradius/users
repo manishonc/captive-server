@@ -1,10 +1,7 @@
-# Auto-generated from portal/restaurants.json
-# Run: node generate-users.js
+# AP session timeouts are now managed dynamically via Firebase.
+# FreeRADIUS calls the server REST endpoint (/radius/authorize) on each auth.
+# This file is kept as a safety fallback only.
 
-# AP 54:f0:b1:c8:7f:00 → default (timeout: 36000s)
-DEFAULT Called-Station-Id =~ "54.f0.b1.c8.7f.00", Auth-Type := Accept
-	Session-Timeout = 36000
-
-# Fallback for unknown APs
+# Fallback: accept with default timeout if REST module is unavailable
 DEFAULT Auth-Type := Accept
 	Session-Timeout = 36000

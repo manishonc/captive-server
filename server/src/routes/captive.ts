@@ -274,4 +274,54 @@ router.get('/splash-config', async (req: Request, res: Response) => {
   }
 });
 
+// POST /radius/authorize — called by FreeRADIUS REST module on every WiFi auth
+// Parses the AP MAC from Called-Station-Id, looks up sessionTimeout in Firestore.
+// Returns Accept + Session-Timeout if AP is registered, Reject (403) if not.
+router.post('/radius/authorize', async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+
+    // Called-Station-Id arrives as { value: "AA-BB-CC-DD-EE-FF:SSID" } or plain string
+    const rawCalledStation: string =
+      (typeof body['Called-Station-Id'] === 'object'
+        ? body['Called-Station-Id']?.value
+        : body['Called-Station-Id']) || '';
+
+    // Strip SSID suffix (everything after last colon that follows a 2-char hex pair)
+    // e.g. "AA-BB-CC-DD-EE-FF:MySSID" → "AA:BB:CC:DD:EE:FF"
+    const macPart = rawCalledStation.split(':').slice(0, 6).join(':');
+    const normalizedMac = macPart.replace(/-/g, ':').toLowerCase();
+
+    console.log('[RADIUS AUTH]', { rawCalledStation, normalizedMac });
+
+    if (!normalizedMac || normalizedMac.split(':').length !== 6) {
+      console.warn('[RADIUS AUTH] Invalid Called-Station-Id:', rawCalledStation);
+      return res.status(403).json({ 'control:Auth-Type': { value: 'Reject', op: ':=' } });
+    }
+
+    const apSnap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', normalizedMac)
+      .limit(1)
+      .get();
+
+    if (apSnap.empty) {
+      console.log('[RADIUS AUTH] Unknown AP, rejecting:', normalizedMac);
+      return res.status(403).json({ 'control:Auth-Type': { value: 'Reject', op: ':=' } });
+    }
+
+    const ap = apSnap.docs[0].data();
+    const sessionTimeout: number = ap.sessionTimeout || 36000;
+
+    console.log('[RADIUS AUTH] Accept AP:', normalizedMac, 'timeout:', sessionTimeout);
+
+    return res.json({
+      'control:Auth-Type': { value: 'Accept', op: ':=' },
+      'reply:Session-Timeout': { value: sessionTimeout, op: '=' },
+    });
+  } catch (err) {
+    console.error('[RADIUS AUTH ERROR]', err);
+    return res.status(500).json({ 'control:Auth-Type': { value: 'Reject', op: ':=' } });
+  }
+});
+
 export default router;
