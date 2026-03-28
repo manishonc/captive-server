@@ -8,7 +8,6 @@ rest {
 		uri = "${..connect_uri}/radius/authorize"
 		method = 'post'
 		body = 'json'
-		tls = ${..tls}
 	}
 
 	# Not used — all auth is Accept/Reject from authorize
@@ -16,6 +15,5 @@ rest {
 		uri = "${..connect_uri}/radius/authorize"
 		method = 'post'
 		body = 'json'
-		tls = ${..tls}
 	}
 }
