@@ -6,4 +6,10 @@ services:
     ports:
       - "1812:1812/udp"
       - "1813:1813/udp"
+    networks:
+      - captive_net
     restart: unless-stopped
+
+networks:
+  captive_net:
+    external: true

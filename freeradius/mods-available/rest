@@ -4,6 +4,10 @@ rest {
 	connect_timeout = 4.0
 	timeout = 4.0
 
+	pool {
+		start = 0
+	}
+
 	authorize {
 		uri = "${..connect_uri}/radius/authorize"
 		method = 'post'
