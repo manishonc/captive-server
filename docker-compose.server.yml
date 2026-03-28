@@ -12,9 +12,9 @@ services:
       - TWILIO_MESSAGING_SERVICE_SID=${TWILIO_MESSAGING_SERVICE_SID}
       - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
     networks:
-      - captive_net
+      - coolify
     restart: unless-stopped
 
 networks:
-  captive_net:
+  coolify:
     external: true

@@ -8,9 +8,9 @@ services:
       - PORTAL_DOMAIN=${PORTAL_DOMAIN}
       - SERVER_HOST=${SERVER_HOST}
     networks:
-      - captive_net
+      - coolify
     restart: unless-stopped
 
 networks:
-  captive_net:
+  coolify:
     external: true
