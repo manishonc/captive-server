@@ -254,7 +254,7 @@ router.get('/splash-config', async (req: Request, res: Response) => {
       .limit(1)
       .get();
 
-    if (apSnap.empty) return res.json({ success: true, config: SPLASH_DEFAULTS });
+    if (apSnap.empty) return res.json({ success: true, registered: false });
 
     const ap = apSnap.docs[0].data();
     const configId = `${ap.entityType}_${ap.entityId}`;

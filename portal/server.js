@@ -27,7 +27,7 @@ function fetchSplashConfig(apmac) {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => {
-        try { resolve(JSON.parse(data).config || null); } catch { resolve(null); }
+        try { resolve(JSON.parse(data)); } catch { resolve(null); }
       });
     });
     r.on('error', () => resolve(null));
@@ -46,7 +46,14 @@ app.get('/', async (req, res) => {
   }
 
   try {
-    const config = await fetchSplashConfig(apmac);
+    const result = await fetchSplashConfig(apmac);
+    const apRegistered = !apmac || !result || result.registered !== false;
+
+    if (!apRegistered) {
+      return res.sendFile(path.join(__dirname, 'public', 'unregistered.html'));
+    }
+
+    const config = (result && result.config) || null;
     const html = await ejs.renderFile(PORTAL_HTML, {
       portalConfig: config,
       portalConfigJson: config ? JSON.stringify(config) : 'undefined',
