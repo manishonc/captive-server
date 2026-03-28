@@ -1,8 +1,8 @@
 # Auto-generated from portal/restaurants.json
 # Run: node generate-users.js
 
-# AP 54:f0:b1:c8:7f:00 → default (timeout: 36000s)
-DEFAULT Called-Station-Id =~ "54.f0.b1.c8.7f.00", Auth-Type := Accept
+# AP 56:f0:b1:c8:7f:00 → default (timeout: 36000s)
+DEFAULT Called-Station-Id =~ "56.f0.b1.c8.7f.00", Auth-Type := Accept
 	Session-Timeout = 36000
 
 # Fallback for unknown APs
