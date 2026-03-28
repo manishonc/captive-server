@@ -44,7 +44,7 @@ function fetchSplashConfig(apmac) {
 // Pass ?preview=1 to render with the preview banner (dashboard use only).
 // Aruba never appends this param so real users are unaffected.
 app.get('/', async (req, res) => {
-  const { cmd, mac, ip, network, apmac, site, post, url, preview } = req.query;
+  const { cmd, mac, ip, network, apmac, site, post, url, preview, templateId: templateIdOverride } = req.query;
   if (cmd) {
     console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
   }
@@ -58,7 +58,10 @@ app.get('/', async (req, res) => {
     }
 
     const config = (result && result.config) || null;
-    const rawId = config?.templateId || DEFAULT_TEMPLATE;
+    // In preview mode, allow ?templateId= to override the saved template (CMS template picker)
+    const rawId = (preview === '1' && templateIdOverride && VALID_TEMPLATES.includes(templateIdOverride))
+      ? templateIdOverride
+      : (config?.templateId || DEFAULT_TEMPLATE);
     const templateId = VALID_TEMPLATES.includes(rawId) ? rawId : DEFAULT_TEMPLATE;
     const templatePath = path.join(TEMPLATES_DIR, `${templateId}.html`);
     const html = await ejs.renderFile(templatePath, {
