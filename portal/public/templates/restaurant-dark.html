@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest WiFi</title>
+  <style>
+    :root { --primary: #be123c; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      background: #1c1917;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow-x: hidden;
+      padding: 16px;
+    }
+
+    /* ── Background ────────────────────────────────────── */
+    .bg-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+    }
+    .bg-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+      opacity: 0.3;
+    }
+    .bg-gradient {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to top, #0c0a09 0%, rgba(28,25,23,0.8) 50%, rgba(28,25,23,0.4) 100%);
+    }
+
+    /* Hidden: satisfies config.js `.logo-wrap img` querySelector */
+    .logo-wrap { display: none; }
+
+    /* ── Portal wrap ───────────────────────────────────── */
+    .portal-wrap {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      max-width: 448px;
+      animation: fadeInUp 0.4s ease both;
+    }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Card ──────────────────────────────────────────── */
+    .card {
+      background: rgba(12, 10, 9, 0.8);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(41, 37, 36, 0.5);
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+    }
+
+    /* ── Card header ───────────────────────────────────── */
+    .card-header {
+      padding: 32px;
+      text-align: center;
+      border-bottom: 1px solid rgba(41, 37, 36, 0.5);
+    }
+    .icon-wrap {
+      width: 64px;
+      height: 64px;
+      background: rgba(76, 5, 25, 0.5);
+      border: 1px solid rgba(136, 19, 55, 0.5);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+      color: #fb7185;
+    }
+    .section-heading {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 28px;
+      font-weight: 400;
+      color: #f5f5f4;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .section-sub {
+      font-size: 13px;
+      color: #a8a29e;
+      font-weight: 300;
+    }
+
+    /* ── Card body ─────────────────────────────────────── */
+    .card-body {
+      padding: 32px;
+    }
+    .form-title {
+      font-size: 17px;
+      color: #e7e5e4;
+      font-weight: 500;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .form-sub {
+      font-size: 13px;
+      color: #a8a29e;
+      text-align: center;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+
+    /* ── Steps ─────────────────────────────────────────── */
+    .step { display: flex; flex-direction: column; }
+    .step.hidden { display: none; }
+
+    /* ── Form fields ───────────────────────────────────── */
+    .field-group { margin-bottom: 12px; }
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #78716c;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"] {
+      width: 100%;
+      padding: 13px 16px;
+      background: rgba(28, 25, 23, 0.5);
+      border: 1px solid #44403c;
+      border-radius: 12px;
+      font-size: 16px;
+      color: #f5f5f4;
+      outline: none;
+      -webkit-appearance: none;
+      appearance: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input::placeholder { color: #78716c; }
+    input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(190, 18, 60, 0.2);
+    }
+
+    /* ── Phone / country selector ──────────────────────── */
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 12px;
+      background: rgba(28, 25, 23, 0.5);
+      border: 1px solid #44403c;
+      border-radius: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 86px;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover, .country-btn.open {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(190, 18, 60, 0.2);
+    }
+    #selectedFlag { font-size: 18px; line-height: 1; }
+    #selectedCode { font-weight: 700; color: #a8a29e; font-size: 13px; }
+    .caret { font-size: 8px; color: #57534e; }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 300;
+      background: #1c1917;
+      border: 1px solid #44403c;
+      border-radius: 14px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+      width: 256px;
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 10px 12px;
+      border: none;
+      border-bottom: 1px solid #292524;
+      font-size: 14px;
+      outline: none;
+      border-radius: 14px 14px 0 0;
+      background: #1c1917;
+      color: #e7e5e4;
+    }
+    .country-search::placeholder { color: #57534e; }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #d6d3d1;
+    }
+    .country-option:hover { background: #292524; }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: #57534e; font-size: 12px; }
+
+    /* ── Buttons ───────────────────────────────────────── */
+    .btn-primary {
+      width: 100%;
+      padding: 15px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 24px rgba(136, 19, 55, 0.2);
+    }
+    .btn-primary:hover { background: color-mix(in srgb, var(--primary) 80%, black); }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-text {
+      width: 100%;
+      padding: 11px;
+      background: none;
+      border: none;
+      font-size: 14px;
+      color: #78716c;
+      text-align: center;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    .btn-text:hover { color: #a8a29e; }
+
+    .error-msg {
+      font-size: 13px;
+      color: #fb7185;
+      margin-bottom: 10px;
+      display: none;
+    }
+
+    /* ── Consent (step 2) ──────────────────────────────── */
+    .consent-heading {
+      font-size: 22px;
+      font-weight: 600;
+      color: #f5f5f4;
+      text-align: center;
+      margin-bottom: 8px;
+      line-height: 1.3;
+    }
+    .consent-sub {
+      font-size: 14px;
+      color: #a8a29e;
+      text-align: center;
+      margin-bottom: 20px;
+      line-height: 1.55;
+    }
+    .consent-box {
+      background: rgba(28, 25, 23, 0.5);
+      border: 1px solid #292524;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: #a8a29e;
+      line-height: 1.7;
+      text-align: left;
+    }
+    .consent-box p + p { margin-top: 12px; }
+
+    /* ── Footer ────────────────────────────────────────── */
+    .site-footer {
+      border-top: 1px solid rgba(41, 37, 36, 0.5);
+      padding: 14px 32px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .footer-privacy {
+      font-size: 11px;
+      color: #57534e;
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer-privacy a { color: var(--primary); text-decoration: none; cursor: pointer; }
+    .footer-privacy a:hover { text-decoration: underline; }
+    .footer-powered { display: flex; align-items: center; gap: 8px; }
+    .footer-powered-text { font-size: 12px; color: #57534e; font-weight: 500; }
+    .footer-powered img { height: 22px; object-fit: contain; vertical-align: middle; }
+
+    /* ── Privacy / Terms modal ─────────────────────────── */
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #1c1917;
+      border: 1px solid #292524;
+      border-radius: 20px;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-hdr {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid #292524;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-hdr h2 { font-size: 17px; font-weight: 700; color: #f5f5f4; }
+    .modal-close-x {
+      background: none; border: none;
+      font-size: 24px; color: #57534e; cursor: pointer; line-height: 1; padding: 0 2px;
+    }
+    .modal-close-x:hover { color: #a8a29e; }
+    #ppContent {
+      padding: 18px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      color: #a8a29e;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 20px;
+      border-top: 1px solid #292524;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 9px 22px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+  </style>
+  <% if (portalConfig) { %>
+  <script>window.PORTAL_CONFIG = <%- portalConfigJson %>;</script>
+  <% } %>
+  <script>
+    if (window.PORTAL_CONFIG && window.PORTAL_CONFIG.backgroundColor === '#ffffff') {
+      window.PORTAL_CONFIG = Object.assign({}, window.PORTAL_CONFIG, { backgroundColor: '' });
+    }
+  </script>
+</head>
+<body>
+
+<!-- Full-screen background -->
+<div class="bg-layer">
+  <img class="bg-img"
+       src="https://images.unsplash.com/photo-1514933651103-005eec06c04b?q=80&w=1934&auto=format&fit=crop"
+       alt="">
+  <div class="bg-gradient"></div>
+</div>
+
+<!-- Hidden: satisfies config.js `.logo-wrap img` querySelector -->
+<div class="logo-wrap">
+  <img src="/headerLogo.png" alt="">
+</div>
+
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
+            text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
+  &#9888; PREVIEW MODE — not a live session
+</div>
+<% } %>
+
+<div class="portal-wrap">
+  <div class="card">
+
+    <!-- Card header -->
+    <div class="card-header">
+      <div class="icon-wrap">
+        <!-- UtensilsCrossed icon -->
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m16 2-2.3 2.3a3 3 0 0 0 0 4.2l1.8 1.8a3 3 0 0 0 4.2 0L22 8"/>
+          <path d="M15 15 3.3 3.3a4.2 4.2 0 0 0 0 6l7.3 7.3c.7.7 2 .7 2.8 0L15 15Zm0 0 7 7"/>
+          <path d="m2.1 21.8 6.4-6.3"/>
+          <path d="m19 5-7 7"/>
+        </svg>
+      </div>
+      <h1 class="section-heading">L&#8217;Osteria</h1>
+      <p class="section-sub">Authentic Italian Dining</p>
+    </div>
+
+    <!-- Card body -->
+    <div class="card-body">
+
+      <p class="form-title">Complimentary Wi-Fi</p>
+      <p class="form-sub">Connect to our network to view our digital menu and wine list.</p>
+
+      <!-- Step 1 — Collect details -->
+      <div id="step1" class="step">
+        <p id="configDebugBadge" style="display:none"></p>
+
+        <div class="field-group">
+          <label class="field-label" for="firstName">First Name</label>
+          <input type="text" id="firstName" name="firstName"
+                 placeholder="Jane" autocomplete="given-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="lastName">Last Name</label>
+          <input type="text" id="lastName" name="lastName"
+                 placeholder="Smith" autocomplete="family-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="email">Email Address</label>
+          <input type="email" id="email" name="email"
+                 placeholder="jane@example.com" autocomplete="email">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label">Phone Number</label>
+          <div class="phone-wrap" id="phoneWrapper">
+            <button type="button" class="country-btn" id="countryBtn"
+                    aria-haspopup="listbox" aria-expanded="false">
+              <span id="selectedFlag">🇬🇧</span>
+              <span id="selectedCode">+44</span>
+              <span class="caret">▼</span>
+            </button>
+            <div id="countryDropdown" class="country-dropdown" role="listbox">
+              <input type="text" id="countrySearch" class="country-search"
+                     placeholder="Search country…" autocomplete="off">
+              <div id="countryList" class="country-list"></div>
+            </div>
+            <input type="tel" id="phone" placeholder="7911 123456"
+                   autocomplete="tel-national">
+          </div>
+        </div>
+
+        <p class="error-msg" id="step1Error"></p>
+        <button class="btn-primary" id="btnNext" onclick="goToConsent()">
+          <!-- Menu icon -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="4" x2="20" y1="6" y2="6"/>
+            <line x1="4" x2="20" y1="12" y2="12"/>
+            <line x1="4" x2="20" y1="18" y2="18"/>
+          </svg>
+          Connect &amp; View Menu
+        </button>
+      </div>
+
+      <!-- Step 2 — Privacy & Consent -->
+      <div id="step2" class="step hidden">
+        <h2 class="consent-heading">We care about your privacy</h2>
+        <p class="consent-sub">Stay in touch with us and find out more about the best offers</p>
+
+        <div class="consent-box">
+          <p>I consent to the collection and use of my personal data, provided via WiFi portal
+          registration, by this venue for marketing purposes. I understand that I may withdraw my
+          consent at any time, and that this will not affect the legality of any processing carried
+          out prior to my withdrawal.</p>
+          <p>I also consent to receiving marketing communications from this venue via email or other
+          electronic means. I understand that I can unsubscribe at any time using the method
+          provided in each communication.</p>
+        </div>
+
+        <p class="error-msg" id="step2Error"></p>
+        <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+        <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+          I don't want to stay in touch.
+        </button>
+
+        <!-- Hidden Aruba auth form — submitted programmatically -->
+        <form id="portalForm" action="/submit" method="POST" style="display:none">
+          <input type="hidden" id="f_firstName"        name="firstName">
+          <input type="hidden" id="f_lastName"         name="lastName">
+          <input type="hidden" id="f_email"            name="email">
+          <input type="hidden" id="f_phone"            name="phone">
+          <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+          <input type="hidden" id="f_mac"              name="mac">
+          <input type="hidden" id="f_ip"               name="ip">
+          <input type="hidden" id="f_url"              name="url">
+          <input type="hidden" id="f_post"             name="post">
+          <input type="hidden" id="f_apmac"            name="apmac">
+        </form>
+      </div>
+
+    </div><!-- /.card-body -->
+
+    <!-- Footer -->
+    <div class="site-footer">
+      <div class="footer-privacy">
+        By connecting, you agree to our
+        <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+        and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
+      </div>
+      <div class="footer-powered">
+        <span class="footer-powered-text">Powered by</span>
+        <img src="/askheidi-logo.png" alt="AskHeidi">
+      </div>
+    </div>
+
+  </div><!-- /.card -->
+</div><!-- /.portal-wrap -->
+
+<!-- Privacy Policy / Terms Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
+<script src="/js/config.js"></script>
+<script src="/js/country-selector.js"></script>
+<script src="/js/form-logic.js"></script>
+</body>
+</html>
