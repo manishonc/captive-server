@@ -13,10 +13,10 @@
       min-height: 100vh;
       background: #1c1917;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       position: relative;
-      overflow-x: hidden;
+      overflow-x: clip;
       padding: 16px;
     }
 
@@ -63,7 +63,6 @@
       -webkit-backdrop-filter: blur(24px);
       border: 1px solid rgba(41, 37, 36, 0.5);
       border-radius: 24px;
-      overflow: hidden;
       box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
     }
 
@@ -194,7 +193,7 @@
       border: 1px solid #44403c;
       border-radius: 14px;
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
-      width: 256px;
+      width: min(256px, calc(100vw - 32px));
       max-height: 260px;
       flex-direction: column;
     }

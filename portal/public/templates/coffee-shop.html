@@ -13,10 +13,10 @@
       min-height: 100vh;
       background: #F5F0EA;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       position: relative;
-      overflow: hidden;
+      overflow-x: clip;
       padding: 16px;
     }
 
@@ -157,7 +157,7 @@
       border: 1.5px solid #E8D8C8;
       border-radius: 16px;
       box-shadow: 0 8px 28px rgba(58, 42, 34, 0.12);
-      width: 256px;
+      width: min(256px, calc(100vw - 32px));
       max-height: 260px;
       flex-direction: column;
     }

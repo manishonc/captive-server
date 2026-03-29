@@ -13,7 +13,7 @@
       min-height: 100dvh;
       background: url('https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1920&q=80') center/cover no-repeat fixed, #003d6b;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       padding: 16px;
       position: relative;
@@ -135,7 +135,7 @@
       border: 1.5px solid #b8daf0;
       border-radius: 16px;
       box-shadow: 0 8px 28px rgba(0,119,182,0.12);
-      width: 256px;
+      width: min(256px, calc(100vw - 32px));
       max-height: 260px;
       flex-direction: column;
     }

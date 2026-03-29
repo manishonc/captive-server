@@ -84,11 +84,27 @@ function selectCountry(dial, flag) {
 }
 
 function openDropdown() {
-  document.getElementById('countryDropdown').classList.add('open');
-  document.getElementById('countryBtn').classList.add('open');
-  document.getElementById('countryBtn').setAttribute('aria-expanded', 'true');
+  var dropdown = document.getElementById('countryDropdown');
+  var btn = document.getElementById('countryBtn');
+
+  // Reset any previously applied flip position
+  dropdown.style.top = '';
+  dropdown.style.bottom = '';
+
+  dropdown.classList.add('open');
+  btn.classList.add('open');
+  btn.setAttribute('aria-expanded', 'true');
   document.getElementById('countrySearch').value = '';
   renderCountries('');
+
+  // Smart flip: open upward if not enough space below the button
+  var rect = btn.getBoundingClientRect();
+  var spaceBelow = window.innerHeight - rect.bottom;
+  if (spaceBelow < 280 && rect.top > 180) {
+    dropdown.style.top = 'auto';
+    dropdown.style.bottom = 'calc(100% + 4px)';
+  }
+
   setTimeout(function() { document.getElementById('countrySearch').focus(); }, 50);
 }
 

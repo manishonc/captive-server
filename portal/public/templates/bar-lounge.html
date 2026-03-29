@@ -13,11 +13,11 @@
       min-height: 100dvh;
       background: #080608;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       padding: 16px;
       position: relative;
-      overflow: hidden;
+      overflow-x: clip;
     }
 
     .glow {
@@ -148,7 +148,7 @@
       border: 1px solid rgba(212,160,23,0.15);
       border-radius: 16px;
       box-shadow: 0 12px 40px rgba(0,0,0,0.6);
-      width: 256px;
+      width: min(256px, calc(100vw - 32px));
       max-height: 260px;
       flex-direction: column;
     }

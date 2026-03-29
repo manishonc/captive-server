@@ -13,10 +13,10 @@
       min-height: 100vh;
       background: #18181b;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       position: relative;
-      overflow-x: hidden;
+      overflow-x: clip;
       padding: 16px;
     }
 
@@ -59,7 +59,6 @@
     .card {
       background: rgba(255, 255, 255, 0.97);
       border-radius: 32px;
-      overflow: hidden;
       box-shadow: 0 25px 60px rgba(0, 0, 0, 0.4);
       border: 1px solid rgba(255, 255, 255, 0.2);
       backdrop-filter: blur(24px);
@@ -179,7 +178,7 @@
       border: 1.5px solid #e4e4e7;
       border-radius: 12px;
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.13);
-      width: 256px;
+      width: min(256px, calc(100vw - 32px));
       max-height: 260px;
       flex-direction: column;
     }
