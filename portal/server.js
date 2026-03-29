@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 const TEMPLATES_DIR = path.join(__dirname, 'public', 'templates');
-const VALID_TEMPLATES = ['classic', 'minimal', 'dark'];
+const VALID_TEMPLATES = ['classic', 'minimal', 'dark', 'vacation'];
 const DEFAULT_TEMPLATE = 'classic';
 
 // Fetch splash config from backend (server-to-server, not CNA-side)

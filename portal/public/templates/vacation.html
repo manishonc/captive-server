@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest WiFi</title>
+  <style>
+    :root { --primary: #FF5A5F; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow-x: hidden;
+      padding: 16px;
+    }
+
+    /* ── Background ─────────────────────────────────────── */
+    .bg-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .bg-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+    }
+    .bg-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+    }
+
+    /* ── Card wrapper ───────────────────────────────────── */
+    .portal-wrap {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      max-width: 448px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Card header banner ─────────────────────────────── */
+    .card-header {
+      height: 128px;
+      background: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .card-header-pattern {
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        45deg,
+        transparent,
+        transparent 10px,
+        rgba(255, 255, 255, 0.04) 10px,
+        rgba(255, 255, 255, 0.04) 20px
+      );
+    }
+    .card-header svg {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Hidden logo-wrap: satisfies config.js `.logo-wrap img` querySelector */
+    .logo-wrap { display: none; }
+
+    /* ── Card body ──────────────────────────────────────── */
+    .card-body {
+      padding: 0 28px 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Property badge (overlaps header) ───────────────── */
+    .property-badge {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+      border: 1px solid #f0f0f0;
+      padding: 14px 20px;
+      text-align: center;
+      margin-top: -24px;
+      margin-bottom: 16px;
+      position: relative;
+      z-index: 20;
+    }
+
+    .section-heading {
+      font-size: 19px;
+      font-weight: 700;
+      color: #111;
+      text-align: center;
+      line-height: 1.3;
+    }
+    .property-location {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      justify-content: center;
+      margin-top: 4px;
+    }
+    .section-sub {
+      font-size: 12px;
+      color: #777;
+    }
+
+    .welcome-text {
+      font-size: 14px;
+      color: #666;
+      text-align: center;
+      margin-bottom: 20px;
+      line-height: 1.55;
+    }
+
+    /* ── Steps ──────────────────────────────────────────── */
+    .step { display: flex; flex-direction: column; }
+    .step.hidden { display: none; }
+
+    /* ── Form fields ────────────────────────────────────── */
+    .field-group { margin-bottom: 14px; }
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"] {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1.5px solid #e8e8e8;
+      border-radius: 10px;
+      font-size: 16px;
+      color: #222;
+      background: #fff;
+      -webkit-appearance: none;
+      appearance: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(255, 90, 95, 0.12);
+    }
+
+    /* ── Phone / country selector ───────────────────────── */
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 11px;
+      border: 1.5px solid #e8e8e8;
+      border-radius: 10px;
+      background: #fafafa;
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 84px;
+      transition: border-color 0.15s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover, .country-btn.open { border-color: var(--primary); }
+    #selectedFlag { font-size: 19px; line-height: 1; }
+    #selectedCode { font-weight: 700; color: #444; font-size: 13px; }
+    .caret { font-size: 8px; color: #bbb; }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 300;
+      background: #fff;
+      border: 1.5px solid #e8e8e8;
+      border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.13);
+      width: 256px;
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 10px 12px;
+      border: none;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 14px;
+      outline: none;
+      border-radius: 12px 12px 0 0;
+    }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #333;
+    }
+    .country-option:hover { background: #fff0f0; }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: #aaa; font-size: 12px; }
+
+    /* ── Buttons ────────────────────────────────────────── */
+    .btn-primary {
+      width: 100%;
+      padding: 15px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 4px;
+    }
+    .btn-primary:hover { background: color-mix(in srgb, var(--primary) 80%, black); }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-text {
+      width: 100%;
+      padding: 11px;
+      background: none;
+      border: none;
+      font-size: 14px;
+      color: #666;
+      text-align: center;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    .btn-text:hover { color: #222; }
+
+    .error-msg {
+      font-size: 13px;
+      color: #e53e3e;
+      margin-bottom: 10px;
+      display: none;
+    }
+
+    /* ── Consent (step 2) ───────────────────────────────── */
+    .consent-heading {
+      font-size: 22px;
+      font-weight: 600;
+      color: #1a1a1a;
+      text-align: center;
+      margin-bottom: 8px;
+      line-height: 1.3;
+    }
+    .consent-sub {
+      font-size: 14px;
+      color: #777;
+      text-align: center;
+      margin-bottom: 20px;
+      line-height: 1.55;
+    }
+    .consent-box {
+      background: #fdf4f4;
+      border: 1px solid #fde8e8;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #555;
+      line-height: 1.7;
+      text-align: center;
+    }
+    .consent-box p + p { margin-top: 12px; }
+
+    /* ── Footer ─────────────────────────────────────────── */
+    .site-footer {
+      border-top: 1px solid #f0f0f0;
+      padding: 14px 28px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .footer-privacy {
+      font-size: 11px;
+      color: #bbb;
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer-privacy a { color: var(--primary); text-decoration: none; cursor: pointer; }
+    .footer-privacy a:hover { text-decoration: underline; }
+    .footer-powered { display: flex; align-items: center; gap: 8px; }
+    .footer-powered-text { font-size: 12px; color: #999; font-weight: 500; }
+    .footer-powered img { height: 24px; object-fit: contain; vertical-align: middle; }
+
+    /* ── Privacy/Terms modal ────────────────────────────── */
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #fff;
+      border-radius: 16px;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-hdr {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid #f0f0f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-hdr h2 { font-size: 17px; font-weight: 700; color: #222; }
+    .modal-close-x {
+      background: none; border: none;
+      font-size: 24px; color: #bbb; cursor: pointer; line-height: 1; padding: 0 2px;
+    }
+    .modal-close-x:hover { color: #555; }
+    #ppContent {
+      padding: 18px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      color: #444;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 20px;
+      border-top: 1px solid #f0f0f0;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 9px 22px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+  </style>
+  <% if (portalConfig) { %>
+  <script>window.PORTAL_CONFIG = <%- portalConfigJson %>;</script>
+  <% } %>
+  <script>
+    // Prevent config.js from painting a white body over the scenic background
+    if (window.PORTAL_CONFIG && window.PORTAL_CONFIG.backgroundColor === '#ffffff') {
+      window.PORTAL_CONFIG = Object.assign({}, window.PORTAL_CONFIG, { backgroundColor: '' });
+    }
+  </script>
+</head>
+<body>
+
+<!-- Full-screen background image -->
+<div class="bg-layer">
+  <img class="bg-img"
+       src="https://images.unsplash.com/photo-1518780664697-55e3ad937233?q=80&w=2065&auto=format&fit=crop"
+       alt="">
+  <div class="bg-overlay"></div>
+</div>
+
+<!-- Hidden: satisfies config.js `.logo-wrap img` querySelector without visual impact -->
+<div class="logo-wrap">
+  <img src="/headerLogo.png" alt="">
+</div>
+
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
+            text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
+  &#9888; PREVIEW MODE — not a live session
+</div>
+<% } %>
+
+<div class="portal-wrap">
+  <div class="card">
+
+    <!-- Colored banner header -->
+    <div class="card-header">
+      <div class="card-header-pattern"></div>
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
+           stroke="rgba(255,255,255,0.95)" stroke-width="1.5"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9.75L12 3l9 6.75V21a1 1 0 01-1 1H4a1 1 0 01-1-1V9.75z"/>
+        <path d="M9 22V12h6v10"/>
+      </svg>
+    </div>
+
+    <div class="card-body">
+
+      <!-- Property badge overlapping header -->
+      <div class="property-badge">
+        <h1 class="section-heading">Your Vacation Rental</h1>
+        <div class="property-location">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="#777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+            <circle cx="12" cy="9" r="2.5"/>
+          </svg>
+          <p class="section-sub">Location</p>
+        </div>
+      </div>
+
+      <p class="welcome-text">Welcome to your getaway! Please enter your details to get online.</p>
+
+      <!-- Step 1 — Collect details -->
+      <div id="step1" class="step">
+        <p id="configDebugBadge" style="display:none"></p>
+
+        <div class="field-group">
+          <label class="field-label" for="firstName">First Name</label>
+          <input type="text" id="firstName" name="firstName"
+                 placeholder="Jane" autocomplete="given-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="lastName">Last Name</label>
+          <input type="text" id="lastName" name="lastName"
+                 placeholder="Smith" autocomplete="family-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="email">Email Address</label>
+          <input type="email" id="email" name="email"
+                 placeholder="jane@example.com" autocomplete="email">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label">Phone Number</label>
+          <div class="phone-wrap" id="phoneWrapper">
+            <button type="button" class="country-btn" id="countryBtn"
+                    aria-haspopup="listbox" aria-expanded="false">
+              <span id="selectedFlag">🇬🇧</span>
+              <span id="selectedCode">+44</span>
+              <span class="caret">▼</span>
+            </button>
+            <div id="countryDropdown" class="country-dropdown" role="listbox">
+              <input type="text" id="countrySearch" class="country-search"
+                     placeholder="Search country…" autocomplete="off">
+              <div id="countryList" class="country-list"></div>
+            </div>
+            <input type="tel" id="phone" placeholder="7911 123456"
+                   autocomplete="tel-national">
+          </div>
+        </div>
+
+        <p class="error-msg" id="step1Error"></p>
+        <button class="btn-primary" id="btnNext" onclick="goToConsent()">Continue</button>
+      </div>
+
+      <!-- Step 2 — Privacy & Consent -->
+      <div id="step2" class="step hidden">
+        <h2 class="consent-heading">We care about your privacy</h2>
+        <p class="consent-sub">Stay in touch with us and find out more about<br>the best offers</p>
+
+        <div class="consent-box">
+          <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+          <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+        </div>
+
+        <p class="error-msg" id="step2Error"></p>
+        <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+        <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+          I don't want to stay in touch.
+        </button>
+
+        <!-- Hidden Aruba auth form — submitted programmatically -->
+        <form id="portalForm" action="/submit" method="POST" style="display:none">
+          <input type="hidden" id="f_firstName"        name="firstName">
+          <input type="hidden" id="f_lastName"         name="lastName">
+          <input type="hidden" id="f_email"            name="email">
+          <input type="hidden" id="f_phone"            name="phone">
+          <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+          <input type="hidden" id="f_mac"              name="mac">
+          <input type="hidden" id="f_ip"               name="ip">
+          <input type="hidden" id="f_url"              name="url">
+          <input type="hidden" id="f_post"             name="post">
+          <input type="hidden" id="f_apmac"            name="apmac">
+        </form>
+      </div>
+
+    </div><!-- /.card-body -->
+
+    <!-- Footer — sibling of card-body, inside card -->
+    <div class="site-footer">
+      <div class="footer-privacy">
+        This site uses cookies in accordance with your browser's settings.<br>
+        For more information see <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+        and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
+      </div>
+      <div class="footer-powered">
+        <span class="footer-powered-text">Powered by</span>
+        <img src="/askheidi-logo.png" alt="AskHeidi">
+      </div>
+    </div>
+
+  </div><!-- /.card -->
+</div><!-- /.portal-wrap -->
+
+<!-- Privacy Policy / Terms Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
+<script src="/js/config.js"></script>
+<script src="/js/country-selector.js"></script>
+<script src="/js/form-logic.js"></script>
+</body>
+</html>
