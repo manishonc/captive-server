@@ -139,15 +139,35 @@ async function scheduleSmsForEvent(
 ): Promise<void> {
   const to = toE164(phoneCountryCode, phone);
   if (!to) {
-    console.warn('[SMS] Skipping: no valid phone for E.164');
+    console.warn('[SMS] Skipping: no valid phone for E.164', { phone, phoneCountryCode });
     return;
   }
 
   const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
-  if (!apDoc.exists) return;
-  const data = apDoc.data();
-  const smsConfig = data?.events?.[wifiEvent]?.sms;
-  if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
+  if (!apDoc.exists) {
+    console.warn('[SMS] Skipping: AP doc not found:', accessPointId);
+    return;
+  }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) {
+    console.warn('[SMS] Skipping: AP has no venueId:', accessPointId);
+    return;
+  }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) {
+    console.warn('[SMS] Skipping: no EntityMarketing doc for venueId:', venueId);
+    return;
+  }
+  const smsConfig = marketingDoc.data()?.events?.[wifiEvent]?.sms;
+  if (!smsConfig?.enabled) {
+    console.warn('[SMS] Skipping: sms not enabled for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
+  if (!smsConfig?.messages?.length) {
+    console.warn('[SMS] Skipping: sms.messages empty for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
 
   for (let i = 0; i < smsConfig.messages.length; i++) {
     const msg = smsConfig.messages[i];
@@ -157,6 +177,7 @@ async function scheduleSmsForEvent(
     const messageSid = await scheduleSms(to, msg.content, delayMinutes);
 
     if (messageSid) {
+      console.log('[SMS] Scheduled msg %d for user %s, sid=%s, delay=%d min', i, userId, messageSid, delayMinutes);
       const record: CaptivePortalMarketingDocument = {
         wifiEvent,
         channel: 'sms',
@@ -171,11 +192,8 @@ async function scheduleSmsForEvent(
         scheduledAt: FieldValue.serverTimestamp(),
         deliveryStatus: 'scheduled',
       };
-      try {
-        await db.collection('CaptivePortal_Marketing').add(record);
-      } catch (err) {
-        console.error('[MARKETING ANALYTICS ERROR]', err);
-      }
+      await db.collection('CaptivePortal_Marketing').add(record)
+        .catch((err) => console.error('[MARKETING ANALYTICS ERROR]', err));
     }
   }
 }
