@@ -29,6 +29,12 @@ export interface MarketingSmsMessage {
   delayMinutes: number;
 }
 
+export interface MarketingEmailMessage {
+  subject: string;
+  body: string;
+  delayMinutes: number;
+}
+
 export interface MarketingChannelConfig<T> {
   enabled: boolean;
   messages: T[];
@@ -36,7 +42,7 @@ export interface MarketingChannelConfig<T> {
 
 export interface AccessPointMarketing {
   sms?: MarketingChannelConfig<MarketingSmsMessage>;
-  email?: MarketingChannelConfig<unknown>;
+  email?: MarketingChannelConfig<MarketingEmailMessage>;
   whatsapp?: MarketingChannelConfig<unknown>;
 }
 
@@ -50,18 +56,23 @@ export interface AccessPointEvents {
 
 export interface CaptivePortalMarketingDocument {
   wifiEvent: WifiEvent;
-  channel: 'sms';
+  channel: 'sms' | 'email';
   accessPointId: string;
   userId: string;
-  messageSid: string;
   to: string;
-  content: string;
   messageIndex: number;
   delayMinutes: number;
   sendAt: string;
   scheduledAt: FieldValue;
   deliveryStatus: string;
   statusUpdatedAt?: FieldValue;
+  // SMS-specific
+  messageSid?: string;
+  content?: string;
+  // Email-specific
+  messageId?: string;
+  subject?: string;
+  body?: string;
 }
 
 export interface CaptivePortalUserDocument {

@@ -3,6 +3,7 @@ import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
+import { sendEmail } from '../services/brevo';
 
 const router = Router();
 
@@ -121,10 +122,12 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       .catch((err) => console.error('[SESSION LOG ERROR]', err));
   }
 
-  // SMS scheduling (event-aware)
+  // Marketing scheduling (event-aware)
   if (marketingOptIn && captivePortalAccessPointId) {
     scheduleSmsForEvent(captivePortalAccessPointId, userId, phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
+    scheduleEmailForEvent(captivePortalAccessPointId, userId, email || '', wifiEvent)
+      .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
   }
 
   res.json({ success: true, id: userId });
@@ -198,7 +201,74 @@ async function scheduleSmsForEvent(
   }
 }
 
-// TODO: onDisconnect – call scheduleSmsForEvent(accessPointId, userId, phone, phoneCountryCode, 'onDisconnect')
+async function scheduleEmailForEvent(
+  accessPointId: string,
+  userId: string,
+  userEmail: string,
+  wifiEvent: WifiEvent
+): Promise<void> {
+  if (!userEmail) {
+    console.warn('[EMAIL] Skipping: no email address for user', userId);
+    return;
+  }
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) {
+    console.warn('[EMAIL] Skipping: AP doc not found:', accessPointId);
+    return;
+  }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) {
+    console.warn('[EMAIL] Skipping: AP has no venueId:', accessPointId);
+    return;
+  }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) {
+    console.warn('[EMAIL] Skipping: no EntityMarketing doc for venueId:', venueId);
+    return;
+  }
+  const emailConfig = marketingDoc.data()?.events?.[wifiEvent]?.email;
+  if (!emailConfig?.enabled) {
+    console.warn('[EMAIL] Skipping: email not enabled for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
+  if (!emailConfig?.messages?.length) {
+    console.warn('[EMAIL] Skipping: email.messages empty for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
+
+  for (let i = 0; i < emailConfig.messages.length; i++) {
+    const msg = emailConfig.messages[i];
+    if (!msg.subject || !msg.body) continue;
+
+    const delayMinutes = msg.delayMinutes ?? 0;
+    const messageId = await sendEmail(userEmail, msg.subject, msg.body, delayMinutes);
+
+    if (messageId) {
+      console.log('[EMAIL] Scheduled msg %d for user %s, id=%s, delay=%d min', i, userId, messageId, delayMinutes);
+      const record = {
+        wifiEvent,
+        channel: 'email' as const,
+        accessPointId,
+        userId,
+        messageId,
+        to: userEmail,
+        subject: msg.subject,
+        body: msg.body,
+        messageIndex: i,
+        delayMinutes,
+        sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+        scheduledAt: FieldValue.serverTimestamp(),
+        deliveryStatus: 'scheduled',
+      };
+      await db.collection('CaptivePortal_Marketing').add(record)
+        .catch((err) => console.error('[EMAIL ANALYTICS ERROR]', err));
+    }
+  }
+}
+
+// TODO: onDisconnect – call scheduleSmsForEvent / scheduleEmailForEvent
 //       when a user disconnects from the WiFi network.
 
 // ── Field names in CaptivePortal_Documents — update if your schema differs ──
