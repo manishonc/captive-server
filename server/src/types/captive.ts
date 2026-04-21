@@ -58,7 +58,7 @@ export interface CaptivePortalMarketingDocument {
   wifiEvent: WifiEvent;
   channel: 'sms' | 'email';
   accessPointId: string;
-  userId: string;
+  wifiGuestId: string;
   to: string;
   messageIndex: number;
   delayMinutes: number;
@@ -73,6 +73,17 @@ export interface CaptivePortalMarketingDocument {
   messageId?: string;
   subject?: string;
   body?: string;
+  // Funnel tracking (short-link feature)
+  shortCodes?: string[];
+  clickCount?: number;
+  firstClickedAt?: FieldValue | null;
+  lastClickedAt?: FieldValue | null;
+  firstVisitId?: string | null;
+  visitedAt?: FieldValue | null;
+  visitCount?: number;
+  ratingId?: string | null;
+  ratedAt?: FieldValue | null;
+  rating?: number | null;
 }
 
 export interface CaptivePortalUserDocument {
@@ -97,7 +108,7 @@ export interface CaptivePortalUserDocument {
 
 export interface CaptivePortalSessionDocument {
   wifiEvent: WifiEvent;
-  userId: string;
+  wifiGuestId: string;
   accessPointId: string | null;
   mac: string;
   ip: string;

@@ -4,6 +4,8 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
+import { sendWhatsAppTemplate, toE164 as toE164WA } from '../services/whatsapp';
+import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
 
 const router = Router();
 
@@ -50,7 +52,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   }
 
   // Reconnect detection
-  let existingUserId: string | null = null;
+  let existingWifiGuestId: string | null = null;
   if (email && captivePortalAccessPointId) {
     try {
       const existingSnap = await db
@@ -59,18 +61,18 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
         .where('captivePortalAccessPointId', '==', captivePortalAccessPointId)
         .limit(1)
         .get();
-      if (!existingSnap.empty) existingUserId = existingSnap.docs[0].id;
+      if (!existingSnap.empty) existingWifiGuestId = existingSnap.docs[0].id;
     } catch (err) {
       console.error('[RECONNECT LOOKUP ERROR]', err); // non-fatal, falls through as onConnect
     }
   }
 
-  const wifiEvent: WifiEvent = existingUserId ? 'onReconnect' : 'onConnect';
+  const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
   const marketingOptIn = marketingConsent?.given ?? false;
 
-  let userId: string;
+  let wifiGuestId: string;
 
-  if (!existingUserId) {
+  if (!existingWifiGuestId) {
     const doc: CaptivePortalUserDocument = {
       firstName: firstName || '',
       lastName: lastName || '',
@@ -93,16 +95,16 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
     try {
       const ref = await db.collection('CaptivePortal_Users').add(doc);
-      userId = ref.id;
-      console.log('[NEW CONNECTION]', userId, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
+      wifiGuestId = ref.id;
+      console.log('[NEW CONNECTION]', wifiGuestId, JSON.stringify({ ...doc, createdAt: 'serverTimestamp' }));
     } catch (err) {
       console.error('[FIRESTORE ERROR]', err);
-      return res.status(500).json({ success: false, message: 'Failed to save user' });
+      return res.status(500).json({ success: false, message: 'Failed to save wifi guest' });
     }
   } else {
-    userId = existingUserId;
-    console.log('[RECONNECT]', userId, email, captivePortalAccessPointId);
-    db.collection('CaptivePortal_Users').doc(userId)
+    wifiGuestId = existingWifiGuestId;
+    console.log('[RECONNECT]', wifiGuestId, email, captivePortalAccessPointId);
+    db.collection('CaptivePortal_Users').doc(wifiGuestId)
       .update({ connectionCount: FieldValue.increment(1) })
       .catch((err) => console.error('[RECONNECT COUNT ERROR]', err));
   }
@@ -111,7 +113,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   if (captivePortalAccessPointId) {
     const sessionDoc: CaptivePortalSessionDocument = {
       wifiEvent,
-      userId,
+      wifiGuestId,
       accessPointId: captivePortalAccessPointId,
       mac: mac || '',
       ip: ip || '',
@@ -124,18 +126,20 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
   // Marketing scheduling (event-aware)
   if (marketingOptIn && captivePortalAccessPointId) {
-    scheduleSmsForEvent(captivePortalAccessPointId, userId, phone || '', phoneCountryCode || '', wifiEvent)
+    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
-    scheduleEmailForEvent(captivePortalAccessPointId, userId, email || '', wifiEvent)
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
       .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
+    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+      .catch((err) => console.error('[WHATSAPP SCHEDULE ERROR]', err));
   }
 
-  res.json({ success: true, id: userId });
+  res.json({ success: true, id: wifiGuestId });
 });
 
 async function scheduleSmsForEvent(
   accessPointId: string,
-  userId: string,
+  wifiGuestId: string,
   phone: string,
   phoneCountryCode: string,
   wifiEvent: WifiEvent
@@ -177,38 +181,182 @@ async function scheduleSmsForEvent(
     if (!msg.content) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;
-    const messageSid = await scheduleSms(to, msg.content, delayMinutes);
+
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = {
+      venueId,
+      marketingDocId: mRef.id,
+      wifiGuestId,
+      channel: 'sms',
+    };
+    const shortCodes: string[] = [];
+    let finalContent = msg.content;
+    try {
+      const rateSwap = await swapVenueRatingUrl(finalContent, ctx);
+      finalContent = rateSwap.content;
+      if (rateSwap.code) shortCodes.push(rateSwap.code);
+      const trackedSwap = await swapTrackedLinks(finalContent, ctx);
+      finalContent = trackedSwap.content;
+      shortCodes.push(...trackedSwap.codes);
+    } catch (err) {
+      console.error('[SHORTLINK SWAP ERROR - sms]', err);
+    }
+
+    const messageSid = await scheduleSms(to, finalContent, delayMinutes);
 
     if (messageSid) {
-      console.log('[SMS] Scheduled msg %d for user %s, sid=%s, delay=%d min', i, userId, messageSid, delayMinutes);
+      console.log('[SMS] Scheduled msg %d for wifi guest %s, sid=%s, delay=%d min', i, wifiGuestId, messageSid, delayMinutes);
       const record: CaptivePortalMarketingDocument = {
         wifiEvent,
         channel: 'sms',
         accessPointId,
-        userId,
+        wifiGuestId,
         messageSid,
         to,
-        content: msg.content,
+        content: finalContent,
         messageIndex: i,
         delayMinutes,
         sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
         scheduledAt: FieldValue.serverTimestamp(),
         deliveryStatus: 'scheduled',
+        shortCodes,
+        clickCount: 0,
+        firstClickedAt: null,
+        lastClickedAt: null,
+        firstVisitId: null,
+        visitedAt: null,
+        visitCount: 0,
+        ratingId: null,
+        ratedAt: null,
+        rating: null,
       };
-      await db.collection('CaptivePortal_Marketing').add(record)
+      await mRef.set(record)
         .catch((err) => console.error('[MARKETING ANALYTICS ERROR]', err));
+    }
+  }
+}
+
+async function scheduleWhatsAppForEvent(
+  accessPointId: string,
+  wifiGuestId: string,
+  firstName: string,
+  phone: string,
+  phoneCountryCode: string,
+  wifiEvent: WifiEvent
+): Promise<void> {
+  const to = toE164WA(phoneCountryCode, phone);
+  if (!to) {
+    console.warn('[WHATSAPP] Skipping: no valid phone for E.164', { phone, phoneCountryCode });
+    return;
+  }
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) {
+    console.warn('[WHATSAPP] Skipping: AP doc not found:', accessPointId);
+    return;
+  }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) {
+    console.warn('[WHATSAPP] Skipping: AP has no venueId:', accessPointId);
+    return;
+  }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) {
+    console.warn('[WHATSAPP] Skipping: no EntityMarketing doc for venueId:', venueId);
+    return;
+  }
+
+  const whatsappConfig = marketingDoc.data()?.events?.[wifiEvent]?.whatsapp;
+  if (!whatsappConfig?.enabled) {
+    console.warn('[WHATSAPP] Skipping: whatsapp not enabled for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
+  if (!whatsappConfig?.messages?.length) {
+    console.warn('[WHATSAPP] Skipping: whatsapp.messages empty for event=%s, venue:', wifiEvent, venueId);
+    return;
+  }
+
+  const venueName: string = marketingDoc.data()?.venueName || '';
+
+  for (let i = 0; i < whatsappConfig.messages.length; i++) {
+    const msg = whatsappConfig.messages[i];
+    if (!msg.templateName || !msg.languageCode) continue;
+
+    const delayMinutes: number = msg.delayMinutes ?? 0;
+
+    // Build body components — inject firstName and venueName as {{1}} and {{2}}
+    const components = msg.components ?? [
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: firstName || 'Guest' },
+          { type: 'text', text: venueName || 'our venue' },
+        ],
+      },
+    ];
+
+    // Meta Cloud API has no native scheduling — use setTimeout for short delays
+    // For production with long delays, replace with a job queue (e.g. Bull, GCP Tasks)
+    const sendFn = async () => {
+      const wamid = await sendWhatsAppTemplate(to, {
+        templateName: msg.templateName,
+        languageCode: msg.languageCode,
+        components,
+        delayMinutes,
+      });
+
+      if (wamid) {
+        console.log('[WHATSAPP] Sent msg %d for wifi guest %s, wamid=%s, delay=%d min', i, wifiGuestId, wamid, delayMinutes);
+        const record = {
+          wifiEvent,
+          channel: 'whatsapp' as const,
+          accessPointId,
+          wifiGuestId,
+          wamid,
+          to,
+          templateName: msg.templateName,
+          languageCode: msg.languageCode,
+          messageIndex: i,
+          delayMinutes,
+          sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+          scheduledAt: FieldValue.serverTimestamp(),
+          deliveryStatus: 'sent',
+          shortCodes: [] as string[],
+          clickCount: 0,
+          firstClickedAt: null,
+          lastClickedAt: null,
+          firstVisitId: null,
+          visitedAt: null,
+          visitCount: 0,
+          ratingId: null,
+          ratedAt: null,
+          rating: null,
+        };
+        await db.collection('CaptivePortal_Marketing').add(record)
+          .catch((err) => console.error('[WHATSAPP ANALYTICS ERROR]', err));
+      }
+    };
+
+    if (delayMinutes > 0) {
+      setTimeout(() => {
+        sendFn().catch((err) => console.error('[WHATSAPP DELAYED SEND ERROR]', err));
+      }, delayMinutes * 60 * 1000);
+      console.log('[WHATSAPP] Queued msg %d for wifi guest %s in %d min', i, wifiGuestId, delayMinutes);
+    } else {
+      await sendFn();
     }
   }
 }
 
 async function scheduleEmailForEvent(
   accessPointId: string,
-  userId: string,
+  wifiGuestId: string,
   userEmail: string,
   wifiEvent: WifiEvent
 ): Promise<void> {
   if (!userEmail) {
-    console.warn('[EMAIL] Skipping: no email address for user', userId);
+    console.warn('[EMAIL] Skipping: no email address for wifi guest', wifiGuestId);
     return;
   }
 
@@ -243,26 +391,57 @@ async function scheduleEmailForEvent(
     if (!msg.subject || !msg.body) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;
-    const messageId = await sendEmail(userEmail, msg.subject, msg.body, delayMinutes);
+
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = {
+      venueId,
+      marketingDocId: mRef.id,
+      wifiGuestId,
+      channel: 'email',
+    };
+    const shortCodes: string[] = [];
+    let finalBody = msg.body;
+    try {
+      const rateSwap = await swapVenueRatingUrl(finalBody, ctx);
+      finalBody = rateSwap.content;
+      if (rateSwap.code) shortCodes.push(rateSwap.code);
+      const trackedSwap = await swapTrackedLinks(finalBody, ctx);
+      finalBody = trackedSwap.content;
+      shortCodes.push(...trackedSwap.codes);
+    } catch (err) {
+      console.error('[SHORTLINK SWAP ERROR - email]', err);
+    }
+
+    const messageId = await sendEmail(userEmail, msg.subject, finalBody, delayMinutes);
 
     if (messageId) {
-      console.log('[EMAIL] Scheduled msg %d for user %s, id=%s, delay=%d min', i, userId, messageId, delayMinutes);
+      console.log('[EMAIL] Scheduled msg %d for wifi guest %s, id=%s, delay=%d min', i, wifiGuestId, messageId, delayMinutes);
       const record = {
         wifiEvent,
         channel: 'email' as const,
         accessPointId,
-        userId,
+        wifiGuestId,
         messageId,
         to: userEmail,
         subject: msg.subject,
-        body: msg.body,
+        body: finalBody,
         messageIndex: i,
         delayMinutes,
         sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
         scheduledAt: FieldValue.serverTimestamp(),
         deliveryStatus: 'scheduled',
+        shortCodes,
+        clickCount: 0,
+        firstClickedAt: null,
+        lastClickedAt: null,
+        firstVisitId: null,
+        visitedAt: null,
+        visitCount: 0,
+        ratingId: null,
+        ratedAt: null,
+        rating: null,
       };
-      await db.collection('CaptivePortal_Marketing').add(record)
+      await mRef.set(record)
         .catch((err) => console.error('[EMAIL ANALYTICS ERROR]', err));
     }
   }
