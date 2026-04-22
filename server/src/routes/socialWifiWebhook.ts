@@ -1,0 +1,294 @@
+import { Router, Request, Response } from 'express';
+import { db } from '../firebase';
+import { FieldValue } from 'firebase-admin/firestore';
+import { WifiEvent } from '../types/captive';
+import { scheduleSms } from '../services/twilio';
+import { sendEmail } from '../services/brevo';
+import { sendWhatsAppTemplate } from '../services/whatsapp';
+import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
+import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
+
+const router = Router();
+
+interface SocialWifiUser {
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone?: string;
+  is_subscribed?: boolean;
+}
+
+interface SocialWifiUpsertPayload {
+  user: SocialWifiUser;
+  venue_history: { venue_id: string };
+}
+
+router.post('/', async (req: Request, res: Response) => {
+  // Ack immediately — Social WiFi closes the connection after 2 seconds
+  res.sendStatus(200);
+
+  try {
+    const authHeader = String(req.headers['authorization'] || '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+    if (token !== SOCIAL_WIFI_WEBHOOK_SECRET) {
+      console.warn('[SOCIAL_WIFI] Invalid webhook secret — ignoring request');
+      return;
+    }
+
+    const payload = req.body as SocialWifiUpsertPayload;
+    if (!payload?.user || !payload?.venue_history?.venue_id) {
+      console.warn('[SOCIAL_WIFI] Missing user or venue_history.venue_id in payload');
+      return;
+    }
+
+    const { user, venue_history } = payload;
+    const phone = user.phone?.trim() || '';
+    const email = user.email?.trim() || '';
+    const firstName = user.first_name?.trim() || '';
+    const lastName = user.last_name?.trim() || '';
+    const marketingOptIn = user.is_subscribed ?? false;
+
+    if (!phone) {
+      console.warn('[SOCIAL_WIFI] No phone in payload — skipping');
+      return;
+    }
+
+    const swVenueId = venue_history?.venue_id;
+    const accessPointId = swVenueId ? SOCIAL_WIFI_AP_MAP[swVenueId] : undefined;
+    if (!accessPointId) {
+      console.warn('[SOCIAL_WIFI] Unknown venue ID — add it to SOCIAL_WIFI_AP_MAP:', swVenueId);
+      return;
+    }
+
+    // Reconnect detection: same phone + same AP
+    let existingGuestId: string | null = null;
+    try {
+      const snap = await db
+        .collection('CaptivePortal_Users')
+        .where('phone', '==', phone)
+        .where('captivePortalAccessPointId', '==', accessPointId)
+        .limit(1)
+        .get();
+      if (!snap.empty) existingGuestId = snap.docs[0].id;
+    } catch (err) {
+      console.error('[SOCIAL_WIFI] Reconnect lookup error:', err);
+    }
+
+    const wifiEvent: WifiEvent = existingGuestId ? 'onReconnect' : 'onConnect';
+    const timestamp = new Date().toISOString();
+    let wifiGuestId: string;
+
+    if (!existingGuestId) {
+      const ref = await db.collection('CaptivePortal_Users').add({
+        firstName,
+        lastName,
+        email,
+        phone,
+        phoneCountryCode: '',
+        mac: '',
+        ip: '',
+        url: '',
+        post: '',
+        timestamp,
+        createdAt: FieldValue.serverTimestamp(),
+        captivePortalAccessPointId: accessPointId,
+        connectionCount: 1,
+        marketingOptIn,
+        externalSource: 'social_wifi',
+        privacyPolicyConsent: { given: false, timestamp, version: '1.0' },
+        termsConsent: { given: false, timestamp, version: '1.0' },
+        marketingConsent: { given: marketingOptIn, timestamp, version: '1.0' },
+      });
+      wifiGuestId = ref.id;
+      console.log('[SOCIAL_WIFI] New guest created:', wifiGuestId, phone);
+    } else {
+      wifiGuestId = existingGuestId;
+      console.log('[SOCIAL_WIFI] Reconnect:', wifiGuestId, phone);
+      db.collection('CaptivePortal_Users').doc(wifiGuestId)
+        .update({ connectionCount: FieldValue.increment(1) })
+        .catch((err) => console.error('[SOCIAL_WIFI] Reconnect count error:', err));
+    }
+
+    if (!marketingOptIn) {
+      console.log('[SOCIAL_WIFI] Guest opted out of marketing — no messages scheduled', wifiGuestId);
+      return;
+    }
+
+    scheduleSmsForVenue(accessPointId, wifiGuestId, phone, wifiEvent)
+      .catch((err) => console.error('[SOCIAL_WIFI] SMS schedule error:', err));
+    scheduleWhatsAppForVenue(accessPointId, wifiGuestId, firstName, phone, wifiEvent)
+      .catch((err) => console.error('[SOCIAL_WIFI] WhatsApp schedule error:', err));
+    scheduleEmailForVenue(accessPointId, wifiGuestId, email, wifiEvent)
+      .catch((err) => console.error('[SOCIAL_WIFI] Email schedule error:', err));
+
+  } catch (err) {
+    console.error('[SOCIAL_WIFI] Unhandled webhook error:', err);
+  }
+});
+
+// Phone from Social WiFi is already E.164 (e.g. "+41791234567") — passed directly to services.
+
+async function scheduleSmsForVenue(
+  accessPointId: string,
+  wifiGuestId: string,
+  phone: string,
+  wifiEvent: WifiEvent,
+): Promise<void> {
+  if (!phone) return;
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) { console.warn('[SOCIAL_WIFI/SMS] AP not found:', accessPointId); return; }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) { console.warn('[SOCIAL_WIFI/SMS] AP has no venueId:', accessPointId); return; }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/SMS] No EntityMarketing for venue:', venueId); return; }
+
+  const smsConfig = marketingDoc.data()?.events?.[wifiEvent]?.sms;
+  if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
+
+  for (let i = 0; i < smsConfig.messages.length; i++) {
+    const msg = smsConfig.messages[i];
+    if (!msg.content) continue;
+
+    const delayMinutes = msg.delayMinutes ?? 0;
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = { venueId, marketingDocId: mRef.id, wifiGuestId, channel: 'sms' };
+    const shortCodes: string[] = [];
+    let finalContent = msg.content;
+    try {
+      const rateSwap = await swapVenueRatingUrl(finalContent, ctx);
+      finalContent = rateSwap.content;
+      if (rateSwap.code) shortCodes.push(rateSwap.code);
+      const trackedSwap = await swapTrackedLinks(finalContent, ctx);
+      finalContent = trackedSwap.content;
+      shortCodes.push(...trackedSwap.codes);
+    } catch (err) { console.error('[SOCIAL_WIFI/SMS] Shortlink swap error:', err); }
+
+    const messageSid = await scheduleSms(phone, finalContent, delayMinutes);
+    if (messageSid) {
+      console.log('[SOCIAL_WIFI/SMS] Scheduled msg %d for guest %s, sid=%s', i, wifiGuestId, messageSid);
+      await mRef.set({
+        wifiEvent, channel: 'sms', accessPointId, wifiGuestId, messageSid,
+        to: phone, content: finalContent, messageIndex: i, delayMinutes,
+        sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+        scheduledAt: FieldValue.serverTimestamp(), deliveryStatus: 'scheduled',
+        shortCodes, clickCount: 0, firstClickedAt: null, lastClickedAt: null,
+        firstVisitId: null, visitedAt: null, visitCount: 0, ratingId: null, ratedAt: null, rating: null,
+      }).catch((err) => console.error('[SOCIAL_WIFI/SMS] Marketing record error:', err));
+    }
+  }
+}
+
+async function scheduleWhatsAppForVenue(
+  accessPointId: string,
+  wifiGuestId: string,
+  firstName: string,
+  phone: string,
+  wifiEvent: WifiEvent,
+): Promise<void> {
+  if (!phone) return;
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) { console.warn('[SOCIAL_WIFI/WA] AP not found:', accessPointId); return; }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) { console.warn('[SOCIAL_WIFI/WA] AP has no venueId:', accessPointId); return; }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/WA] No EntityMarketing for venue:', venueId); return; }
+
+  const whatsappConfig = marketingDoc.data()?.events?.[wifiEvent]?.whatsapp;
+  if (!whatsappConfig?.enabled || !whatsappConfig?.messages?.length) return;
+
+  const venueName: string = marketingDoc.data()?.venueName || '';
+
+  for (let i = 0; i < whatsappConfig.messages.length; i++) {
+    const msg = whatsappConfig.messages[i];
+    if (!msg.templateName || !msg.languageCode) continue;
+
+    const delayMinutes: number = msg.delayMinutes ?? 0;
+    const components = msg.components ?? [
+      { type: 'body', parameters: [
+        { type: 'text', text: firstName || 'Guest' },
+        { type: 'text', text: venueName || 'our venue' },
+      ]},
+    ];
+
+    const sendFn = async () => {
+      const wamid = await sendWhatsAppTemplate(phone, { templateName: msg.templateName, languageCode: msg.languageCode, components, delayMinutes });
+      if (wamid) {
+        console.log('[SOCIAL_WIFI/WA] Sent msg %d for guest %s, wamid=%s', i, wifiGuestId, wamid);
+        await db.collection('CaptivePortal_Marketing').add({
+          wifiEvent, channel: 'whatsapp', accessPointId, wifiGuestId, wamid,
+          to: phone, templateName: msg.templateName, languageCode: msg.languageCode,
+          messageIndex: i, delayMinutes,
+          sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+          scheduledAt: FieldValue.serverTimestamp(), deliveryStatus: 'sent',
+          shortCodes: [], clickCount: 0, firstClickedAt: null, lastClickedAt: null,
+          firstVisitId: null, visitedAt: null, visitCount: 0, ratingId: null, ratedAt: null, rating: null,
+        }).catch((err) => console.error('[SOCIAL_WIFI/WA] Marketing record error:', err));
+      }
+    };
+
+    if (delayMinutes > 0) {
+      setTimeout(() => sendFn().catch((err) => console.error('[SOCIAL_WIFI/WA] Delayed send error:', err)), delayMinutes * 60 * 1000);
+      console.log('[SOCIAL_WIFI/WA] Queued msg %d for guest %s in %d min', i, wifiGuestId, delayMinutes);
+    } else {
+      await sendFn();
+    }
+  }
+}
+
+async function scheduleEmailForVenue(
+  accessPointId: string,
+  wifiGuestId: string,
+  email: string,
+  wifiEvent: WifiEvent,
+): Promise<void> {
+  if (!email) return;
+
+  const apDoc = await db.collection('CaptivePortal_AccessPoints').doc(accessPointId).get();
+  if (!apDoc.exists) { console.warn('[SOCIAL_WIFI/EMAIL] AP not found:', accessPointId); return; }
+  const venueId = apDoc.data()?.venueId;
+  if (!venueId) { console.warn('[SOCIAL_WIFI/EMAIL] AP has no venueId:', accessPointId); return; }
+
+  const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
+  if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/EMAIL] No EntityMarketing for venue:', venueId); return; }
+
+  const emailConfig = marketingDoc.data()?.events?.[wifiEvent]?.email;
+  if (!emailConfig?.enabled || !emailConfig?.messages?.length) return;
+
+  for (let i = 0; i < emailConfig.messages.length; i++) {
+    const msg = emailConfig.messages[i];
+    if (!msg.subject || !msg.body) continue;
+
+    const delayMinutes = msg.delayMinutes ?? 0;
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = { venueId, marketingDocId: mRef.id, wifiGuestId, channel: 'email' };
+    const shortCodes: string[] = [];
+    let finalBody = msg.body;
+    try {
+      const rateSwap = await swapVenueRatingUrl(finalBody, ctx);
+      finalBody = rateSwap.content;
+      if (rateSwap.code) shortCodes.push(rateSwap.code);
+      const trackedSwap = await swapTrackedLinks(finalBody, ctx);
+      finalBody = trackedSwap.content;
+      shortCodes.push(...trackedSwap.codes);
+    } catch (err) { console.error('[SOCIAL_WIFI/EMAIL] Shortlink swap error:', err); }
+
+    const messageId = await sendEmail(email, msg.subject, finalBody, delayMinutes);
+    if (messageId) {
+      console.log('[SOCIAL_WIFI/EMAIL] Scheduled msg %d for guest %s, id=%s', i, wifiGuestId, messageId);
+      await mRef.set({
+        wifiEvent, channel: 'email', accessPointId, wifiGuestId, messageId,
+        to: email, subject: msg.subject, body: finalBody, messageIndex: i, delayMinutes,
+        sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
+        scheduledAt: FieldValue.serverTimestamp(), deliveryStatus: 'scheduled',
+        shortCodes, clickCount: 0, firstClickedAt: null, lastClickedAt: null,
+        firstVisitId: null, visitedAt: null, visitCount: 0, ratingId: null, ratedAt: null, rating: null,
+      }).catch((err) => console.error('[SOCIAL_WIFI/EMAIL] Marketing record error:', err));
+    }
+  }
+}
+
+export default router;
