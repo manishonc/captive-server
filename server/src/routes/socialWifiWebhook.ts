@@ -28,6 +28,9 @@ router.post('/', async (req: Request, res: Response) => {
   res.sendStatus(200);
 
   try {
+    console.log('[SOCIAL_WIFI] Incoming headers:', JSON.stringify(req.headers, null, 2));
+    console.log('[SOCIAL_WIFI] Incoming body:', JSON.stringify(req.body, null, 2));
+
     const authHeader = String(req.headers['authorization'] || '');
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
     if (token !== SOCIAL_WIFI_WEBHOOK_SECRET) {
