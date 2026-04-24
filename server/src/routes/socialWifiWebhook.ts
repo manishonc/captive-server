@@ -11,16 +11,28 @@ import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/social
 const router = Router();
 
 interface SocialWifiUser {
-  first_name?: string;
-  last_name?: string;
+  id?: string;
   email?: string;
+  'first-name'?: string;
+  'last-name'?: string;
   phone?: string;
-  is_subscribed?: boolean;
+  'is-subscribed'?: boolean;
+  'email-confirmed'?: boolean;
+  'phone-confirmed'?: boolean;
+  'birth-date'?: string | null;
+  language?: string;
+}
+
+interface SocialWifiVenue {
+  id: string;
+  name?: string;
 }
 
 interface SocialWifiUpsertPayload {
-  user: SocialWifiUser;
-  venue_history: { venue_id: string };
+  data: {
+    user: SocialWifiUser;
+    venue: SocialWifiVenue;
+  };
 }
 
 router.post('/', async (req: Request, res: Response) => {
@@ -39,42 +51,41 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     const payload = req.body as SocialWifiUpsertPayload;
-    if (!payload?.user || !payload?.venue_history?.venue_id) {
-      console.warn('[SOCIAL_WIFI] Missing user or venue_history.venue_id in payload');
+    if (!payload?.data?.user || !payload?.data?.venue?.id) {
+      console.warn('[SOCIAL_WIFI] Missing data.user or data.venue.id in payload');
       return;
     }
 
-    const { user, venue_history } = payload;
+    const { user, venue: swVenue } = payload.data;
     const phone = user.phone?.trim() || '';
     const email = user.email?.trim() || '';
-    const firstName = user.first_name?.trim() || '';
-    const lastName = user.last_name?.trim() || '';
-    const marketingOptIn = user.is_subscribed ?? false;
+    const firstName = user['first-name']?.trim() || '';
+    const lastName = user['last-name']?.trim() || '';
+    const marketingOptIn = user['is-subscribed'] ?? false;
 
-    if (!phone) {
-      console.warn('[SOCIAL_WIFI] No phone in payload — skipping');
-      return;
-    }
-
-    const swVenueId = venue_history?.venue_id;
+    const swVenueId = swVenue.id;
     const accessPointId = swVenueId ? SOCIAL_WIFI_AP_MAP[swVenueId] : undefined;
     if (!accessPointId) {
       console.warn('[SOCIAL_WIFI] Unknown venue ID — add it to SOCIAL_WIFI_AP_MAP:', swVenueId);
       return;
     }
 
-    // Reconnect detection: same phone + same AP
+    // Reconnect detection: match by phone if present, otherwise email
+    const lookupField = phone ? 'phone' : 'email';
+    const lookupValue = phone || email;
     let existingGuestId: string | null = null;
-    try {
-      const snap = await db
-        .collection('CaptivePortal_Users')
-        .where('phone', '==', phone)
-        .where('captivePortalAccessPointId', '==', accessPointId)
-        .limit(1)
-        .get();
-      if (!snap.empty) existingGuestId = snap.docs[0].id;
-    } catch (err) {
-      console.error('[SOCIAL_WIFI] Reconnect lookup error:', err);
+    if (lookupValue) {
+      try {
+        const snap = await db
+          .collection('CaptivePortal_Users')
+          .where(lookupField, '==', lookupValue)
+          .where('captivePortalAccessPointId', '==', accessPointId)
+          .limit(1)
+          .get();
+        if (!snap.empty) existingGuestId = snap.docs[0].id;
+      } catch (err) {
+        console.error('[SOCIAL_WIFI] Reconnect lookup error:', err);
+      }
     }
 
     const wifiEvent: WifiEvent = existingGuestId ? 'onReconnect' : 'onConnect';
@@ -103,10 +114,10 @@ router.post('/', async (req: Request, res: Response) => {
         marketingConsent: { given: marketingOptIn, timestamp, version: '1.0' },
       });
       wifiGuestId = ref.id;
-      console.log('[SOCIAL_WIFI] New guest created:', wifiGuestId, phone);
+      console.log('[SOCIAL_WIFI] New guest created:', wifiGuestId, phone || email);
     } else {
       wifiGuestId = existingGuestId;
-      console.log('[SOCIAL_WIFI] Reconnect:', wifiGuestId, phone);
+      console.log('[SOCIAL_WIFI] Reconnect:', wifiGuestId, phone || email);
       db.collection('CaptivePortal_Users').doc(wifiGuestId)
         .update({ connectionCount: FieldValue.increment(1) })
         .catch((err) => console.error('[SOCIAL_WIFI] Reconnect count error:', err));
