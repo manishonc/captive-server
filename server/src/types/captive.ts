@@ -61,6 +61,7 @@ export interface CaptivePortalMarketingDocument {
   wifiGuestId: string;
   to: string;
   messageIndex: number;
+  templateMessageId?: string | null;
   delayMinutes: number;
   sendAt: string;
   scheduledAt: FieldValue;
