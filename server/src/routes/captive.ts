@@ -628,7 +628,7 @@ router.post('/ap-heartbeat', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Access point not found' });
     }
 
-    await snap.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() });
+    await snap.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp(), status: 'online' });
     console.log('[HEARTBEAT] AP checked in:', normalizedMac);
     return res.json({ success: true });
   } catch (err) {
