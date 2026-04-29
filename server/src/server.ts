@@ -6,6 +6,7 @@ import emailRoutes from './routes/email';
 import twilioWebhookRoutes from './routes/twilioWebhook';
 import whatsappWebhookRoutes from './routes/whatsappWebhook';
 import socialWifiWebhookRoutes from './routes/socialWifiWebhook';
+import { startApMonitor } from './jobs/apMonitor';
 
 const app = express();
 const PORT = 4000;
@@ -25,4 +26,5 @@ app.get('/health', (_req: Request, res: Response) => {
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
+  startApMonitor();
 });

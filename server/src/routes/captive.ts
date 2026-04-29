@@ -44,6 +44,8 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
     if (!snapshot.empty) {
       captivePortalAccessPointId = snapshot.docs[0].id;
+      snapshot.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() })
+        .catch((err) => console.error('[AP LASTSEEN ERROR]', err));
     } else {
       console.warn('[APMAC LOOKUP] No access point found for apmac:', apmac);
     }
@@ -589,6 +591,8 @@ router.post('/radius/authorize', async (req: Request, res: Response) => {
 
     const ap = apSnap.docs[0].data();
     const sessionTimeout: number = ap.sessionTimeout || 36000;
+    apSnap.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() })
+      .catch((err) => console.error('[AP LASTSEEN ERROR]', err));
 
     console.log('[RADIUS AUTH] Accept AP:', normalizedMac, 'timeout:', sessionTimeout);
 
@@ -599,6 +603,37 @@ router.post('/radius/authorize', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[RADIUS AUTH ERROR]', err);
     return res.status(500).json({ 'control:Auth-Type': { value: 'Reject', op: ':=' } });
+  }
+});
+
+router.post('/ap-heartbeat', async (req: Request, res: Response) => {
+  const { mac, secret } = req.body || {};
+
+  if (!process.env.AP_HEARTBEAT_SECRET || secret !== process.env.AP_HEARTBEAT_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!mac) {
+    return res.status(400).json({ error: 'mac is required' });
+  }
+
+  const normalizedMac = String(mac).toLowerCase().trim();
+
+  try {
+    const snap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', normalizedMac)
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      return res.status(404).json({ error: 'Access point not found' });
+    }
+
+    await snap.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() });
+    console.log('[HEARTBEAT] AP checked in:', normalizedMac);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[HEARTBEAT ERROR]', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

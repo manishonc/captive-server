@@ -37,3 +37,85 @@ export async function sendEmail(
   const result = await client.transactionalEmails.sendTransacEmail(params);
   return result.messageId ?? null;
 }
+
+const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://cms.heidifi.ai';
+
+export async function sendApOfflineAlert(
+  to: string,
+  apName: string,
+  venueName: string,
+  offlineSince: Date
+): Promise<void> {
+  const lastSeenStr = offlineSince.toLocaleString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+  });
+  const subject = `[HeidiFi Alert] Router "${apName}" at ${venueName} is offline`;
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5">
+  <div style="max-width:560px;margin:40px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)">
+    <div style="background:#FF5A5F;padding:28px 36px">
+      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">&#9888; Router Offline Alert</h1>
+    </div>
+    <div style="padding:32px 36px">
+      <p style="margin:0 0 16px;color:#222;font-size:15px;line-height:1.6">Your router <strong>"${apName}"</strong> at <strong>${venueName}</strong> appears to be offline.</p>
+      <div style="background:#FFF8F8;border:1px solid #FFCCCC;border-radius:12px;padding:18px;margin-bottom:24px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <tr><td style="color:#717171;padding:3px 0">Router</td><td style="color:#222;font-weight:600;text-align:right">${apName}</td></tr>
+          <tr><td style="color:#717171;padding:3px 0">Venue</td><td style="color:#222;font-weight:600;text-align:right">${venueName}</td></tr>
+          <tr><td style="color:#717171;padding:3px 0">Last seen</td><td style="color:#222;font-weight:600;text-align:right">${lastSeenStr}</td></tr>
+        </table>
+      </div>
+      <p style="margin:0 0 10px;color:#222;font-size:14px;font-weight:600">What to check:</p>
+      <ol style="margin:0 0 24px;padding-left:20px;color:#444;font-size:14px;line-height:2">
+        <li>Power cycle the router — unplug for 10 seconds then plug back in</li>
+        <li>Check that the ethernet cable is firmly connected</li>
+        <li>Verify your internet/ISP connection is working</li>
+        <li>Check the Aruba Instant On app for device status</li>
+      </ol>
+      <a href="${CMS_DASHBOARD_URL}" style="display:inline-block;background:#222;color:#fff;font-size:14px;font-weight:600;padding:12px 24px;border-radius:10px;text-decoration:none">View Dashboard &rarr;</a>
+    </div>
+    <div style="padding:20px 36px;border-top:1px solid #EBEBEB;background:#FAFAFA">
+      <p style="margin:0 0 8px;color:#555;font-size:12px;font-weight:600">Don&apos;t want these alerts?</p>
+      <p style="margin:0 0 4px;color:#717171;font-size:12px;line-height:1.6">To turn off offline alerts for this router:</p>
+      <ol style="margin:4px 0 0;padding-left:18px;color:#717171;font-size:12px;line-height:1.8">
+        <li>Go to your <a href="${CMS_DASHBOARD_URL}" style="color:#FF5A5F;text-decoration:none;font-weight:600">HeidiFi Dashboard</a></li>
+        <li>Open <strong style="color:#555">Access Points</strong></li>
+        <li>Click <strong style="color:#555">Edit</strong> on this router</li>
+        <li>Toggle <strong style="color:#555">Offline Alerts</strong> off and save</li>
+      </ol>
+    </div>
+  </div>
+</body></html>`;
+  await sendEmail(to, subject, html, 0);
+}
+
+export async function sendApRecoveryAlert(
+  to: string,
+  apName: string,
+  venueName: string
+): Promise<void> {
+  const subject = `[HeidiFi] Router "${apName}" at ${venueName} is back online`;
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5">
+  <div style="max-width:560px;margin:40px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)">
+    <div style="background:#22C55E;padding:28px 36px">
+      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">&#10003; Router Back Online</h1>
+    </div>
+    <div style="padding:32px 36px">
+      <p style="margin:0 0 16px;color:#222;font-size:15px;line-height:1.6">Good news! Your router <strong>"${apName}"</strong> at <strong>${venueName}</strong> is back online and operating normally.</p>
+      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:12px;padding:18px;margin-bottom:24px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <tr><td style="color:#717171;padding:3px 0">Router</td><td style="color:#222;font-weight:600;text-align:right">${apName}</td></tr>
+          <tr><td style="color:#717171;padding:3px 0">Venue</td><td style="color:#222;font-weight:600;text-align:right">${venueName}</td></tr>
+          <tr><td style="color:#717171;padding:3px 0">Status</td><td style="color:#16A34A;font-weight:600;text-align:right">Online &#10003;</td></tr>
+        </table>
+      </div>
+      <a href="${CMS_DASHBOARD_URL}" style="display:inline-block;background:#222;color:#fff;font-size:14px;font-weight:600;padding:12px 24px;border-radius:10px;text-decoration:none">View Dashboard &rarr;</a>
+    </div>
+  </div>
+</body></html>`;
+  await sendEmail(to, subject, html, 0);
+}
