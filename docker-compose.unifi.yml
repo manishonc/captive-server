@@ -32,29 +32,13 @@ services:
     ports:
       # AP inform — must be reachable from physical APs (8080 taken by Coolify on host)
       - "8085:8080"
+      # Controller UI + API — access at https://<server-ip>:8443
+      - "8443:8443"
       # STUN (optional but recommended)
       - "3478:3478/udp"
-      # 8443 not exposed to host — Traefik reaches it via the coolify network
     networks:
       - coolify
     restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      # HTTPS router — Let's Encrypt cert for unifi.heidifi.ai
-      - "traefik.http.routers.unifi.rule=Host(`unifi.heidifi.ai`)"
-      - "traefik.http.routers.unifi.entrypoints=https"
-      - "traefik.http.routers.unifi.tls=true"
-      - "traefik.http.routers.unifi.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.unifi.service=unifi-svc"
-      # HTTP → HTTPS redirect
-      - "traefik.http.routers.unifi-http.rule=Host(`unifi.heidifi.ai`)"
-      - "traefik.http.routers.unifi-http.entrypoints=http"
-      - "traefik.http.routers.unifi-http.middlewares=redirect-to-https"
-      # Backend: UniFi speaks HTTPS with a self-signed cert
-      - "traefik.http.services.unifi-svc.loadbalancer.server.port=8443"
-      - "traefik.http.services.unifi-svc.loadbalancer.server.scheme=https"
-      - "traefik.http.serversTransports.unifi-transport.insecureSkipVerify=true"
-      - "traefik.http.services.unifi-svc.loadbalancer.serversTransport=unifi-transport"
 
 volumes:
   unifi_db_data:
