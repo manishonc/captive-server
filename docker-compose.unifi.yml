@@ -1,0 +1,49 @@
+services:
+  unifi-db:
+    image: mongo:7.0
+    container_name: unifi-db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${UNIFI_MONGO_ROOT_USER:-root}
+      - MONGO_INITDB_ROOT_PASSWORD=${UNIFI_MONGO_ROOT_PASS:-changeme_root}
+    volumes:
+      - unifi_db_data:/data/db
+      - ./unifi/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    networks:
+      - coolify
+    restart: unless-stopped
+
+  unifi:
+    image: lscr.io/linuxserver/unifi-network-application:latest
+    container_name: unifi
+    depends_on:
+      - unifi-db
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - MONGO_USER=${UNIFI_MONGO_USER:-unifi}
+      - MONGO_PASS=${UNIFI_MONGO_PASS:-changeme_unifi}
+      - MONGO_HOST=unifi-db
+      - MONGO_PORT=27017
+      - MONGO_DBNAME=unifi
+      - MONGO_AUTHSOURCE=admin
+    volumes:
+      - unifi_config:/config
+    ports:
+      # AP inform — must be reachable from physical APs (8080 taken by Coolify on host)
+      - "8085:8080"
+      # HTTPS controller UI + API
+      - "8443:8443"
+      # STUN (optional but recommended)
+      - "3478:3478/udp"
+    networks:
+      - coolify
+    restart: unless-stopped
+
+volumes:
+  unifi_db_data:
+  unifi_config:
+
+networks:
+  coolify:
+    external: true
