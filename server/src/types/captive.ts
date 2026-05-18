@@ -116,3 +116,29 @@ export interface CaptivePortalSessionDocument {
   timestamp: string;
   createdAt: FieldValue;
 }
+
+export type UnifiControllerType = 'classic' | 'udm';
+
+export interface UnifiConfig {
+  controllerType: UnifiControllerType;
+  controllerUrl: string;
+  site: string;
+  username: string;
+  password: string;
+}
+
+export interface UnifiAuthorizeRequestBody {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  phoneCountryCode?: string;
+  clientMac?: string;
+  apMac?: string;
+  url?: string;
+  ssid?: string;
+  timestamp?: string;
+  privacyPolicyConsent?: ConsentRecord;
+  termsConsent?: ConsentRecord;
+  marketingConsent?: ConsentRecord;
+}

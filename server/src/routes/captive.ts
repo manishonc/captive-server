@@ -1,11 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, toE164 as toE164WA } from '../services/whatsapp';
 import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
+import { authorizeGuest as unifiAuthorizeGuest } from '../services/unifi';
 
 const router = Router();
 
@@ -604,6 +605,163 @@ router.post('/radius/authorize', async (req: Request, res: Response) => {
     console.error('[RADIUS AUTH ERROR]', err);
     return res.status(500).json({ 'control:Auth-Type': { value: 'Reject', op: ':=' } });
   }
+});
+
+router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeRequestBody>, res: Response) => {
+  const {
+    firstName,
+    lastName,
+    email,
+    phone,
+    phoneCountryCode,
+    clientMac,
+    apMac,
+    url,
+    ssid,
+    privacyPolicyConsent,
+    termsConsent,
+    marketingConsent,
+  } = req.body;
+  const timestamp = req.body.timestamp || new Date().toISOString();
+
+  if (!clientMac || !apMac) {
+    return res.status(400).json({ success: false, message: 'clientMac and apMac are required' });
+  }
+
+  const normalizedApMac = String(apMac).toLowerCase().trim();
+  const normalizedClientMac = String(clientMac).toLowerCase().trim();
+
+  // Look up AP by MAC to get unifiConfig + venueId
+  let captivePortalAccessPointId: string | null = null;
+  let unifiConfig: UnifiConfig | null = null;
+  let sessionTimeoutSeconds = 36000;
+
+  try {
+    const apSnap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', normalizedApMac)
+      .limit(1)
+      .get();
+
+    if (apSnap.empty) {
+      console.warn('[UNIFI AUTH] Unknown AP:', normalizedApMac);
+      return res.status(403).json({ success: false, message: 'Access point not registered' });
+    }
+
+    const apDoc = apSnap.docs[0];
+    const apData = apDoc.data();
+    captivePortalAccessPointId = apDoc.id;
+    sessionTimeoutSeconds = apData.sessionTimeout || 36000;
+
+    if (!apData.unifiConfig?.controllerUrl || !apData.unifiConfig?.username || !apData.unifiConfig?.password) {
+      console.error('[UNIFI AUTH] AP missing unifiConfig:', normalizedApMac);
+      return res.status(500).json({ success: false, message: 'AP controller not configured' });
+    }
+
+    unifiConfig = {
+      controllerType: apData.unifiConfig.controllerType || 'classic',
+      controllerUrl: apData.unifiConfig.controllerUrl,
+      site: apData.unifiConfig.site || 'default',
+      username: apData.unifiConfig.username,
+      password: apData.unifiConfig.password,
+    };
+
+    apDoc.ref.update({ lastSeen: FieldValue.serverTimestamp() })
+      .catch((err) => console.error('[AP LASTSEEN ERROR]', err));
+  } catch (err) {
+    console.error('[UNIFI AUTH] AP lookup error:', err);
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+
+  // Call UniFi controller to authorize the guest device
+  try {
+    const minutes = Math.round(sessionTimeoutSeconds / 60);
+    await unifiAuthorizeGuest(unifiConfig!, normalizedClientMac, minutes);
+  } catch (err) {
+    console.error('[UNIFI AUTH] Controller authorize failed:', err);
+    return res.status(502).json({ success: false, message: 'Failed to authorize with UniFi controller' });
+  }
+
+  // Reconnect detection
+  let existingWifiGuestId: string | null = null;
+  if (email && captivePortalAccessPointId) {
+    try {
+      const existingSnap = await db.collection('CaptivePortal_Users')
+        .where('email', '==', email)
+        .where('captivePortalAccessPointId', '==', captivePortalAccessPointId)
+        .limit(1)
+        .get();
+      if (!existingSnap.empty) existingWifiGuestId = existingSnap.docs[0].id;
+    } catch (err) {
+      console.error('[UNIFI AUTH] Reconnect lookup error:', err);
+    }
+  }
+
+  const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
+  const marketingOptIn = marketingConsent?.given ?? false;
+  let wifiGuestId: string;
+
+  if (!existingWifiGuestId) {
+    const doc: CaptivePortalUserDocument = {
+      firstName: firstName || '',
+      lastName: lastName || '',
+      email: email || '',
+      phone: phone || '',
+      phoneCountryCode: phoneCountryCode || '',
+      mac: normalizedClientMac,
+      ip: '',
+      url: url || '',
+      post: '',
+      timestamp,
+      createdAt: FieldValue.serverTimestamp(),
+      captivePortalAccessPointId,
+      connectionCount: 1,
+      marketingOptIn,
+      privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
+      termsConsent: termsConsent || defaultConsent(),
+      marketingConsent: marketingConsent || defaultConsent(),
+    };
+
+    try {
+      const ref = await db.collection('CaptivePortal_Users').add(doc);
+      wifiGuestId = ref.id;
+      console.log('[UNIFI] New connection', wifiGuestId, email, normalizedApMac);
+    } catch (err) {
+      console.error('[UNIFI AUTH] Firestore write error:', err);
+      // Auth already granted — return success even if DB write fails
+      return res.json({ success: true });
+    }
+  } else {
+    wifiGuestId = existingWifiGuestId;
+    console.log('[UNIFI] Reconnect', wifiGuestId, email, normalizedApMac);
+    db.collection('CaptivePortal_Users').doc(wifiGuestId)
+      .update({ connectionCount: FieldValue.increment(1) })
+      .catch((err) => console.error('[UNIFI RECONNECT COUNT ERROR]', err));
+  }
+
+  if (captivePortalAccessPointId) {
+    const sessionDoc: CaptivePortalSessionDocument = {
+      wifiEvent,
+      wifiGuestId,
+      accessPointId: captivePortalAccessPointId,
+      mac: normalizedClientMac,
+      ip: '',
+      timestamp,
+      createdAt: FieldValue.serverTimestamp(),
+    };
+    db.collection('CaptivePortal_Sessions').add(sessionDoc)
+      .catch((err) => console.error('[UNIFI SESSION LOG ERROR]', err));
+  }
+
+  if (marketingOptIn && captivePortalAccessPointId) {
+    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
+      .catch((err) => console.error('[UNIFI SMS SCHEDULE ERROR]', err));
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
+      .catch((err) => console.error('[UNIFI EMAIL SCHEDULE ERROR]', err));
+    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+      .catch((err) => console.error('[UNIFI WHATSAPP SCHEDULE ERROR]', err));
+  }
+
+  return res.json({ success: true, id: wifiGuestId });
 });
 
 router.post('/ap-heartbeat', async (req: Request, res: Response) => {
