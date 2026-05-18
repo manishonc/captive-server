@@ -30,8 +30,8 @@ services:
     volumes:
       - unifi_config:/config
     ports:
-      # AP inform — must be reachable from physical APs
-      - "8080:8080"
+      # AP inform — must be reachable from physical APs (8080 taken by Coolify on host)
+      - "8085:8080"
       # HTTPS controller UI + API
       - "8443:8443"
       # STUN (optional but recommended)
