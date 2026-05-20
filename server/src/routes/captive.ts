@@ -518,7 +518,8 @@ const SPLASH_DEFAULTS = {
 };
 
 router.get('/splash-config', async (req: Request, res: Response) => {
-  const { apmac } = req.query as { apmac?: string };
+  const { apmac: apmacParam, ap } = req.query as { apmac?: string; ap?: string };
+  const apmac = (apmacParam || ap || '').toLowerCase().trim();
 
   if (!apmac) return res.json({ success: true, config: SPLASH_DEFAULTS });
 
