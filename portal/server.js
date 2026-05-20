@@ -40,18 +40,35 @@ function fetchSplashConfig(apmac) {
   });
 }
 
+// UniFi external hotspot redirects to /guest/s/{site}/ (not /). Forward to / with params intact.
+// UniFi uses ap + id; Aruba uses apmac + mac — normalize below.
+app.get('/guest/s/:site', (req, res) => {
+  const q = new URLSearchParams(req.query);
+  if (req.query.ap && !q.has('apmac')) q.set('apmac', String(req.query.ap));
+  if (req.query.id && !q.has('mac')) q.set('mac', String(req.query.id));
+  const qs = q.toString();
+  console.log('[PORTAL UNIFI]', req.path, qs || '(no query)');
+  res.redirect(302, '/' + (qs ? '?' + qs : ''));
+});
+
 // GET / — captive portal entry point
 // Pass ?preview=1 to render with the preview banner (dashboard use only).
 // Aruba never appends this param so real users are unaffected.
 app.get('/', async (req, res) => {
-  const { cmd, mac, ip, network, apmac, site, post, url, preview, templateId: templateIdOverride } = req.query;
-  if (cmd) {
-    console.log('[PORTAL HIT]', JSON.stringify({ cmd, mac, ip, network, apmac, site, post, url, timestamp: new Date().toISOString() }));
+  const { cmd, mac, ip, network, apmac, ap, id, site, post, url, preview, templateId: templateIdOverride } = req.query;
+  const resolvedApmac = apmac || ap;
+  const resolvedMac = mac || id;
+  if (cmd || ap) {
+    console.log('[PORTAL HIT]', JSON.stringify({
+      vendor: ap ? 'unifi' : 'aruba',
+      cmd, mac: resolvedMac, ip, network, apmac: resolvedApmac, site, post, url,
+      timestamp: new Date().toISOString(),
+    }));
   }
 
   try {
-    const result = await fetchSplashConfig(apmac);
-    const apRegistered = !apmac || !result || result.registered !== false;
+    const result = await fetchSplashConfig(resolvedApmac);
+    const apRegistered = !resolvedApmac || !result || result.registered !== false;
 
     if (!apRegistered) {
       return res.sendFile(path.join(__dirname, 'public', 'unregistered.html'));
