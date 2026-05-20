@@ -1,6 +1,9 @@
-// ── 1. Aruba params ────────────────────────────────────────────────────────
+// ── 1. Vendor params (Aruba: apmac/mac/post — UniFi: ap/id/url/ssid) ───────
 var _params = new URLSearchParams(window.location.search);
 function param(k) { return _params.get(k) || ''; }
+function isUnifi() { return !!param('ap'); }
+function clientMac() { return param('mac') || param('id'); }
+function apMac() { return param('apmac') || param('ap'); }
 
 // ── 3. Step 1 → Step 2 transition ─────────────────────────────────────────
 function goToConsent() {
@@ -94,11 +97,11 @@ async function submitConsent(marketing) {
       body: JSON.stringify({
         firstName, lastName, email,
         phone, phoneCountryCode: dialCode,
-        mac:   param('mac'),
+        mac:   clientMac(),
         ip:    param('ip'),
         url:   param('url'),
         post:  param('post'),
-        apmac: param('apmac'),
+        apmac: apMac(),
         privacyPolicyConsent,
         termsConsent,
         marketingConsent,
@@ -106,17 +109,42 @@ async function submitConsent(marketing) {
     });
     if (!res.ok) throw new Error('Server error');
 
-    // Populate hidden form and submit to /submit for Aruba auth
+    if (isUnifi()) {
+      var authRes = await fetch('/api/unifi-authorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          firstName, lastName, email,
+          phone, phoneCountryCode: dialCode,
+          clientMac: clientMac(),
+          apMac: apMac(),
+          url: param('url'),
+          ssid: param('ssid'),
+          privacyPolicyConsent,
+          termsConsent,
+          marketingConsent,
+        }),
+      });
+      var authData = await authRes.json().catch(function() { return {}; });
+      if (!authRes.ok || !authData.success) {
+        throw new Error(authData.message || 'Could not authorize WiFi access');
+      }
+      var dest = param('url');
+      window.location.href = (dest && /^https?:\/\//i.test(dest)) ? dest : '/success';
+      return;
+    }
+
+    // Aruba: populate hidden form and POST to /submit → swarm.cgi
     document.getElementById('f_firstName').value        = firstName;
     document.getElementById('f_lastName').value         = lastName;
     document.getElementById('f_email').value            = email;
     document.getElementById('f_phone').value            = phone;
     document.getElementById('f_phoneCountryCode').value = dialCode;
-    document.getElementById('f_mac').value              = param('mac');
+    document.getElementById('f_mac').value              = clientMac();
     document.getElementById('f_ip').value               = param('ip');
     document.getElementById('f_url').value              = param('url');
     document.getElementById('f_post').value             = param('post');
-    document.getElementById('f_apmac').value            = param('apmac');
+    document.getElementById('f_apmac').value            = apMac();
     document.getElementById('portalForm').submit();
 
   } catch (e) {
