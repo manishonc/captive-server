@@ -119,6 +119,32 @@ app.get('/api/privacy-policy', (_req, res) => proxyGet('/privacy-policy', res));
 // GET /api/terms — proxies to backend GET /terms
 app.get('/api/terms', (_req, res) => proxyGet('/terms', res));
 
+// POST /api/unifi-authorize — proxy to server POST /unifi/authorize (UniFi guest access)
+app.post('/api/unifi-authorize', (req, res) => {
+  const useHttps = SERVER_PORT === 443;
+  const http = require(useHttps ? 'https' : 'http');
+  const payload = JSON.stringify(req.body);
+  const proxyReq = http.request({
+    hostname: process.env.SERVER_HOST || 'server',
+    port: SERVER_PORT,
+    path: '/unifi/authorize',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+  }, (proxyRes) => {
+    let data = '';
+    proxyRes.on('data', (chunk) => { data += chunk; });
+    proxyRes.on('end', () => {
+      res.status(proxyRes.statusCode).set('Content-Type', 'application/json').send(data);
+    });
+  });
+  proxyReq.on('error', (err) => {
+    console.error('[UNIFI PROXY ERROR]', err.message);
+    res.status(502).json({ success: false, message: 'Could not reach server' });
+  });
+  proxyReq.write(payload);
+  proxyReq.end();
+});
+
 // POST /api/create-user — proxy to server service to persist user in Firestore
 app.post('/api/create-user', (req, res) => {
   const useHttps = SERVER_PORT === 443;
