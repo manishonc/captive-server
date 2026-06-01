@@ -35,6 +35,13 @@ export interface MarketingEmailMessage {
   delayMinutes: number;
 }
 
+export interface MarketingWhatsAppMessage {
+  templateName: string;
+  languageCode: string;
+  content: string;
+  delayMinutes: number;
+}
+
 export interface MarketingChannelConfig<T> {
   enabled: boolean;
   messages: T[];
@@ -43,7 +50,7 @@ export interface MarketingChannelConfig<T> {
 export interface AccessPointMarketing {
   sms?: MarketingChannelConfig<MarketingSmsMessage>;
   email?: MarketingChannelConfig<MarketingEmailMessage>;
-  whatsapp?: MarketingChannelConfig<unknown>;
+  whatsapp?: MarketingChannelConfig<MarketingWhatsAppMessage>;
 }
 
 export type WifiEvent = 'onConnect' | 'onReconnect' | 'onDisconnect';
