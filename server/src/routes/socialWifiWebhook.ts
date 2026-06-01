@@ -6,6 +6,7 @@ import { scheduleSms } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate } from '../services/whatsapp';
 import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
+import { getVenueName } from '../services/venue';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
 
 const router = Router();
@@ -214,7 +215,7 @@ async function scheduleWhatsAppForVenue(
   const whatsappConfig = marketingDoc.data()?.events?.[wifiEvent]?.whatsapp;
   if (!whatsappConfig?.enabled || !whatsappConfig?.messages?.length) return;
 
-  const venueName: string = marketingDoc.data()?.venueName || '';
+  const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < whatsappConfig.messages.length; i++) {
     const msg = whatsappConfig.messages[i];

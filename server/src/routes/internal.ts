@@ -10,10 +10,10 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { db } from '../firebase';
 import { scheduleSms } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
+import { getVenueName } from '../services/venue';
 
 const router = Router();
 
@@ -87,15 +87,8 @@ router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Respon
     const to = normalizePhone(recipient);
     if (!to) return res.status(400).json({ ok: false, error: 'Invalid phone number' });
 
-    // Resolve venueName the same way the live dispatch does.
-    let venueName = '';
-    if (venueId) {
-      const marketingDoc = await db
-        .collection('CaptivePortal_EntityMarketing')
-        .doc(`venue_${venueId}`)
-        .get();
-      venueName = marketingDoc.data()?.venueName || '';
-    }
+    // Resolve venueName from the venue record (same as the live dispatch).
+    const venueName = await getVenueName(venueId || '');
 
     // Build components exactly like the live path, but with a direct rating URL
     // suffix (no short-link / no click tracking — this is just a test).

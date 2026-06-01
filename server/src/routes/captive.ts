@@ -7,6 +7,7 @@ import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } from '../services/whatsapp';
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest } from '../services/unifi';
+import { getVenueName } from '../services/venue';
 
 const router = Router();
 
@@ -281,7 +282,7 @@ async function scheduleWhatsAppForEvent(
     return;
   }
 
-  const venueName: string = marketingDoc.data()?.venueName || '';
+  const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < whatsappConfig.messages.length; i++) {
     const msg = whatsappConfig.messages[i];
