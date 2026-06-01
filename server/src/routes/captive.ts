@@ -4,8 +4,8 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
-import { sendWhatsAppTemplate, toE164 as toE164WA } from '../services/whatsapp';
-import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
+import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } from '../services/whatsapp';
+import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest } from '../services/unifi';
 
 const router = Router();
@@ -289,16 +289,47 @@ async function scheduleWhatsAppForEvent(
 
     const delayMinutes: number = msg.delayMinutes ?? 0;
 
-    // Build body components — inject firstName and venueName as {{1}} and {{2}}
-    const components = msg.components ?? [
-      {
-        type: 'body',
-        parameters: [
-          { type: 'text', text: firstName || 'Guest' },
-          { type: 'text', text: venueName || 'our venue' },
-        ],
-      },
-    ];
+    // Pre-allocate the analytics doc so the rating short-link can reference it.
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = {
+      venueId,
+      marketingDocId: mRef.id,
+      wifiGuestId,
+      channel: 'whatsapp',
+    };
+    const shortCodes: string[] = [];
+
+    // Build components. An admin-supplied components array wins; otherwise inject
+    // firstName/venueName into the body ({{1}}/{{2}}) and a freshly-minted tracked
+    // short link into the dynamic "Rate Us" URL button. The button base lives in the
+    // approved template (https://visit.askheidi.app/), so we pass only the suffix
+    // `s/<code>` — identical short-link click tracking as SMS/email.
+    let components: WhatsAppTemplateComponent[] | undefined = msg.components;
+    if (!components) {
+      const built: WhatsAppTemplateComponent[] = [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: firstName || 'Guest' },
+            { type: 'text', text: venueName || 'our venue' },
+          ],
+        },
+      ];
+      try {
+        const rateUrl = `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`;
+        const code = await createShortLink({ targetType: 'venue-rate', targetUrl: rateUrl, ...ctx });
+        shortCodes.push(code);
+        built.push({
+          type: 'button',
+          sub_type: 'url',
+          index: 0,
+          parameters: [{ type: 'text', text: `s/${code}` }],
+        });
+      } catch (err) {
+        console.error('[SHORTLINK SWAP ERROR - whatsapp]', err);
+      }
+      components = built;
+    }
 
     // Meta Cloud API has no native scheduling — use setTimeout for short delays
     // For production with long delays, replace with a job queue (e.g. Bull, GCP Tasks)
@@ -327,7 +358,7 @@ async function scheduleWhatsAppForEvent(
           sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
           scheduledAt: FieldValue.serverTimestamp(),
           deliveryStatus: 'sent',
-          shortCodes: [] as string[],
+          shortCodes,
           clickCount: 0,
           firstClickedAt: null,
           lastClickedAt: null,
@@ -338,7 +369,7 @@ async function scheduleWhatsAppForEvent(
           ratedAt: null,
           rating: null,
         };
-        await db.collection('CaptivePortal_Marketing').add(record)
+        await mRef.set(record)
           .catch((err) => console.error('[WHATSAPP ANALYTICS ERROR]', err));
       }
     };

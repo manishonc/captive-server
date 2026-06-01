@@ -13,6 +13,10 @@ const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
 
 export interface WhatsAppTemplateComponent {
   type: 'header' | 'body' | 'button';
+  /** Required for button components — identifies the button kind. */
+  sub_type?: 'url' | 'quick_reply';
+  /** Required for button components — zero-based index of the button. */
+  index?: number;
   parameters: Array<{ type: 'text'; text: string }>;
 }
 
