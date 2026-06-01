@@ -142,6 +142,28 @@ See also: `docs/router-offline-alerts.md`
 
 ---
 
+## Internal API (marketing test sends)
+
+Used by the CMS to trigger immediate marketing "Send test" messages via
+`POST /internal/test-send`.
+
+| Variable | Description |
+|---|---|
+| `INTERNAL_API_SECRET` | Shared secret authenticating server-to-server calls from the CMS. Must equal the CMS's `CAPTIVE_SERVER_INTERNAL_SECRET`. Endpoint fails closed (401) if unset. |
+
+**`INTERNAL_API_SECRET`:** Generate with `openssl rand -hex 32`.
+
+> The CMS side needs two matching vars set in the **CMS** deployment (not here):
+> `CAPTIVE_SERVER_URL` (this server's public URL, e.g. `https://api.heidifi.ai`) and
+> `CAPTIVE_SERVER_INTERNAL_SECRET` (= `INTERNAL_API_SECRET`).
+
+Sends reuse the existing Twilio / Brevo / WhatsApp credentials above — no new
+provider keys needed.
+
+See also: `docs/marketing-test-send.md`
+
+---
+
 ## RADIUS (optional)
 
 | Variable | Description |
