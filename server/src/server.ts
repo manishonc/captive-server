@@ -6,6 +6,7 @@ import emailRoutes from './routes/email';
 import twilioWebhookRoutes from './routes/twilioWebhook';
 import whatsappWebhookRoutes from './routes/whatsappWebhook';
 import socialWifiWebhookRoutes from './routes/socialWifiWebhook';
+import internalRoutes from './routes/internal';
 import { startApMonitor } from './jobs/apMonitor';
 
 const app = express();
@@ -19,6 +20,7 @@ app.use('/schedule-email', emailRoutes);
 app.use('/webhook/twilio/sms-status', twilioWebhookRoutes);
 app.use('/webhook/whatsapp', whatsappWebhookRoutes);
 app.use('/webhook/social-wifi', socialWifiWebhookRoutes);
+app.use('/internal', internalRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
