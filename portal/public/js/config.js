@@ -3,6 +3,7 @@ var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFI
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
   logoUrl: '',
+  showLogo: true,
   primaryColor: '#1c2b4a',
   backgroundColor: '#ffffff',
   collectEmail: true,
@@ -18,8 +19,16 @@ function applyPortalConfig(cfg) {
   document.documentElement.style.setProperty('--primary', cfg.primaryColor);
   document.body.style.background = cfg.backgroundColor;
 
-  // Logo
-  if (cfg.logoUrl) {
+  // Logo — class-based control so every template can react consistently:
+  //   body.portal-has-logo → reveal/keep the logo (templates style .logo-wrap and
+  //     hide their decorative .deco-icon under this class)
+  //   body.portal-no-logo  → text-only (logo hidden everywhere)
+  // showLogo defaults to true; an empty logoUrl falls back to the default logo
+  // already baked into each template's <img src>.
+  var showLogo = cfg.showLogo !== false;
+  document.body.classList.toggle('portal-has-logo', showLogo);
+  document.body.classList.toggle('portal-no-logo', !showLogo);
+  if (showLogo && cfg.logoUrl) {
     document.querySelectorAll('.logo-wrap img').forEach(function(el) { el.src = cfg.logoUrl; });
   }
 
@@ -75,7 +84,7 @@ if (window.PREVIEW_MODE) {
     var d = e.data;
     if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
     // Only fields applyable without a reload; templateId is handled via iframe reload.
-    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl'].forEach(function (k) {
+    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo'].forEach(function (k) {
       if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
     });
     applyPortalConfig(CONFIG);

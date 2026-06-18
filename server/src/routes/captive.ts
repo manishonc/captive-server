@@ -539,6 +539,7 @@ const SPLASH_DEFAULTS = {
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
   logoUrl: '',
+  showLogo: true,
   primaryColor: '#1c2b4a',
   backgroundColor: '#ffffff',
   collectEmail: true,

@@ -48,10 +48,14 @@
       max-height: 80px;
       max-width: 220px;
       object-fit: contain;
-      filter: brightness(0) invert(1) drop-shadow(0 2px 8px rgba(0,0,0,0.4));
+      /* Keep the logo's real colors (so tenant logos aren't flattened to white);
+         a soft shadow keeps it legible on the dark background. */
+      filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
     }
     .logo-wrap.compact { padding: 24px 24px 14px; }
     .logo-wrap.compact img { max-height: 56px; }
+    /* Tenant can hide the logo (text-only) via the "Show logo" toggle. */
+    body.portal-no-logo .logo-wrap { display: none; }
 
     .body-pad {
       padding: 0 24px;

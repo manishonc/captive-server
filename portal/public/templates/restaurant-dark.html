@@ -39,8 +39,13 @@
       background: linear-gradient(to top, #0c0a09 0%, rgba(28,25,23,0.8) 50%, rgba(28,25,23,0.4) 100%);
     }
 
-    /* Hidden: satisfies config.js `.logo-wrap img` querySelector */
-    .logo-wrap { display: none; }
+    /* Logo: shown by default (body.portal-has-logo). When the tenant turns the
+       logo off (body.portal-no-logo) we fall back to the decorative .deco-icon. */
+    .logo-wrap { display: none; justify-content: center; align-items: center; margin: 0 auto 16px; }
+    .logo-wrap img { max-height: 60px; max-width: 220px; object-fit: contain; }
+    body.portal-has-logo .logo-wrap { display: flex; }
+    body.portal-has-logo .deco-icon { display: none; }
+    body.portal-no-logo .logo-wrap { display: none; }
 
     /* ── Portal wrap ───────────────────────────────────── */
     .portal-wrap {
@@ -396,11 +401,6 @@
   <div class="bg-gradient"></div>
 </div>
 
-<!-- Hidden: satisfies config.js `.logo-wrap img` querySelector -->
-<div class="logo-wrap">
-  <img src="/headerLogo.png" alt="">
-</div>
-
 <% if (typeof previewMode !== 'undefined' && previewMode) { %>
 <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
             text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
@@ -413,7 +413,8 @@
 
     <!-- Card header -->
     <div class="card-header">
-      <div class="icon-wrap">
+      <div class="logo-wrap"><img src="/headerLogo.png" alt="Logo"></div>
+      <div class="icon-wrap deco-icon">
         <!-- UtensilsCrossed icon -->
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

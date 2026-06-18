@@ -37,8 +37,13 @@
       background: radial-gradient(circle, rgba(0,180,160,0.04) 0%, transparent 70%);
     }
 
-    .logo-wrap { display: none; }
-    .logo-wrap img { height: 32px; }
+    /* Logo: shown by default (body.portal-has-logo). When the tenant turns the
+       logo off (body.portal-no-logo) we fall back to the decorative .deco-icon. */
+    .logo-wrap { display: none; justify-content: center; align-items: center; margin: 0 auto 16px; }
+    .logo-wrap img { max-height: 60px; max-width: 220px; object-fit: contain; }
+    body.portal-has-logo .logo-wrap { display: flex; }
+    body.portal-has-logo .deco-icon { display: none; }
+    body.portal-no-logo .logo-wrap { display: none; }
 
     .portal-wrap {
       position: relative;
@@ -298,7 +303,6 @@
 
 <div class="glow glow-1"></div>
 <div class="glow glow-2"></div>
-<div class="logo-wrap"><img src="/headerLogo.png" alt=""></div>
 
 <% if (typeof previewMode !== 'undefined' && previewMode) { %>
 <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
@@ -310,7 +314,8 @@
 <div class="portal-wrap">
   <div class="card">
 
-    <div class="icon-wrap">
+    <div class="logo-wrap"><img src="/headerLogo.png" alt="Logo"></div>
+    <div class="icon-wrap deco-icon">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <!-- Pour-over dripper -->

@@ -53,8 +53,13 @@
       max-width: 448px;
     }
 
-    /* Hidden logo-wrap: satisfies config.js `.logo-wrap img` querySelector */
-    .logo-wrap { display: none; }
+    /* Logo: shown by default (body.portal-has-logo). When the tenant turns the
+       logo off (body.portal-no-logo) we fall back to the decorative .deco-icon. */
+    .logo-wrap { display: none; justify-content: center; align-items: center; margin: 0 auto 16px; }
+    .logo-wrap img { max-height: 60px; max-width: 220px; object-fit: contain; }
+    body.portal-has-logo .logo-wrap { display: flex; }
+    body.portal-has-logo .deco-icon { display: none; }
+    body.portal-no-logo .logo-wrap { display: none; }
 
     .card {
       background: rgba(255, 255, 255, 0.97);
@@ -380,11 +385,6 @@
   <div class="bg-overlay"></div>
 </div>
 
-<!-- Hidden: satisfies config.js `.logo-wrap img` querySelector without visual impact -->
-<div class="logo-wrap">
-  <img src="/headerLogo.png" alt="">
-</div>
-
 <% if (typeof previewMode !== 'undefined' && previewMode) { %>
 <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
             text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
@@ -397,7 +397,8 @@
 
     <!-- Card header -->
     <div class="card-header">
-      <div class="wifi-icon-wrap">
+      <div class="logo-wrap"><img src="/headerLogo.png" alt="Logo"></div>
+      <div class="wifi-icon-wrap deco-icon">
         <!-- Wifi icon (lucide) -->
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
              stroke="#18181b" stroke-width="1.75"
