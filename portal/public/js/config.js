@@ -12,33 +12,68 @@ var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFI
   showTermsOfService: true,
 };
 
-// Apply branding immediately (synchronous, no flash)
-document.documentElement.style.setProperty('--primary', CONFIG.primaryColor);
-document.body.style.background = CONFIG.backgroundColor;
+// Apply branding to the DOM. Safe to call repeatedly (used for live CMS preview).
+function applyPortalConfig(cfg) {
+  // Colors
+  document.documentElement.style.setProperty('--primary', cfg.primaryColor);
+  document.body.style.background = cfg.backgroundColor;
 
-// Logo
-var _logoEls = document.querySelectorAll('.logo-wrap img');
-if (CONFIG.logoUrl) _logoEls.forEach(function(el) { el.src = CONFIG.logoUrl; });
+  // Logo
+  if (cfg.logoUrl) {
+    document.querySelectorAll('.logo-wrap img').forEach(function(el) { el.src = cfg.logoUrl; });
+  }
 
-// Text
-document.querySelector('.section-heading').textContent = CONFIG.title;
-document.querySelector('.section-sub').textContent     = CONFIG.subtitle;
+  // Text
+  var headingEl = document.querySelector('.section-heading');
+  if (headingEl) headingEl.textContent = cfg.title;
+  var subEl = document.querySelector('.section-sub');
+  if (subEl) subEl.textContent = cfg.subtitle;
 
-// Conditional fields
-if (!CONFIG.collectName) {
-  ['firstName', 'lastName'].forEach(function(id) {
-    var fg = document.getElementById(id).closest('.field-group');
-    if (fg) fg.style.display = 'none';
+  // Conditional fields
+  if (!cfg.collectName) {
+    ['firstName', 'lastName'].forEach(function(id) {
+      var el = document.getElementById(id);
+      var fg = el && el.closest('.field-group');
+      if (fg) fg.style.display = 'none';
+    });
+  }
+  if (!cfg.collectEmail) {
+    var emailEl = document.getElementById('email');
+    var emailFg = emailEl && emailEl.closest('.field-group');
+    if (emailFg) emailFg.style.display = 'none';
+  }
+
+  // Footer links
+  if (!cfg.showPrivacyPolicy) {
+    var pl = document.getElementById('privacyLink');
+    if (pl) pl.style.display = 'none';
+  }
+  if (!cfg.showTermsOfService) {
+    var tl = document.getElementById('termsLink');
+    if (tl) tl.style.display = 'none';
+  }
+}
+
+// Apply immediately (synchronous, no flash)
+applyPortalConfig(CONFIG);
+
+// ── Live preview: accept config pushed from the CMS editor (preview mode only) ──
+// Gated on PREVIEW_MODE so live guest sessions never accept external messages.
+if (window.PREVIEW_MODE) {
+  var ALLOWED_CMS_ORIGINS = window.ALLOWED_CMS_ORIGINS || [
+    'https://cms.heidifi.ai', 'http://localhost:3000', 'http://localhost:3001',
+  ];
+  window.addEventListener('message', function (e) {
+    if (ALLOWED_CMS_ORIGINS.indexOf(e.origin) === -1) return;
+    var d = e.data;
+    if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
+    // Only fields applyable without a reload; templateId is handled via iframe reload.
+    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl'].forEach(function (k) {
+      if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
+    });
+    applyPortalConfig(CONFIG);
   });
 }
-if (!CONFIG.collectEmail) {
-  var emailFg = document.getElementById('email').closest('.field-group');
-  if (emailFg) emailFg.style.display = 'none';
-}
-
-// Footer links
-if (!CONFIG.showPrivacyPolicy)  document.getElementById('privacyLink').style.display = 'none';
-if (!CONFIG.showTermsOfService) document.getElementById('termsLink').style.display   = 'none';
 
 // DEBUG badge — hidden, remove once pipeline is verified
 // var _src = (typeof window.PORTAL_CONFIG !== 'undefined') ? 'firebase' : 'default';
