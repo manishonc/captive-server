@@ -36,8 +36,11 @@
       max-height: 90px;
       max-width: 200px;
       object-fit: contain;
-      filter: brightness(0) invert(1);
+      /* Keep the logo's real colors so tenant logos aren't flattened to white. */
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,0.35));
     }
+    /* Tenant can hide the logo (text-only) via the "Show logo" toggle. */
+    body.portal-no-logo .logo-wrap { display: none; }
     .brand-tagline {
       font-size: 14px;
       color: rgba(255,255,255,0.7);
