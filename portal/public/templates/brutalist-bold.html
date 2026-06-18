@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest WiFi</title>
+  <style>
+    :root { --primary: #f97316; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Helvetica Neue', Arial, -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      background: #fde68a;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 28px 16px 44px;
+      color: #000;
+    }
+
+    .page {
+      width: 100%;
+      max-width: 420px;
+      min-height: calc(100vh - 72px);
+      background: #fffdf5;
+      border: 4px solid #000;
+      box-shadow: 10px 10px 0 #000;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .step { display: flex; flex-direction: column; flex: 1; }
+    .step.hidden { display: none; }
+
+    .logo-wrap {
+      padding: 30px 24px 18px;
+      display: flex;
+      justify-content: center;
+    }
+    .logo-wrap img {
+      max-height: 90px;
+      max-width: 240px;
+      object-fit: contain;
+    }
+    .logo-wrap.compact { padding: 24px 24px 12px; }
+    .logo-wrap.compact img { max-height: 64px; }
+    /* Tenant can hide the logo (text-only) via the "Show logo" toggle. */
+    body.portal-no-logo .logo-wrap { display: none; }
+
+    .body-pad {
+      padding: 0 24px 8px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .section-heading {
+      font-size: 38px;
+      font-weight: 900;
+      color: #000;
+      text-align: left;
+      margin-bottom: 8px;
+      letter-spacing: -1.5px;
+      text-transform: uppercase;
+      line-height: 0.92;
+    }
+    .section-sub {
+      display: inline-block;
+      align-self: flex-start;
+      font-size: 13px;
+      font-weight: 700;
+      color: #000;
+      background: var(--primary);
+      border: 3px solid #000;
+      padding: 5px 10px;
+      margin-bottom: 26px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .field-group { margin-bottom: 18px; }
+    .field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 900;
+      color: #000;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"] {
+      width: 100%;
+      padding: 13px 14px;
+      border: 3px solid #000;
+      border-radius: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: #000;
+      background: #fff;
+      -webkit-appearance: none;
+      appearance: none;
+      transition: box-shadow 0.1s, transform 0.1s;
+    }
+    input::placeholder { color: #999; font-weight: 500; }
+    input:focus {
+      outline: none;
+      box-shadow: 5px 5px 0 var(--primary);
+      transform: translate(-1px, -1px);
+    }
+
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 12px;
+      border: 3px solid #000;
+      border-radius: 0;
+      background: #fde68a;
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 88px;
+      transition: box-shadow 0.1s, transform 0.1s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover, .country-btn.open {
+      box-shadow: 4px 4px 0 #000;
+      transform: translate(-1px, -1px);
+    }
+    #selectedFlag { font-size: 19px; line-height: 1; }
+    #selectedCode { font-weight: 900; color: #000; font-size: 14px; }
+    .caret { font-size: 9px; color: #000; font-weight: 900; }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 300;
+      background: #fff;
+      border: 3px solid #000;
+      border-radius: 0;
+      box-shadow: 6px 6px 0 #000;
+      width: min(256px, calc(100vw - 32px));
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 11px 12px;
+      border: none;
+      border-bottom: 3px solid #000;
+      font-size: 14px;
+      font-weight: 600;
+      outline: none;
+      border-radius: 0;
+      background: #fde68a;
+      color: #000;
+    }
+    .country-search::placeholder { color: #777; }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: #000;
+      border-bottom: 1px solid #000;
+    }
+    .country-option:hover { background: var(--primary); }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: #444; font-size: 12px; font-weight: 700; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 16px;
+      background: var(--primary);
+      color: #000;
+      border: 3px solid #000;
+      border-radius: 0;
+      font-size: 17px;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      cursor: pointer;
+      box-shadow: 6px 6px 0 #000;
+      transition: box-shadow 0.1s, transform 0.1s, background 0.1s;
+    }
+    .btn-primary:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 #000; }
+    .btn-primary:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 #000; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: 6px 6px 0 #000; transform: none; }
+
+    .btn-text {
+      width: 100%;
+      padding: 12px;
+      background: none;
+      border: none;
+      font-size: 14px;
+      font-weight: 700;
+      color: #000;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-align: center;
+      cursor: pointer;
+      margin-top: 10px;
+      text-transform: uppercase;
+    }
+    .btn-text:hover { color: var(--primary); -webkit-text-stroke: 0.5px #000; }
+
+    .error-msg {
+      font-size: 13px;
+      font-weight: 800;
+      color: #000;
+      background: #fca5a5;
+      border: 3px solid #000;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      display: none;
+      text-transform: uppercase;
+    }
+
+    .consent-heading {
+      font-size: 30px;
+      font-weight: 900;
+      color: #000;
+      text-align: left;
+      margin-bottom: 12px;
+      line-height: 0.95;
+      text-transform: uppercase;
+      letter-spacing: -1px;
+    }
+    .consent-sub {
+      font-size: 14px;
+      font-weight: 700;
+      color: #000;
+      text-align: left;
+      margin-bottom: 22px;
+      line-height: 1.4;
+    }
+    .consent-box {
+      background: #fde68a;
+      border: 3px solid #000;
+      border-radius: 0;
+      padding: 20px;
+      margin-bottom: 26px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #000;
+      line-height: 1.65;
+      text-align: left;
+      flex: 1;
+      box-shadow: 6px 6px 0 #000;
+    }
+    .consent-box p + p { margin-top: 14px; }
+
+    .site-footer {
+      border-top: 4px solid #000;
+      padding: 18px 24px 22px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      background: #fffdf5;
+    }
+    .footer-privacy {
+      font-size: 11px;
+      font-weight: 600;
+      color: #000;
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer-privacy a { color: #000; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; font-weight: 800; }
+    .footer-privacy a:hover { background: var(--primary); }
+    .footer-powered { display: flex; align-items: center; gap: 8px; }
+    .footer-powered-text { font-size: 12px; color: #000; font-weight: 800; text-transform: uppercase; }
+    .footer-powered img { height: 24px; object-fit: contain; vertical-align: middle; }
+
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #fffdf5;
+      border: 4px solid #000;
+      border-radius: 0;
+      box-shadow: 10px 10px 0 #000;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-hdr {
+      padding: 18px 22px 14px;
+      border-bottom: 3px solid #000;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--primary);
+    }
+    .modal-hdr h2 { font-size: 18px; font-weight: 900; color: #000; text-transform: uppercase; letter-spacing: -0.5px; }
+    .modal-close-x {
+      background: none; border: none;
+      font-size: 26px; font-weight: 900; color: #000; cursor: pointer; line-height: 1; padding: 0 2px;
+    }
+    .modal-close-x:hover { color: #fff; }
+    #ppContent {
+      padding: 18px 22px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      font-weight: 500;
+      color: #000;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 22px;
+      border-top: 3px solid #000;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 10px 24px;
+      background: var(--primary);
+      color: #000;
+      border: 3px solid #000;
+      border-radius: 0;
+      font-size: 14px;
+      font-weight: 900;
+      text-transform: uppercase;
+      cursor: pointer;
+      box-shadow: 4px 4px 0 #000;
+    }
+  </style>
+  <% if (portalConfig) { %>
+  <script>window.PORTAL_CONFIG = <%- portalConfigJson %>;</script>
+  <% } %>
+  <!-- Brutalist template: if backgroundColor is the generic white default, keep the bright canvas -->
+  <script>
+    if (window.PORTAL_CONFIG && window.PORTAL_CONFIG.backgroundColor === '#ffffff') {
+      window.PORTAL_CONFIG = Object.assign({}, window.PORTAL_CONFIG, { backgroundColor: '' });
+    }
+  </script>
+</head>
+<body>
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
+            text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
+  &#9888; PREVIEW MODE — not a live session
+</div>
+<% } %>
+<div class="page">
+
+  <!-- Step 1 — Collect details -->
+  <div id="step1" class="step">
+    <div class="logo-wrap">
+      <img src="/headerLogo.png" alt="Guest WiFi">
+    </div>
+
+    <div class="body-pad">
+      <h1 class="section-heading">Connect to WiFi</h1>
+      <p class="section-sub">Enter your details to get online</p>
+      <p id="configDebugBadge" style="display:none"></p>
+
+      <div class="field-group">
+        <label class="field-label" for="firstName">First Name</label>
+        <input type="text" id="firstName" name="firstName"
+               placeholder="Jane" autocomplete="given-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="lastName">Last Name</label>
+        <input type="text" id="lastName" name="lastName"
+               placeholder="Smith" autocomplete="family-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="email">Email Address</label>
+        <input type="email" id="email" name="email"
+               placeholder="jane@example.com" autocomplete="email">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label">Phone Number</label>
+        <div class="phone-wrap" id="phoneWrapper">
+          <button type="button" class="country-btn" id="countryBtn"
+                  aria-haspopup="listbox" aria-expanded="false">
+            <span id="selectedFlag">🇬🇧</span>
+            <span id="selectedCode">+44</span>
+            <span class="caret">▼</span>
+          </button>
+          <div id="countryDropdown" class="country-dropdown" role="listbox">
+            <input type="text" id="countrySearch" class="country-search"
+                   placeholder="Search country…" autocomplete="off">
+            <div id="countryList" class="country-list"></div>
+          </div>
+          <input type="tel" id="phone" placeholder="7911 123456"
+                 autocomplete="tel-national">
+        </div>
+      </div>
+
+      <p class="error-msg" id="step1Error"></p>
+      <button class="btn-primary" id="btnNext" onclick="goToConsent()">Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 2 — Privacy & Consent -->
+  <div id="step2" class="step hidden">
+    <div class="logo-wrap compact">
+      <img src="/headerLogo.png" alt="Guest WiFi">
+    </div>
+
+    <div class="body-pad">
+      <h2 class="consent-heading">We care about your privacy</h2>
+      <p class="consent-sub">Stay in touch with us and find out more about<br>the best offers</p>
+
+      <div class="consent-box">
+        <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+        <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+      </div>
+
+      <p class="error-msg" id="step2Error"></p>
+      <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+      <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+        I don't want to stay in touch.
+      </button>
+    </div>
+
+    <!-- Hidden real form — submitted programmatically for Aruba auth -->
+    <form id="portalForm" action="/submit" method="POST" style="display:none">
+      <input type="hidden" id="f_firstName"        name="firstName">
+      <input type="hidden" id="f_lastName"         name="lastName">
+      <input type="hidden" id="f_email"            name="email">
+      <input type="hidden" id="f_phone"            name="phone">
+      <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+      <input type="hidden" id="f_mac"              name="mac">
+      <input type="hidden" id="f_ip"               name="ip">
+      <input type="hidden" id="f_url"              name="url">
+      <input type="hidden" id="f_post"             name="post">
+      <input type="hidden" id="f_apmac"            name="apmac">
+    </form>
+  </div>
+
+  <!-- Footer — shown on all steps -->
+  <div class="site-footer">
+    <div class="footer-privacy">
+      This site uses cookies in accordance with your browser's settings.<br>
+      For more information see <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+      and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
+    </div>
+    <div class="footer-powered">
+      <span class="footer-powered-text">Powered by</span>
+      <img src="/askheidi-logo.png" alt="AskHeidi">
+    </div>
+  </div>
+
+</div>
+
+<!-- Privacy Policy Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
+<script src="/js/config.js"></script>
+<script src="/js/country-selector.js"></script>
+<script src="/js/form-logic.js"></script>
+</body>
+</html>

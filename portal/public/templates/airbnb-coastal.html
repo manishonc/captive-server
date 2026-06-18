@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest WiFi</title>
+  <style>
+    :root {
+      --primary: #0891b2;
+      --coastal-bg: linear-gradient(180deg, #064e5b 0%, #0e7490 38%, #2399b8 64%, #7dd3e8 100%);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      background: var(--coastal-bg);
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 28px 16px 44px;
+      position: relative;
+      overflow-x: hidden;
+    }
+    /* Soft sun glow high in the sky */
+    body::before {
+      content: "";
+      position: fixed;
+      top: -120px; right: -60px;
+      width: 320px; height: 320px;
+      background: radial-gradient(circle, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0) 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    /* Wave SVG anchored near the bottom of the canvas */
+    .ocean-waves {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      width: 100%;
+      height: 140px;
+      z-index: 0;
+      pointer-events: none;
+    }
+    .ocean-waves svg { display: block; width: 100%; height: 100%; }
+
+    .page {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 420px;
+      min-height: calc(100vh - 72px);
+      background: rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(22px) saturate(140%);
+      -webkit-backdrop-filter: blur(22px) saturate(140%);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 26px;
+      box-shadow: 0 28px 70px rgba(3, 40, 50, 0.45);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .step { display: flex; flex-direction: column; flex: 1; }
+    .step.hidden { display: none; }
+
+    .logo-wrap {
+      padding: 34px 24px 18px;
+      display: flex;
+      justify-content: center;
+    }
+    .logo-wrap img {
+      max-height: 84px;
+      max-width: 230px;
+      object-fit: contain;
+      /* Keep tenant logo colors; soft shadow for legibility on the gradient. */
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,0.35));
+    }
+    .logo-wrap.compact { padding: 26px 24px 14px; }
+    .logo-wrap.compact img { max-height: 58px; }
+    /* Tenant can hide the logo (text-only) via the "Show logo" toggle. */
+    body.portal-no-logo .logo-wrap { display: none; }
+
+    .body-pad {
+      padding: 0 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .section-heading {
+      font-size: 21px;
+      font-weight: 700;
+      color: #fff;
+      text-align: center;
+      margin-bottom: 4px;
+      text-shadow: 0 1px 8px rgba(3,40,50,0.4);
+    }
+    .section-sub {
+      font-size: 13px;
+      color: rgba(255,255,255,0.78);
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .field-group { margin-bottom: 16px; }
+    .field-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: rgba(255,255,255,0.72);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"] {
+      width: 100%;
+      padding: 13px 14px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 12px;
+      font-size: 16px;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.13);
+      -webkit-appearance: none;
+      appearance: none;
+      transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+    }
+    input::placeholder { color: rgba(255,255,255,0.55); }
+    input:focus {
+      outline: none;
+      border-color: rgba(255,255,255,0.75);
+      background: rgba(255,255,255,0.18);
+      box-shadow: 0 0 0 3px rgba(8,145,178,0.28);
+    }
+
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 11px;
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.13);
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 84px;
+      transition: border-color 0.15s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover, .country-btn.open { border-color: rgba(255,255,255,0.75); }
+    #selectedFlag { font-size: 19px; line-height: 1; }
+    #selectedCode { font-weight: 700; color: rgba(255,255,255,0.92); font-size: 13px; }
+    .caret { font-size: 8px; color: rgba(255,255,255,0.6); }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 300;
+      background: #0b3f4b;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+      width: min(256px, calc(100vw - 32px));
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 10px 12px;
+      border: none;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      font-size: 14px;
+      outline: none;
+      border-radius: 12px 12px 0 0;
+      background: transparent;
+      color: #fff;
+    }
+    .country-search::placeholder { color: rgba(255,255,255,0.5); }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      color: rgba(255,255,255,0.88);
+    }
+    .country-option:hover { background: rgba(125,211,232,0.16); }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: rgba(255,255,255,0.5); font-size: 12px; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 15px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      box-shadow: 0 10px 24px rgba(8,145,178,0.4);
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-primary:hover { background: color-mix(in srgb, var(--primary) 82%, white); }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-text {
+      width: 100%;
+      padding: 11px;
+      background: none;
+      border: none;
+      font-size: 14px;
+      color: rgba(255,255,255,0.7);
+      text-align: center;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    .btn-text:hover { color: #fff; }
+
+    .error-msg {
+      font-size: 13px;
+      color: #fecaca;
+      margin-bottom: 10px;
+      display: none;
+    }
+
+    .consent-heading {
+      font-size: 22px;
+      font-weight: 400;
+      color: #fff;
+      text-align: center;
+      margin-bottom: 10px;
+      line-height: 1.3;
+    }
+    .consent-sub {
+      font-size: 14px;
+      color: rgba(255,255,255,0.72);
+      text-align: center;
+      margin-bottom: 24px;
+      line-height: 1.55;
+    }
+    .consent-box {
+      background: rgba(255,255,255,0.11);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 28px;
+      font-size: 14px;
+      color: rgba(255,255,255,0.82);
+      line-height: 1.7;
+      text-align: center;
+      flex: 1;
+    }
+    .consent-box p + p { margin-top: 14px; }
+
+    .site-footer {
+      border-top: 1px solid rgba(255,255,255,0.14);
+      padding: 16px 24px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer-privacy {
+      font-size: 11px;
+      color: rgba(255,255,255,0.5);
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer-privacy a { color: rgba(255,255,255,0.85); text-decoration: none; cursor: pointer; }
+    .footer-privacy a:hover { text-decoration: underline; }
+    .footer-powered { display: flex; align-items: center; gap: 8px; }
+    .footer-powered-text { font-size: 12px; color: rgba(255,255,255,0.55); font-weight: 500; }
+    .footer-powered img { height: 22px; object-fit: contain; vertical-align: middle; filter: brightness(0) invert(1) opacity(0.55); }
+
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(3,40,50,0.6);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #0b3f4b;
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      color: #fff;
+    }
+    .modal-hdr {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-hdr h2 { font-size: 17px; font-weight: 700; color: #fff; }
+    .modal-close-x {
+      background: none; border: none;
+      font-size: 24px; color: rgba(255,255,255,0.5); cursor: pointer; line-height: 1; padding: 0 2px;
+    }
+    .modal-close-x:hover { color: #fff; }
+    #ppContent {
+      padding: 18px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      color: rgba(255,255,255,0.78);
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 20px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 9px 22px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+  </style>
+  <% if (portalConfig) { %>
+  <script>window.PORTAL_CONFIG = <%- portalConfigJson %>;</script>
+  <% } %>
+  <!-- Coastal template: if backgroundColor is the generic white default, keep the ocean gradient -->
+  <script>
+    if (window.PORTAL_CONFIG && window.PORTAL_CONFIG.backgroundColor === '#ffffff') {
+      window.PORTAL_CONFIG = Object.assign({}, window.PORTAL_CONFIG, { backgroundColor: '' });
+    }
+  </script>
+</head>
+<body>
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
+            text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
+  &#9888; PREVIEW MODE — not a live session
+</div>
+<% } %>
+
+<!-- Decorative seaside waves near the bottom of the canvas -->
+<div class="ocean-waves" aria-hidden="true">
+  <svg viewBox="0 0 1440 140" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M0,70 C180,110 360,30 540,60 C720,90 900,30 1080,55 C1260,80 1380,50 1440,60 L1440,140 L0,140 Z"
+          fill="rgba(255,255,255,0.18)"></path>
+    <path d="M0,95 C200,60 380,120 600,90 C820,60 1020,120 1240,92 C1340,80 1400,90 1440,88 L1440,140 L0,140 Z"
+          fill="rgba(255,255,255,0.28)"></path>
+    <path d="M0,118 C220,98 440,134 660,116 C880,98 1100,134 1320,116 C1380,110 1420,114 1440,113 L1440,140 L0,140 Z"
+          fill="rgba(255,255,255,0.42)"></path>
+  </svg>
+</div>
+
+<div class="page">
+
+  <!-- Step 1 — Collect details -->
+  <div id="step1" class="step">
+    <div class="logo-wrap">
+      <img src="/headerLogo.png" alt="Guest WiFi">
+    </div>
+
+    <div class="body-pad">
+      <h1 class="section-heading">Connect to WiFi</h1>
+      <p class="section-sub">Enter your details to get online</p>
+      <p id="configDebugBadge" style="display:none"></p>
+
+      <div class="field-group">
+        <label class="field-label" for="firstName">First Name</label>
+        <input type="text" id="firstName" name="firstName"
+               placeholder="Jane" autocomplete="given-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="lastName">Last Name</label>
+        <input type="text" id="lastName" name="lastName"
+               placeholder="Smith" autocomplete="family-name">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label" for="email">Email Address</label>
+        <input type="email" id="email" name="email"
+               placeholder="jane@example.com" autocomplete="email">
+      </div>
+
+      <div class="field-group">
+        <label class="field-label">Phone Number</label>
+        <div class="phone-wrap" id="phoneWrapper">
+          <button type="button" class="country-btn" id="countryBtn"
+                  aria-haspopup="listbox" aria-expanded="false">
+            <span id="selectedFlag">🇬🇧</span>
+            <span id="selectedCode">+44</span>
+            <span class="caret">▼</span>
+          </button>
+          <div id="countryDropdown" class="country-dropdown" role="listbox">
+            <input type="text" id="countrySearch" class="country-search"
+                   placeholder="Search country…" autocomplete="off">
+            <div id="countryList" class="country-list"></div>
+          </div>
+          <input type="tel" id="phone" placeholder="7911 123456"
+                 autocomplete="tel-national">
+        </div>
+      </div>
+
+      <p class="error-msg" id="step1Error"></p>
+      <button class="btn-primary" id="btnNext" onclick="goToConsent()">Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 2 — Privacy & Consent -->
+  <div id="step2" class="step hidden">
+    <div class="logo-wrap compact">
+      <img src="/headerLogo.png" alt="Guest WiFi">
+    </div>
+
+    <div class="body-pad">
+      <h2 class="consent-heading">We care about your privacy</h2>
+      <p class="consent-sub">Stay in touch with us and find out more about<br>the best offers</p>
+
+      <div class="consent-box">
+        <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+        <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+      </div>
+
+      <p class="error-msg" id="step2Error"></p>
+      <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+      <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+        I don't want to stay in touch.
+      </button>
+    </div>
+
+    <!-- Hidden real form — submitted programmatically for Aruba auth -->
+    <form id="portalForm" action="/submit" method="POST" style="display:none">
+      <input type="hidden" id="f_firstName"        name="firstName">
+      <input type="hidden" id="f_lastName"         name="lastName">
+      <input type="hidden" id="f_email"            name="email">
+      <input type="hidden" id="f_phone"            name="phone">
+      <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+      <input type="hidden" id="f_mac"              name="mac">
+      <input type="hidden" id="f_ip"               name="ip">
+      <input type="hidden" id="f_url"              name="url">
+      <input type="hidden" id="f_post"             name="post">
+      <input type="hidden" id="f_apmac"            name="apmac">
+    </form>
+  </div>
+
+  <!-- Footer — shown on all steps -->
+  <div class="site-footer">
+    <div class="footer-privacy">
+      This site uses cookies in accordance with your browser's settings.<br>
+      For more information see <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+      and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
+    </div>
+    <div class="footer-powered">
+      <span class="footer-powered-text">Powered by</span>
+      <img src="/askheidi-logo.png" alt="AskHeidi">
+    </div>
+  </div>
+
+</div>
+
+<!-- Privacy Policy Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
+<script src="/js/config.js"></script>
+<script src="/js/country-selector.js"></script>
+<script src="/js/form-logic.js"></script>
+</body>
+</html>

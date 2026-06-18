@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Guest WiFi</title>
+  <style>
+    :root {
+      --primary: #c9a227;
+      --canvas: #0e1a14;
+      --canvas-2: #0a130e;
+      --gold: #c9a227;
+      --gold-soft: rgba(201, 162, 39, 0.55);
+      --gold-faint: rgba(201, 162, 39, 0.18);
+      --ink: #f4ecd6;
+      --ink-mute: rgba(244, 236, 214, 0.55);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse at 50% 0%, #16271d 0%, var(--canvas) 55%, var(--canvas-2) 100%);
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 26px 16px 44px;
+      color: var(--ink);
+    }
+
+    /* ---- Outer page = the Art Deco gold frame ---- */
+    .page {
+      position: relative;
+      width: 100%;
+      max-width: 430px;
+      min-height: calc(100vh - 70px);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.25)),
+        var(--canvas);
+      /* double thin border */
+      border: 1px solid var(--gold-soft);
+      box-shadow:
+        0 0 0 5px var(--canvas),
+        0 0 0 6px var(--gold-faint),
+        0 28px 70px rgba(0, 0, 0, 0.6);
+      display: flex;
+      flex-direction: column;
+      padding: 14px;
+    }
+    /* inner second border line */
+    .page::before {
+      content: "";
+      position: absolute;
+      inset: 14px;
+      border: 1px solid var(--gold-faint);
+      pointer-events: none;
+    }
+    /* corner fan / chevron motifs */
+    .deco-corner {
+      position: absolute;
+      width: 44px;
+      height: 44px;
+      pointer-events: none;
+      opacity: 0.9;
+    }
+    .deco-corner.tl { top: 8px;    left: 8px; }
+    .deco-corner.tr { top: 8px;    right: 8px;  transform: scaleX(-1); }
+    .deco-corner.bl { bottom: 8px; left: 8px;   transform: scaleY(-1); }
+    .deco-corner.br { bottom: 8px; right: 8px;   transform: scale(-1, -1); }
+
+    .inner {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 8px 14px 4px;
+    }
+
+    .step { display: flex; flex-direction: column; flex: 1; }
+    .step.hidden { display: none; }
+
+    .logo-wrap {
+      padding: 22px 16px 14px;
+      display: flex;
+      justify-content: center;
+    }
+    .logo-wrap img {
+      max-height: 86px;
+      max-width: 230px;
+      object-fit: contain;
+      /* keep tenant logo colors; soft shadow for legibility on dark canvas */
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,0.6));
+    }
+    .logo-wrap.compact { padding: 18px 16px 10px; }
+    .logo-wrap.compact img { max-height: 60px; }
+    /* Tenant can hide the logo (text-only) via the "Show logo" toggle. */
+    body.portal-no-logo .logo-wrap { display: none; }
+
+    /* thin gold rule with center diamond */
+    .deco-rule {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin: 2px auto 22px;
+      width: 70%;
+    }
+    .deco-rule::before, .deco-rule::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: linear-gradient(90deg, transparent, var(--gold-soft), transparent);
+    }
+    .deco-rule i {
+      width: 7px; height: 7px;
+      transform: rotate(45deg);
+      background: var(--gold);
+      box-shadow: 0 0 8px var(--gold-faint);
+      flex: none;
+    }
+
+    .body-pad {
+      padding: 0 10px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .section-heading {
+      font-family: Georgia, 'Times New Roman', serif;
+      font-size: 25px;
+      font-weight: 400;
+      color: var(--gold);
+      text-align: center;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .section-sub {
+      font-size: 13px;
+      color: var(--ink-mute);
+      text-align: center;
+      letter-spacing: 1px;
+      font-style: italic;
+      margin-bottom: 4px;
+    }
+
+    .field-group { margin-bottom: 16px; }
+    .field-label {
+      display: block;
+      font-family: Georgia, serif;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--gold-soft);
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"] {
+      width: 100%;
+      padding: 13px 14px;
+      border: 1px solid var(--gold-faint);
+      border-radius: 2px;
+      font-size: 16px;
+      font-family: Georgia, serif;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.03);
+      -webkit-appearance: none;
+      appearance: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input::placeholder { color: rgba(244,236,214,0.3); }
+    input:focus {
+      outline: none;
+      border-color: var(--gold);
+      box-shadow: 0 0 0 3px rgba(201,162,39,0.12);
+    }
+
+    .phone-wrap {
+      display: flex;
+      gap: 8px;
+      position: relative;
+    }
+    .country-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 11px;
+      border: 1px solid var(--gold-faint);
+      border-radius: 2px;
+      background: rgba(255,255,255,0.03);
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 84px;
+      transition: border-color 0.15s;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .country-btn:hover, .country-btn.open { border-color: var(--gold); }
+    #selectedFlag { font-size: 19px; line-height: 1; }
+    #selectedCode { font-weight: 700; color: var(--ink); font-size: 13px; }
+    .caret { font-size: 8px; color: var(--gold-soft); }
+    .phone-wrap input[type="tel"] { flex: 1; }
+
+    .country-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 300;
+      background: #11201a;
+      border: 1px solid var(--gold-faint);
+      border-radius: 4px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.6);
+      width: min(256px, calc(100vw - 32px));
+      max-height: 260px;
+      flex-direction: column;
+    }
+    .country-dropdown.open { display: flex; }
+    .country-search {
+      padding: 10px 12px;
+      border: none;
+      border-bottom: 1px solid var(--gold-faint);
+      font-size: 14px;
+      font-family: Georgia, serif;
+      outline: none;
+      border-radius: 4px 4px 0 0;
+      background: transparent;
+      color: var(--ink);
+    }
+    .country-search::placeholder { color: rgba(244,236,214,0.4); }
+    .country-list { overflow-y: auto; flex: 1; }
+    .country-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      color: rgba(244,236,214,0.85);
+    }
+    .country-option:hover { background: rgba(201,162,39,0.1); }
+    .opt-flag { font-size: 18px; width: 22px; text-align: center; }
+    .opt-name { flex: 1; }
+    .opt-code { color: var(--gold-soft); font-size: 12px; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 15px;
+      background: var(--primary);
+      color: #14140a;
+      border: 1px solid var(--gold);
+      border-radius: 2px;
+      font-family: Georgia, serif;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.15s, box-shadow 0.15s;
+      box-shadow: 0 0 0 1px var(--canvas), 0 0 0 2px var(--gold-faint);
+    }
+    .btn-primary:hover { background: color-mix(in srgb, var(--primary) 82%, white); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-text {
+      width: 100%;
+      padding: 11px;
+      background: none;
+      border: none;
+      font-family: Georgia, serif;
+      font-size: 13px;
+      font-style: italic;
+      color: var(--ink-mute);
+      text-align: center;
+      cursor: pointer;
+      margin-top: 6px;
+      letter-spacing: 0.5px;
+    }
+    .btn-text:hover { color: var(--gold); }
+
+    .error-msg {
+      font-size: 13px;
+      color: #e9a36b;
+      margin-bottom: 10px;
+      display: none;
+      text-align: center;
+    }
+
+    .consent-heading {
+      font-family: Georgia, serif;
+      font-size: 23px;
+      font-weight: 400;
+      color: var(--gold);
+      text-align: center;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      line-height: 1.35;
+    }
+    .consent-sub {
+      font-size: 14px;
+      font-style: italic;
+      color: var(--ink-mute);
+      text-align: center;
+      margin-bottom: 22px;
+      line-height: 1.55;
+    }
+    .consent-box {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--gold-faint);
+      border-radius: 2px;
+      padding: 22px;
+      margin-bottom: 26px;
+      font-size: 14px;
+      color: rgba(244,236,214,0.7);
+      line-height: 1.75;
+      text-align: center;
+      flex: 1;
+    }
+    .consent-box p + p { margin-top: 14px; }
+
+    .site-footer {
+      border-top: 1px solid var(--gold-faint);
+      margin: 14px 24px 6px;
+      padding: 16px 0 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer-privacy {
+      font-size: 11px;
+      color: var(--ink-mute);
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer-privacy a { color: var(--gold); text-decoration: none; cursor: pointer; }
+    .footer-privacy a:hover { text-decoration: underline; }
+    .footer-powered { display: flex; align-items: center; gap: 8px; }
+    .footer-powered-text { font-size: 12px; color: var(--ink-mute); font-weight: 400; font-style: italic; }
+    /* askheidi logo: tint toward gold for visibility on the dark canvas */
+    .footer-powered img {
+      height: 24px;
+      object-fit: contain;
+      vertical-align: middle;
+      filter: brightness(0) invert(1) sepia(1) saturate(4) hue-rotate(5deg) opacity(0.55);
+    }
+
+    #ppModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 12, 9, 0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #ppModal.open { display: flex; }
+    .modal-card {
+      background: #11201a;
+      border: 1px solid var(--gold-soft);
+      border-radius: 4px;
+      box-shadow: 0 0 0 4px var(--canvas), 0 0 0 5px var(--gold-faint), 0 30px 70px rgba(0,0,0,0.7);
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-hdr {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid var(--gold-faint);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-hdr h2 {
+      font-family: Georgia, serif;
+      font-size: 16px;
+      font-weight: 400;
+      color: var(--gold);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .modal-close-x {
+      background: none; border: none;
+      font-size: 24px; color: var(--gold-soft); cursor: pointer; line-height: 1; padding: 0 2px;
+    }
+    .modal-close-x:hover { color: var(--gold); }
+    #ppContent {
+      padding: 18px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-size: 14px;
+      color: rgba(244,236,214,0.72);
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .modal-ftr {
+      padding: 14px 20px;
+      border-top: 1px solid var(--gold-faint);
+      display: flex;
+      justify-content: flex-end;
+    }
+    .modal-ftr button {
+      padding: 9px 22px;
+      background: var(--primary);
+      color: #14140a;
+      border: none;
+      border-radius: 2px;
+      font-family: Georgia, serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+  </style>
+  <% if (portalConfig) { %>
+  <script>window.PORTAL_CONFIG = <%- portalConfigJson %>;</script>
+  <% } %>
+  <!-- Universal neutralizer: keep the dark Art Deco canvas if no custom color was set -->
+  <script>
+    if (window.PORTAL_CONFIG && window.PORTAL_CONFIG.backgroundColor === '#ffffff') {
+      window.PORTAL_CONFIG = Object.assign({}, window.PORTAL_CONFIG, { backgroundColor: '' });
+    }
+  </script>
+</head>
+<body>
+<% if (typeof previewMode !== 'undefined' && previewMode) { %>
+<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;
+            text-align:center;font-size:12px;font-weight:700;padding:6px;letter-spacing:.5px;">
+  &#9888; PREVIEW MODE — not a live session
+</div>
+<% } %>
+<div class="page">
+
+  <!-- Art Deco corner fan motifs -->
+  <svg class="deco-corner tl" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M2 2 H30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 V30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 L20 20" stroke="#c9a227" stroke-width="0.9" opacity="0.7"/>
+    <path d="M2 11 L11 2" stroke="#c9a227" stroke-width="0.9" opacity="0.6"/>
+    <path d="M2 20 L20 2" stroke="#c9a227" stroke-width="0.9" opacity="0.45"/>
+    <circle cx="2" cy="2" r="1.6" fill="#c9a227"/>
+  </svg>
+  <svg class="deco-corner tr" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M2 2 H30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 V30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 L20 20" stroke="#c9a227" stroke-width="0.9" opacity="0.7"/>
+    <path d="M2 11 L11 2" stroke="#c9a227" stroke-width="0.9" opacity="0.6"/>
+    <path d="M2 20 L20 2" stroke="#c9a227" stroke-width="0.9" opacity="0.45"/>
+    <circle cx="2" cy="2" r="1.6" fill="#c9a227"/>
+  </svg>
+  <svg class="deco-corner bl" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M2 2 H30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 V30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 L20 20" stroke="#c9a227" stroke-width="0.9" opacity="0.7"/>
+    <path d="M2 11 L11 2" stroke="#c9a227" stroke-width="0.9" opacity="0.6"/>
+    <path d="M2 20 L20 2" stroke="#c9a227" stroke-width="0.9" opacity="0.45"/>
+    <circle cx="2" cy="2" r="1.6" fill="#c9a227"/>
+  </svg>
+  <svg class="deco-corner br" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M2 2 H30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 V30" stroke="#c9a227" stroke-width="1.2"/>
+    <path d="M2 2 L20 20" stroke="#c9a227" stroke-width="0.9" opacity="0.7"/>
+    <path d="M2 11 L11 2" stroke="#c9a227" stroke-width="0.9" opacity="0.6"/>
+    <path d="M2 20 L20 2" stroke="#c9a227" stroke-width="0.9" opacity="0.45"/>
+    <circle cx="2" cy="2" r="1.6" fill="#c9a227"/>
+  </svg>
+
+  <div class="inner">
+
+    <!-- Step 1 — Collect details -->
+    <div id="step1" class="step">
+      <div class="logo-wrap">
+        <img src="/headerLogo.png" alt="Guest WiFi">
+      </div>
+
+      <div class="body-pad">
+        <h1 class="section-heading">Connect to WiFi</h1>
+        <p class="section-sub">Enter your details to get online</p>
+        <div class="deco-rule"><i></i></div>
+        <p id="configDebugBadge" style="display:none"></p>
+
+        <div class="field-group">
+          <label class="field-label" for="firstName">First Name</label>
+          <input type="text" id="firstName" name="firstName"
+                 placeholder="Jane" autocomplete="given-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="lastName">Last Name</label>
+          <input type="text" id="lastName" name="lastName"
+                 placeholder="Smith" autocomplete="family-name">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="email">Email Address</label>
+          <input type="email" id="email" name="email"
+                 placeholder="jane@example.com" autocomplete="email">
+        </div>
+
+        <div class="field-group">
+          <label class="field-label">Phone Number</label>
+          <div class="phone-wrap" id="phoneWrapper">
+            <button type="button" class="country-btn" id="countryBtn"
+                    aria-haspopup="listbox" aria-expanded="false">
+              <span id="selectedFlag">🇬🇧</span>
+              <span id="selectedCode">+44</span>
+              <span class="caret">▼</span>
+            </button>
+            <div id="countryDropdown" class="country-dropdown" role="listbox">
+              <input type="text" id="countrySearch" class="country-search"
+                     placeholder="Search country…" autocomplete="off">
+              <div id="countryList" class="country-list"></div>
+            </div>
+            <input type="tel" id="phone" placeholder="7911 123456"
+                   autocomplete="tel-national">
+          </div>
+        </div>
+
+        <p class="error-msg" id="step1Error"></p>
+        <button class="btn-primary" id="btnNext" onclick="goToConsent()">Continue</button>
+      </div>
+    </div>
+
+    <!-- Step 2 — Privacy & Consent -->
+    <div id="step2" class="step hidden">
+      <div class="logo-wrap compact">
+        <img src="/headerLogo.png" alt="Guest WiFi">
+      </div>
+
+      <div class="body-pad">
+        <h2 class="consent-heading">We care about your privacy</h2>
+        <p class="consent-sub">Stay in touch with us and find out more about<br>the best offers</p>
+        <div class="deco-rule"><i></i></div>
+
+        <div class="consent-box">
+          <p>I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.</p>
+          <p>I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.</p>
+        </div>
+
+        <p class="error-msg" id="step2Error"></p>
+        <button class="btn-primary" id="btnAccept" onclick="submitConsent(true)">Accept</button>
+        <button class="btn-text" id="btnDecline" onclick="submitConsent(false)">
+          I don't want to stay in touch.
+        </button>
+      </div>
+
+      <!-- Hidden real form — submitted programmatically for Aruba auth -->
+      <form id="portalForm" action="/submit" method="POST" style="display:none">
+        <input type="hidden" id="f_firstName"        name="firstName">
+        <input type="hidden" id="f_lastName"         name="lastName">
+        <input type="hidden" id="f_email"            name="email">
+        <input type="hidden" id="f_phone"            name="phone">
+        <input type="hidden" id="f_phoneCountryCode" name="phoneCountryCode" value="+44">
+        <input type="hidden" id="f_mac"              name="mac">
+        <input type="hidden" id="f_ip"               name="ip">
+        <input type="hidden" id="f_url"              name="url">
+        <input type="hidden" id="f_post"             name="post">
+        <input type="hidden" id="f_apmac"            name="apmac">
+      </form>
+    </div>
+
+    <!-- Footer — shown on all steps -->
+    <div class="site-footer">
+      <div class="footer-privacy">
+        This site uses cookies in accordance with your browser's settings.<br>
+        For more information see <a id="privacyLink" onclick="openDoc(event,'privacy')">Privacy Policy</a>
+        and <a id="termsLink" onclick="openDoc(event,'terms')">Terms of Service</a>.
+      </div>
+      <div class="footer-powered">
+        <span class="footer-powered-text">Powered by</span>
+        <img src="/askheidi-logo.png" alt="AskHeidi">
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Privacy Policy Modal -->
+<div id="ppModal" role="dialog" aria-modal="true" aria-labelledby="ppTitle">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <h2 id="ppTitle">Privacy Policy</h2>
+      <button class="modal-close-x" onclick="closeModal()" aria-label="Close">&times;</button>
+    </div>
+    <div id="ppContent">Loading&hellip;</div>
+    <div class="modal-ftr">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>window.PREVIEW_MODE = <%= typeof previewMode !== 'undefined' && previewMode ? 'true' : 'false' %>;</script>
+<script src="/js/config.js"></script>
+<script src="/js/country-selector.js"></script>
+<script src="/js/form-logic.js"></script>
+</body>
+</html>

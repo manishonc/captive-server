@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 const TEMPLATES_DIR = path.join(__dirname, 'public', 'templates');
-const VALID_TEMPLATES = ['classic', 'minimal', 'dark', 'vacation', 'coffee-shop', 'restaurant-dark', 'hotel-luxury', 'restaurant-fine-dining', 'restaurant-casual', 'restaurant-fast-food', 'coffee-artisan', 'coffee-modern', 'airbnb-mountain', 'airbnb-beach', 'spa-wellness', 'coworking', 'bar-lounge'];
+const VALID_TEMPLATES = ['classic', 'minimal', 'dark', 'vacation', 'coffee-shop', 'restaurant-dark', 'hotel-luxury', 'restaurant-fine-dining', 'restaurant-casual', 'restaurant-fast-food', 'coffee-artisan', 'coffee-modern', 'airbnb-mountain', 'airbnb-beach', 'spa-wellness', 'coworking', 'bar-lounge', 'airbnb-loft', 'airbnb-countryside', 'airbnb-coastal', 'airbnb-lakehouse', 'airbnb-desert', 'airbnb-city-night', 'airbnb-scandi', 'airbnb-boho', 'airbnb-passport', 'airbnb-bento', 'aurora-glass', 'neon-pulse', 'brutalist-bold', 'neumorphic-soft', 'art-deco', 'editorial-serif'];
 const DEFAULT_TEMPLATE = 'classic';
 
 // Fetch splash config from backend (server-to-server, not CNA-side)
