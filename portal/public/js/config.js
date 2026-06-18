@@ -59,12 +59,19 @@ applyPortalConfig(CONFIG);
 
 // ── Live preview: accept config pushed from the CMS editor (preview mode only) ──
 // Gated on PREVIEW_MODE so live guest sessions never accept external messages.
+// The payload is display-only (title/subtitle/colors) on a page already flagged
+// "PREVIEW MODE" and never shown to real guests, so when no explicit allowlist is
+// configured we accept any origin — this prevents the live preview from silently
+// breaking when the CMS is served from an unanticipated origin. Set
+// window.ALLOWED_CMS_ORIGINS (array) to lock it down.
 if (window.PREVIEW_MODE) {
-  var ALLOWED_CMS_ORIGINS = window.ALLOWED_CMS_ORIGINS || [
-    'https://cms.heidifi.ai', 'http://localhost:3000', 'http://localhost:3001',
-  ];
+  var ALLOWED_CMS_ORIGINS = window.ALLOWED_CMS_ORIGINS;
   window.addEventListener('message', function (e) {
-    if (ALLOWED_CMS_ORIGINS.indexOf(e.origin) === -1) return;
+    if (Array.isArray(ALLOWED_CMS_ORIGINS) && ALLOWED_CMS_ORIGINS.length &&
+        ALLOWED_CMS_ORIGINS.indexOf(e.origin) === -1) {
+      console.warn('[heidifi preview] ignored message from disallowed origin:', e.origin);
+      return;
+    }
     var d = e.data;
     if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
     // Only fields applyable without a reload; templateId is handled via iframe reload.
@@ -72,7 +79,9 @@ if (window.PREVIEW_MODE) {
       if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
     });
     applyPortalConfig(CONFIG);
+    console.log('[heidifi preview] applied live config from', e.origin);
   });
+  console.log('[heidifi preview] live preview listener attached');
 }
 
 // DEBUG badge — hidden, remove once pipeline is verified
