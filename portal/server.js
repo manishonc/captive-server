@@ -196,7 +196,7 @@ app.post('/submit', (req, res) => {
     // Android closes the CNA the instant it detects internet (right when swarm.cgi
     // authenticates), so any success page shown AFTER auth is never seen.
     // Fix: show the destination info FIRST with a 5-second countdown, THEN submit
-    // to swarm.cgi. The user sees "open askheidi.app" before the CNA closes.
+    // to swarm.cgi. The user sees "open heidifi.ai" before the CNA closes.
     res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -224,7 +224,7 @@ app.post('/submit', (req, res) => {
     </div>
     <h1>You're Connected!</h1>
     <p class="sub">You now have WiFi access.<br>Open your browser and visit:</p>
-    <div class="url-box"><span>askheidi.app</span></div>
+    <div class="url-box"><span>heidifi.ai</span></div>
     <p class="hint" id="hint">Activating connection in <strong id="n">5</strong>s&hellip;</p>
     <button id="btn" onclick="connect()">Connect Now</button>
   </div>
@@ -233,7 +233,7 @@ app.post('/submit', (req, res) => {
     <input type="hidden" name="cmd" value="authenticate">
     <input type="hidden" name="user" value="${email}">
     <input type="hidden" name="password" value="guest">
-    <input type="hidden" name="url" value="https://askheidi.app/">
+    <input type="hidden" name="url" value="https://heidifi.ai/">
   </form>
 
   <script>
