@@ -254,8 +254,9 @@ function v2Data(res: UnifiResponse, what: string): any {
 
 function ensureOk(res: UnifiResponse, what: string): any[] {
   if (res.status < 200 || res.status >= 300) {
-    // Surface the controller's full reason (meta.msg, e.g. api.err.*, or the raw body).
-    const detail = res.body?.meta?.msg || (res.body ? JSON.stringify(res.body) : '');
+    // Surface the controller's FULL response (meta.msg like api.err.*, plus any
+    // field-level detail) so failures are diagnosable.
+    const detail = res.body ? JSON.stringify(res.body) : '';
     throw new Error(`UniFi ${what} failed HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return res.body?.data ?? [];
@@ -334,6 +335,7 @@ export async function ensureApGroup(
 ): Promise<string> {
   const macs = Array.from(new Set(args.memberMacs.map(normalizeMac).filter(Boolean)));
   const groups = await getApGroups(config);
+  console.log('[UNIFI DEBUG] v2 apgroups:', JSON.stringify(groups.map((g) => ({ _id: g._id, name: g.name, attr_no_delete: g.attr_no_delete }))));
 
   const existing =
     (args.groupId && groups.find((g) => g._id === args.groupId)) ||
@@ -351,6 +353,7 @@ export async function ensureApGroup(
   const created = v2Data(await siteRequestV2(config, 'POST', 'apgroups', { name: args.name, device_macs: macs }), 'create apgroup');
   const id = Array.isArray(created) ? created[0]?._id : created?._id;
   if (!id) throw new Error('UniFi v2 did not return the created AP group id.');
+  console.log('[UNIFI DEBUG] created apgroup id:', id, 'raw:', JSON.stringify(created));
   return id;
 }
 
@@ -392,6 +395,7 @@ export async function ensureWlan(
     ...(t.wlan_bands ? { wlan_bands: t.wlan_bands } : t.wlan_band ? { wlan_band: t.wlan_band } : {}),
     ...scope,
   };
+  console.log('[UNIFI DEBUG] POST wlanconf payload:', JSON.stringify(createBody));
   const created = ensureOk(await siteRequest(config, 'POST', 'rest/wlanconf', createBody), 'create wlanconf');
   const id = created?.[0]?._id;
   if (!id) throw new Error('UniFi did not return the created WLAN id.');
