@@ -202,6 +202,56 @@ export async function siteRequest(
   return { status: res.status, body: parsed };
 }
 
+function siteV2Path(config: UnifiConfig, path: string): string {
+  return `${apiBase(config)}/v2/api/site/${config.site}/${path}`;
+}
+
+/**
+ * v2 API request (`/v2/api/site/{site}/...`). UniFi Network 7.x+ serves AP groups
+ * here; the legacy v1 `rest/apgroup` returns `api.err.InvalidObject` on 10.x. v2
+ * responses are RAW JSON (array/object), NOT wrapped in `{meta, data}`.
+ */
+export async function siteRequestV2(
+  config: UnifiConfig,
+  method: string,
+  path: string,
+  payload?: unknown,
+): Promise<UnifiResponse> {
+  const url = siteV2Path(config, path);
+  const bodyStr = payload !== undefined ? JSON.stringify(payload) : undefined;
+
+  const attempt = async (session: Session) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Cookie: session.cookie };
+    if (bodyStr) headers['Content-Length'] = String(Buffer.byteLength(bodyStr));
+    if (session.csrfToken) headers['X-Csrf-Token'] = session.csrfToken;
+    return rawRequest(url, { method, headers, body: bodyStr, rejectUnauthorized: false });
+  };
+
+  let session = await getSession(config);
+  let res = await attempt(session);
+  if (res.status === 401) {
+    sessions.delete(config.controllerUrl);
+    session = await login(config);
+    res = await attempt(session);
+  }
+  let parsed: any;
+  try {
+    parsed = res.body ? JSON.parse(res.body) : undefined;
+  } catch {
+    parsed = res.body;
+  }
+  return { status: res.status, body: parsed };
+}
+
+/** Unwrap a v2 response (raw array/object), throwing a descriptive error on non-2xx. */
+function v2Data(res: UnifiResponse, what: string): any {
+  if (res.status < 200 || res.status >= 300) {
+    const detail = res.body?.message || res.body?.meta?.msg;
+    throw new Error(`UniFi v2 ${what} failed HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return res.body;
+}
+
 function ensureOk(res: UnifiResponse, what: string): any[] {
   if (res.status < 200 || res.status >= 300) {
     const msg = res.body?.meta?.msg ? `: ${res.body.meta.msg}` : '';
@@ -240,7 +290,9 @@ export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
 }
 
 export async function getApGroups(config: UnifiConfig): Promise<UnifiApGroup[]> {
-  return ensureOk(await siteRequest(config, 'GET', 'rest/apgroup'), 'rest/apgroup') as UnifiApGroup[];
+  // AP groups live on the v2 API (Network 7.x+); v1 rest/apgroup is gone on 10.x.
+  const body = v2Data(await siteRequestV2(config, 'GET', 'apgroups'), 'apgroups');
+  return (Array.isArray(body) ? body : body?.data ?? []) as UnifiApGroup[];
 }
 
 export async function getWlans(config: UnifiConfig): Promise<UnifiWlan[]> {
@@ -288,13 +340,16 @@ export async function ensureApGroup(
     null;
 
   if (existing) {
-    ensureOk(await siteRequest(config, 'PUT', `rest/apgroup/${existing._id}`, { ...existing, name: args.name, device_macs: macs }), 'update apgroup');
+    v2Data(
+      await siteRequestV2(config, 'PUT', `apgroups/${existing._id}`, { ...existing, name: args.name, device_macs: macs }),
+      'update apgroup',
+    );
     return existing._id;
   }
 
-  const created = ensureOk(await siteRequest(config, 'POST', 'rest/apgroup', { name: args.name, device_macs: macs }), 'create apgroup');
-  const id = created?.[0]?._id;
-  if (!id) throw new Error('UniFi did not return the created AP group id.');
+  const created = v2Data(await siteRequestV2(config, 'POST', 'apgroups', { name: args.name, device_macs: macs }), 'create apgroup');
+  const id = Array.isArray(created) ? created[0]?._id : created?._id;
+  if (!id) throw new Error('UniFi v2 did not return the created AP group id.');
   return id;
 }
 
@@ -322,6 +377,7 @@ export async function ensureWlan(
 
   const base: Record<string, unknown> = args.template ? { ...args.template } : {};
   delete base._id;
+  delete base.external_id; // server-generated unique id — let the controller mint a fresh one
   const created = ensureOk(await siteRequest(config, 'POST', 'rest/wlanconf', { ...base, name: args.ssid, enabled: true, ...scope }), 'create wlanconf');
   const id = created?.[0]?._id;
   if (!id) throw new Error('UniFi did not return the created WLAN id.');
@@ -334,13 +390,13 @@ export async function removeMacFromApGroup(config: UnifiConfig, groupId: string,
   const g = groups.find((x) => x._id === groupId);
   if (!g) return 0;
   const remaining = (g.device_macs || []).map(normalizeMac).filter((m) => m !== normalizeMac(mac));
-  ensureOk(await siteRequest(config, 'PUT', `rest/apgroup/${groupId}`, { ...g, device_macs: remaining }), 'update apgroup');
+  v2Data(await siteRequestV2(config, 'PUT', `apgroups/${groupId}`, { ...g, device_macs: remaining }), 'update apgroup');
   return remaining.length;
 }
 
 export async function deleteApGroup(config: UnifiConfig, groupId: string): Promise<void> {
-  const res = await siteRequest(config, 'DELETE', `rest/apgroup/${groupId}`);
-  if (res.status < 200 || res.status >= 300) throw new Error(`UniFi delete apgroup failed HTTP ${res.status}`);
+  const res = await siteRequestV2(config, 'DELETE', `apgroups/${groupId}`);
+  if (res.status < 200 || res.status >= 300) throw new Error(`UniFi v2 delete apgroup failed HTTP ${res.status}`);
 }
 
 export async function deleteWlan(config: UnifiConfig, wlanId: string): Promise<void> {

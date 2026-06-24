@@ -22,6 +22,7 @@ import {
   getDevices,
   getApGroups,
   rawSiteGet,
+  siteRequestV2,
   findGuestWlanTemplate,
   ensureApGroup,
   ensureWlan,
@@ -282,6 +283,20 @@ export async function runDiagnostics(): Promise<Record<string, unknown>> {
     } catch (e: any) {
       sources[p] = { error: e?.message || 'request failed' };
     }
+  }
+
+  // v2 AP groups — the real AP-group API on Network 7.x+ (v1 rest/apgroup is gone).
+  try {
+    const res = await siteRequestV2(config, 'GET', 'apgroups');
+    const data = Array.isArray(res.body) ? res.body : res.body?.data;
+    sources['v2/apgroups'] = {
+      status: res.status,
+      ok: res.status >= 200 && res.status < 300,
+      count: Array.isArray(data) ? data.length : undefined,
+      data: redactArray(data),
+    };
+  } catch (e: any) {
+    sources['v2/apgroups'] = { error: e?.message || 'request failed' };
   }
 
   return { controller: { url: config.controllerUrl, site: config.site, type: config.controllerType }, sources };
