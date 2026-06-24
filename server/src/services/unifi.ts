@@ -376,12 +376,23 @@ export async function ensureWlan(
     return existing._id;
   }
 
-  const base: Record<string, unknown> = args.template ? { ...args.template } : {};
-  // Drop server-generated / unique fields so the controller mints fresh ones on create.
-  delete base._id;
-  delete base.external_id;
-  delete base.x_iapp_key; // inter-AP key — must be unique per WLAN
-  const created = ensureOk(await siteRequest(config, 'POST', 'rest/wlanconf', { ...base, name: args.ssid, enabled: true, ...scope }), 'create wlanconf');
+  // Cloning the full WLAN object trips `api.err.InvalidPayload` — the controller
+  // rejects GET-only/derived fields on create. Build a MINIMAL payload from the
+  // template's key references instead. The captive portal is a site-level
+  // guest-control setting, so a new `is_guest` WLAN inherits it automatically.
+  const t: Record<string, any> = (args.template as Record<string, any>) || {};
+  const createBody: Record<string, unknown> = {
+    name: args.ssid,
+    enabled: true,
+    security: t.security ?? 'open',
+    is_guest: t.is_guest ?? true,
+    hide_ssid: t.hide_ssid ?? false,
+    usergroup_id: t.usergroup_id,
+    networkconf_id: t.networkconf_id,
+    ...(t.wlan_bands ? { wlan_bands: t.wlan_bands } : t.wlan_band ? { wlan_band: t.wlan_band } : {}),
+    ...scope,
+  };
+  const created = ensureOk(await siteRequest(config, 'POST', 'rest/wlanconf', createBody), 'create wlanconf');
   const id = created?.[0]?._id;
   if (!id) throw new Error('UniFi did not return the created WLAN id.');
   return id;
