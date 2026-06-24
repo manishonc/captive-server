@@ -14,8 +14,19 @@ import { scheduleSms } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
 import { getVenueName } from '../services/venue';
+import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics } from '../services/unifiWlan';
 
 const router = Router();
+
+/** Shared `x-internal-secret` guard. Writes 401 and returns false when unauthorized. */
+function requireInternalSecret(req: Request, res: Response): boolean {
+  const secret = req.header('x-internal-secret');
+  if (!process.env.INTERNAL_API_SECRET || secret !== process.env.INTERNAL_API_SECRET) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return false;
+  }
+  return true;
+}
 
 interface TestSendBody {
   venueId?: string;
@@ -39,10 +50,7 @@ function normalizePhone(recipient: string): string | null {
 }
 
 router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Response) => {
-  const secret = req.header('x-internal-secret');
-  if (!process.env.INTERNAL_API_SECRET || secret !== process.env.INTERNAL_API_SECRET) {
-    return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  }
+  if (!requireInternalSecret(req, res)) return;
 
   const { venueId, channel, recipient, message } = req.body;
 
@@ -119,6 +127,59 @@ router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Respon
       ok: false,
       error: err instanceof Error ? err.message : 'Failed to send test message',
     });
+  }
+});
+
+// ── UniFi controller operations (called server-to-server by the CMS proxy routes) ──
+// The CMS performs Firebase auth + venue/tenant authorization, then calls these.
+
+router.post('/unifi/device-status', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const apIds: string[] = Array.isArray(req.body?.apIds) ? req.body.apIds : [];
+  try {
+    const statuses = await getDeviceStatuses(apIds);
+    return res.json({ ok: true, statuses });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI device-status]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'device-status failed' });
+  }
+});
+
+router.post('/unifi/apply-wifi', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { venueId, ssid } = req.body || {};
+  if (!venueId || !ssid) return res.status(400).json({ ok: false, error: 'venueId and ssid are required' });
+  try {
+    const wifi = await applyVenueWifi(String(venueId), String(ssid));
+    return res.json({ ok: true, wifi });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI apply-wifi]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'apply-wifi failed' });
+  }
+});
+
+router.post('/unifi/detach', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { venueId, mac } = req.body || {};
+  if (!venueId || !mac) return res.status(400).json({ ok: false, error: 'venueId and mac are required' });
+  try {
+    await detachApFromVenueWifi(String(venueId), String(mac));
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI detach]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'detach failed' });
+  }
+});
+
+// Temporary (plan B5): read-only controller schema dump to confirm apgroup vs wlangroup.
+router.get('/unifi/diagnostics', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  try {
+    const result = await runDiagnostics();
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI diagnostics]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'diagnostics failed' });
   }
 });
 
