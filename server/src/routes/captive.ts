@@ -6,7 +6,7 @@ import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } from '../services/whatsapp';
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
-import { authorizeGuest as unifiAuthorizeGuest } from '../services/unifi';
+import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '../services/unifi';
 import { getVenueName } from '../services/venue';
 
 const router = Router();
@@ -693,7 +693,9 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
 
     unifiConfig = {
       controllerType: apData.unifiConfig.controllerType || 'classic',
-      controllerUrl: apData.unifiConfig.controllerUrl,
+      // captive-server dials the controller's INTERNAL address (UNIFI_CONTROLLER_URL
+      // env) — the stored URL is the public one for the admin browser.
+      controllerUrl: effectiveControllerUrl(apData.unifiConfig.controllerUrl),
       site: apData.unifiConfig.site || 'default',
       username: apData.unifiConfig.username,
       password: apData.unifiConfig.password,
