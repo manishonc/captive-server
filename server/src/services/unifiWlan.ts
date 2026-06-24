@@ -18,6 +18,7 @@ import { UnifiConfig } from '../types/captive';
 import {
   normalizeMac,
   mapDeviceState,
+  effectiveControllerUrl,
   getDevices,
   getApGroups,
   rawSiteGet,
@@ -51,7 +52,8 @@ interface VenueUnifiAp {
 function resolveConfig(stored?: StoredUnifiConfig | null): UnifiConfig {
   const ct = stored?.controllerType || process.env.UNIFI_CONTROLLER_TYPE || 'classic';
   const controllerType = ct === 'udm' ? 'udm' : 'classic';
-  const controllerUrl = String(stored?.controllerUrl || process.env.UNIFI_CONTROLLER_URL || '').replace(/\/+$/, '');
+  // Internal address (UNIFI_CONTROLLER_URL env) wins over the AP's stored public URL.
+  const controllerUrl = effectiveControllerUrl(stored?.controllerUrl);
   const site = (String(stored?.site || process.env.UNIFI_SITE || 'default').trim()) || 'default';
   const username = String(stored?.username || process.env.UNIFI_USERNAME || '').trim();
   const password = String(stored?.password || process.env.UNIFI_PASSWORD || '');

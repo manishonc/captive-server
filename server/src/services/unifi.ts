@@ -49,6 +49,18 @@ export function mapDeviceState(state: number | undefined): 'online' | 'offline' 
   return Number(state) === 1 ? 'online' : 'offline';
 }
 
+/**
+ * The controller URL captive-server should dial. The AP doc's stored `controllerUrl`
+ * is the PUBLIC address (for the admin browser / setup guide); captive-server runs on
+ * the same Docker network as the controller and must use the internal address (e.g.
+ * `https://unifi:8443`) — a container cannot NAT-hairpin to its host's public IP.
+ * Set `UNIFI_CONTROLLER_URL` on the captive-server deployment to force it; falls back
+ * to the AP's stored URL when unset (no behavior change).
+ */
+export function effectiveControllerUrl(storedUrl?: string): string {
+  return String(process.env.UNIFI_CONTROLLER_URL || storedUrl || '').replace(/\/+$/, '');
+}
+
 function rawRequest(
   urlStr: string,
   opts: {
