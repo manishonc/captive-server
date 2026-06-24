@@ -254,8 +254,9 @@ function v2Data(res: UnifiResponse, what: string): any {
 
 function ensureOk(res: UnifiResponse, what: string): any[] {
   if (res.status < 200 || res.status >= 300) {
-    const msg = res.body?.meta?.msg ? `: ${res.body.meta.msg}` : '';
-    throw new Error(`UniFi ${what} failed HTTP ${res.status}${msg}`);
+    // Surface the controller's full reason (meta.msg, e.g. api.err.*, or the raw body).
+    const detail = res.body?.meta?.msg || (res.body ? JSON.stringify(res.body) : '');
+    throw new Error(`UniFi ${what} failed HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return res.body?.data ?? [];
 }
@@ -376,8 +377,10 @@ export async function ensureWlan(
   }
 
   const base: Record<string, unknown> = args.template ? { ...args.template } : {};
+  // Drop server-generated / unique fields so the controller mints fresh ones on create.
   delete base._id;
-  delete base.external_id; // server-generated unique id — let the controller mint a fresh one
+  delete base.external_id;
+  delete base.x_iapp_key; // inter-AP key — must be unique per WLAN
   const created = ensureOk(await siteRequest(config, 'POST', 'rest/wlanconf', { ...base, name: args.ssid, enabled: true, ...scope }), 'create wlanconf');
   const id = created?.[0]?._id;
   if (!id) throw new Error('UniFi did not return the created WLAN id.');
