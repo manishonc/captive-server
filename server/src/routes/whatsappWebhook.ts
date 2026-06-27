@@ -13,6 +13,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
+import { recordDeliveryStatus } from '../services/campaignTracking';
 
 const router = Router();
 
@@ -84,6 +85,9 @@ router.post('/', async (req: Request, res: Response) => {
               } else {
                 console.warn('[WHATSAPP WEBHOOK] No marketing record for wamid:', wamid);
               }
+
+              // Also reflect onto campaign sends (no-op if not a campaign send).
+              await recordDeliveryStatus('wamid', wamid, statusValue, errorData);
             } catch (err) {
               console.error('[WHATSAPP WEBHOOK] Firestore update error:', err);
             }

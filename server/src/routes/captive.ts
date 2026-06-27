@@ -8,6 +8,7 @@ import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } f
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '../services/unifi';
 import { getVenueName } from '../services/venue';
+import { fireAutomationsForGuest } from '../services/campaigns';
 
 const router = Router();
 
@@ -136,6 +137,13 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
     scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[WHATSAPP SCHEDULE ERROR]', err));
+    // Tenant Campaign Manager: fire any active automation campaigns for this event.
+    fireAutomationsForGuest(
+      captivePortalAccessPointId,
+      wifiGuestId,
+      { firstName, lastName, email, phone, phoneCountryCode },
+      wifiEvent,
+    ).catch((err) => console.error('[CAMPAIGN AUTOMATION ERROR]', err));
   }
 
   res.json({ success: true, id: wifiGuestId });
@@ -795,6 +803,13 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       .catch((err) => console.error('[UNIFI EMAIL SCHEDULE ERROR]', err));
     scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[UNIFI WHATSAPP SCHEDULE ERROR]', err));
+    // Tenant Campaign Manager: fire any active automation campaigns for this event.
+    fireAutomationsForGuest(
+      captivePortalAccessPointId,
+      wifiGuestId,
+      { firstName, email, phone, phoneCountryCode },
+      wifiEvent,
+    ).catch((err) => console.error('[UNIFI CAMPAIGN AUTOMATION ERROR]', err));
   }
 
   return res.json({ success: true, id: wifiGuestId });
