@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import twilio from 'twilio';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
+import { recordDeliveryStatus } from '../services/campaignTracking';
 
 const router = Router();
 
@@ -44,6 +45,9 @@ router.post('/', async (req: Request, res: Response) => {
     } else {
       console.warn('[TWILIO WEBHOOK] No marketing record found for MessageSid:', MessageSid);
     }
+
+    // Also reflect onto campaign sends (no-op if this SID isn't a campaign send).
+    await recordDeliveryStatus('messageSid', MessageSid, MessageStatus);
   } catch (err) {
     console.error('[TWILIO WEBHOOK ERROR]', err);
   }

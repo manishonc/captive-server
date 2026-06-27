@@ -15,6 +15,12 @@ import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
 import { getVenueName } from '../services/venue';
 import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics } from '../services/unifiWlan';
+import {
+  sendBroadcast,
+  pauseCampaign,
+  resumeCampaign,
+  cancelCampaign,
+} from '../services/campaigns';
 
 const router = Router();
 
@@ -182,5 +188,62 @@ router.get('/unifi/diagnostics', async (req: Request, res: Response) => {
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'diagnostics failed' });
   }
 });
+
+// ── Campaign Manager (called server-to-server by the CMS) ──
+// The CMS performs Firebase auth + tenant authorization, then calls these.
+// The campaign itself is read from Firestore here (source of truth); tenantUserId
+// is re-checked against the stored owner as defense-in-depth.
+
+interface CampaignActionBody {
+  campaignId?: string;
+  tenantUserId?: string;
+}
+
+/** Map a service-layer reason to an HTTP status. */
+function campaignErrorStatus(reason?: string): number {
+  if (reason === 'not_found') return 404;
+  if (reason === 'forbidden') return 403;
+  return 409; // state/validation conflicts (wrong type/status)
+}
+
+router.post('/campaigns/send', async (req: Request<{}, {}, CampaignActionBody>, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { campaignId, tenantUserId } = req.body || {};
+  if (!campaignId || !tenantUserId) {
+    return res.status(400).json({ ok: false, error: 'campaignId and tenantUserId are required' });
+  }
+  try {
+    const result = await sendBroadcast(String(campaignId), String(tenantUserId));
+    if (!result.ok) return res.status(campaignErrorStatus(result.error)).json({ ok: false, error: result.error });
+    return res.json({ ok: true, status: result.status, scheduledFor: result.scheduledFor });
+  } catch (err) {
+    console.error('[INTERNAL campaigns/send]', err);
+    return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'send failed' });
+  }
+});
+
+const CAMPAIGN_TRANSITIONS = {
+  pause: pauseCampaign,
+  resume: resumeCampaign,
+  cancel: cancelCampaign,
+} as const;
+
+for (const [action, handler] of Object.entries(CAMPAIGN_TRANSITIONS)) {
+  router.post(`/campaigns/${action}`, async (req: Request<{}, {}, CampaignActionBody>, res: Response) => {
+    if (!requireInternalSecret(req, res)) return;
+    const { campaignId, tenantUserId } = req.body || {};
+    if (!campaignId || !tenantUserId) {
+      return res.status(400).json({ ok: false, error: 'campaignId and tenantUserId are required' });
+    }
+    try {
+      const result = await handler(String(campaignId), String(tenantUserId));
+      if (!result.ok) return res.status(campaignErrorStatus(result.error)).json({ ok: false, error: result.error });
+      return res.json({ ok: true, status: result.status });
+    } catch (err) {
+      console.error(`[INTERNAL campaigns/${action}]`, err);
+      return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : `${action} failed` });
+    }
+  });
+}
 
 export default router;
