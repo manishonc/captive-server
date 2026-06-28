@@ -1,0 +1,28 @@
+services:
+  mcp:
+    build:
+      context: ./mcp
+    container_name: mcp
+    ports:
+      - "4001:4001"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+      - MCP_SERVER_URL=${MCP_SERVER_URL:-https://mcp.heidifi.ai/mcp}
+      - MCP_ISSUER_URL=${MCP_ISSUER_URL:-https://mcp.heidifi.ai}
+      - OAUTH_CONSENT_URL=${OAUTH_CONSENT_URL:-https://portal.heidifi.ai/captive-oauth/consent}
+      - OAUTH_CODE_TTL_SECONDS=${OAUTH_CODE_TTL_SECONDS:-120}
+      - OAUTH_ACCESS_TOKEN_TTL_SECONDS=${OAUTH_ACCESS_TOKEN_TTL_SECONDS:-3600}
+      - OAUTH_REFRESH_TOKEN_TTL_DAYS=${OAUTH_REFRESH_TOKEN_TTL_DAYS:-30}
+      # Dev-only bypass (leave unset in production)
+      - MCP_DEV_STATIC_TOKEN=${MCP_DEV_STATIC_TOKEN:-}
+      - MCP_DEV_TENANT_ID=${MCP_DEV_TENANT_ID:-}
+    networks:
+      - coolify
+    restart: unless-stopped
+
+networks:
+  coolify:
+    external: true
