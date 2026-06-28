@@ -8,14 +8,14 @@ import { randomToken, sha256Hex } from '../crypto';
  *
  * Modeled on the CMS's VenueLinkGrant pattern (cms/lib/venue-link.js): epoch-ms
  * timestamps, lazy delete-on-read, single-use via transactions. Collections:
- *   McpOAuth_AuthRequests, McpOAuth_Codes, McpOAuth_AccessTokens, McpOAuth_RefreshTokens
+ *   CaptivePortal_McpAuthRequests, CaptivePortal_McpCodes, CaptivePortal_McpAccessTokens, CaptivePortal_McpRefreshTokens
  */
 
 const COL = {
-  authRequests: 'McpOAuth_AuthRequests',
-  codes: 'McpOAuth_Codes',
-  accessTokens: 'McpOAuth_AccessTokens',
-  refreshTokens: 'McpOAuth_RefreshTokens',
+  authRequests: 'CaptivePortal_McpAuthRequests',
+  codes: 'CaptivePortal_McpCodes',
+  accessTokens: 'CaptivePortal_McpAccessTokens',
+  refreshTokens: 'CaptivePortal_McpRefreshTokens',
 } as const;
 
 const now = () => Date.now();

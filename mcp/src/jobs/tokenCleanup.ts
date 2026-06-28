@@ -8,10 +8,10 @@ import { db } from '../firebase';
  * belt-and-suspenders. Lazy delete-on-read in the store functions covers the rest.
  */
 const COLLECTIONS = [
-  'McpOAuth_AuthRequests',
-  'McpOAuth_Codes',
-  'McpOAuth_AccessTokens',
-  'McpOAuth_RefreshTokens',
+  'CaptivePortal_McpAuthRequests',
+  'CaptivePortal_McpCodes',
+  'CaptivePortal_McpAccessTokens',
+  'CaptivePortal_McpRefreshTokens',
 ] as const;
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly

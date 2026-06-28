@@ -2,12 +2,12 @@ import { db } from '../firebase';
 import { randomClientId } from '../crypto';
 
 /**
- * McpOAuth_Clients — OAuth 2.1 clients created via Dynamic Client Registration
+ * CaptivePortal_McpClients — OAuth 2.1 clients created via Dynamic Client Registration
  * (RFC 7591). These are public clients (Claude Code, Cursor): PKCE-only, no secret.
  * No tenant binding — a client is registered before any user is involved.
  */
 
-const COLLECTION = 'McpOAuth_Clients';
+const COLLECTION = 'CaptivePortal_McpClients';
 
 export interface OAuthClient {
   clientId: string;

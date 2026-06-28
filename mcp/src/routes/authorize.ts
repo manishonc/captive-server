@@ -12,7 +12,7 @@ import { SCOPES } from '../config';
  * Authorization endpoint (OAuth 2.1 Authorization Code + PKCE).
  *
  * GET /oauth/authorize  — validate the client/PKCE/resource, write a pending
- *   McpOAuth_AuthRequests doc, and 302 to the CMS consent screen (portal.heidifi.ai).
+ *   CaptivePortal_McpAuthRequests doc, and 302 to the CMS consent screen (portal.heidifi.ai).
  *   The CMS sets the doc to `approved` (+ tenantUserId); it never sees redirect_uri.
  *
  * GET /oauth/authorize/resume — the CMS redirects the browser back here; we

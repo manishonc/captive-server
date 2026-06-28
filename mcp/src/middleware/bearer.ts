@@ -27,7 +27,7 @@ function constantTimeMatch(a: string, b: string): boolean {
  *
  * 1. Dev bypass: when MCP_DEV_STATIC_TOKEN is set, accept that token bound to
  *    MCP_DEV_TENANT_ID (local development / Phase A smoke-testing only).
- * 2. Production: look up the opaque token by SHA-256 hash in McpOAuth_AccessTokens,
+ * 2. Production: look up the opaque token by SHA-256 hash in CaptivePortal_McpAccessTokens,
  *    enforce expiry + revocation, and bind the tenantUserId for the tool layer.
  */
 export async function requireBearer(req: AuthedRequest, res: Response, next: NextFunction): Promise<void> {

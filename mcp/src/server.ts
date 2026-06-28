@@ -40,6 +40,6 @@ app.listen(config.port, () => {
       `[heidifi-mcp] DEV MODE active: accepting MCP_DEV_STATIC_TOKEN bound to tenant "${config.devTenantId || '(none)'}". DO NOT use in production.`,
     );
   } else {
-    console.log('[heidifi-mcp] production token validation enabled (McpOAuth_AccessTokens).');
+    console.log('[heidifi-mcp] production token validation enabled (CaptivePortal_McpAccessTokens).');
   }
 });
