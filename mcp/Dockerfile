@@ -5,7 +5,10 @@ WORKDIR /app
 COPY package.json package-lock.json* tsconfig.json ./
 COPY src ./src
 
-RUN npm install && npm run build
+# --include=dev forces devDependencies (typescript) even when NODE_ENV=production
+# is injected at build time (Coolify does this), so `tsc` is available for the build.
+# The prune step below strips devDependencies back out of the runtime image.
+RUN npm install --include=dev && npm run build
 
 RUN npm prune --production
 
