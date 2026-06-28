@@ -203,16 +203,20 @@ export async function getAccessTokenByHash(tokenHash: string): Promise<AccessTok
   return snap.exists ? (snap.data() as AccessToken) : null;
 }
 
+// These use update() (not set-merge) on purpose: patching/revoking must NEVER recreate
+// a doc the hourly cleanup already swept. update() no-ops via the .catch() when the doc
+// is gone — which is exactly right, since an expired+deleted token needs no revoking.
+
 export async function patchAccessToken(tokenHash: string, patch: Partial<AccessToken>): Promise<void> {
-  await db.collection(COL.accessTokens).doc(tokenHash).set(patch, { merge: true }).catch(() => {});
+  await db.collection(COL.accessTokens).doc(tokenHash).update(patch).catch(() => {});
 }
 
 export async function touchAccessToken(tokenHash: string): Promise<void> {
-  await db.collection(COL.accessTokens).doc(tokenHash).set({ lastUsedAt: now() }, { merge: true }).catch(() => {});
+  await db.collection(COL.accessTokens).doc(tokenHash).update({ lastUsedAt: now() }).catch(() => {});
 }
 
 export async function revokeAccessToken(tokenHash: string): Promise<void> {
-  await db.collection(COL.accessTokens).doc(tokenHash).set({ revoked: true }, { merge: true }).catch(() => {});
+  await db.collection(COL.accessTokens).doc(tokenHash).update({ revoked: true }).catch(() => {});
 }
 
 // ── Refresh tokens (rotated; reuse detected and the forward chain revoked) ──
@@ -265,7 +269,7 @@ export async function getRefreshTokenByHash(tokenHash: string): Promise<RefreshT
 }
 
 export async function patchRefreshToken(tokenHash: string, patch: Partial<RefreshToken>): Promise<void> {
-  await db.collection(COL.refreshTokens).doc(tokenHash).set(patch, { merge: true }).catch(() => {});
+  await db.collection(COL.refreshTokens).doc(tokenHash).update(patch).catch(() => {});
 }
 
 /** Mark a refresh token as rotated and link its successor (for forward-chain revocation). */
@@ -286,7 +290,7 @@ export async function revokeChainFrom(startHash: string): Promise<void> {
     const snap = await db.collection(COL.refreshTokens).doc(current).get();
     if (!snap.exists) break;
     const data = snap.data() as RefreshToken;
-    await db.collection(COL.refreshTokens).doc(current).set({ revoked: true, revokedFromReuse: true }, { merge: true }).catch(() => {});
+    await db.collection(COL.refreshTokens).doc(current).update({ revoked: true, revokedFromReuse: true }).catch(() => {});
     if (data.accessTokenHash) await revokeAccessToken(data.accessTokenHash);
     current = data.replacedBy || '';
   }

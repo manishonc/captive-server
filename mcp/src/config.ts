@@ -22,9 +22,7 @@ export const config = {
   mcpServerUrl: process.env.MCP_SERVER_URL || 'https://mcp.heidifi.ai/mcp',
   mcpIssuerUrl: (process.env.MCP_ISSUER_URL || 'https://mcp.heidifi.ai').replace(/\/$/, ''),
   consentUrl: process.env.OAUTH_CONSENT_URL || 'https://portal.heidifi.ai/captive-oauth/consent',
-  resumeUrl:
-    process.env.OAUTH_RESUME_URL ||
-    `${(process.env.MCP_ISSUER_URL || 'https://mcp.heidifi.ai').replace(/\/$/, '')}/oauth/authorize/resume`,
+  // (The /oauth/authorize/resume redirect is owned by the CMS via its own OAUTH_RESUME_URL.)
 
   // Token lifetimes.
   codeTtlSeconds: num('OAUTH_CODE_TTL_SECONDS', 120),
