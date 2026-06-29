@@ -89,23 +89,47 @@ export interface TenantAccessPoint {
 
 /**
  * All access points owned by a tenant.
- * Mirrors the CMS access-points route's `tenantUserId` branch — `tenantUserId` is
- * denormalized onto each AP from its owning venue.
+ *
+ * Authorization mirrors the CMS dashboard's per-venue query, which enumerates APs
+ * by `venueId` (cms/app/api/captive-portal/users/route.js) rather than by the AP's
+ * own denormalized `tenantUserId`. That denormalized field is written only
+ * conditionally on the CMS create path and can be missing/stale on older or
+ * reassigned APs — such APs (and all of their guests) were silently dropped when we
+ * filtered on it alone. We now take the union of:
+ *   (a) APs belonging to a venue this tenant owns (the source of truth), and
+ *   (b) APs directly tagged with this `tenantUserId` (fast path / belt-and-suspenders).
  */
 export async function getTenantAccessPoints(tenantUserId: string): Promise<TenantAccessPoint[]> {
-  const snap = await db
+  // (a) Venues owned by this tenant → their APs by venueId (chunked for the `in` cap).
+  const venuesSnap = await db
+    .collection('CaptivePortal_Venues')
+    .where('tenantUserId', '==', tenantUserId)
+    .get();
+  const ownedVenueIds = venuesSnap.docs.map((d) => d.id);
+
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const ids of chunk(ownedVenueIds, 30)) {
+    if (ids.length === 0) continue;
+    const s = await db
+      .collection('CaptivePortal_AccessPoints')
+      .where('venueId', 'in', ids)
+      .get();
+    for (const doc of s.docs) merged.set(doc.id, doc.data() as Record<string, unknown>);
+  }
+
+  // (b) APs directly tagged with this tenant (covers any without a resolvable venue).
+  const byTenant = await db
     .collection('CaptivePortal_AccessPoints')
     .where('tenantUserId', '==', tenantUserId)
     .get();
-  return snap.docs.map((doc) => {
-    const d = doc.data() as Record<string, unknown>;
-    return {
-      id: doc.id,
-      name: (d.name as string) ?? '',
-      venueId: (d.venueId as string) ?? '',
-      venueName: (d.venueName as string) ?? '',
-    };
-  });
+  for (const doc of byTenant.docs) merged.set(doc.id, doc.data() as Record<string, unknown>);
+
+  return [...merged.entries()].map(([id, d]) => ({
+    id,
+    name: (d.name as string) ?? '',
+    venueId: (d.venueId as string) ?? '',
+    venueName: (d.venueName as string) ?? '',
+  }));
 }
 
 /** A captured guest document with its Firestore id. */
