@@ -128,11 +128,19 @@ export function registerGuestTools(server: McpServer): void {
       if (!snap.exists) return errorResult('Guest not found.');
       const d = snap.data() as Record<string, unknown>;
 
-      // Verify the guest's access point is owned by this tenant.
+      // Verify the guest's access point is owned by this tenant. Authorize via
+      // venue ownership (the source of truth) as well as the AP's denormalized
+      // tenantUserId, which can be missing/stale — otherwise guests captured at
+      // such APs are invisible here even though they own the venue.
       const apId = (d.captivePortalAccessPointId as string) ?? '';
       const apSnap = apId ? await db.collection('CaptivePortal_AccessPoints').doc(apId).get() : null;
       const apData = apSnap?.exists ? (apSnap.data() as Record<string, unknown>) : null;
-      if (!apData || apData.tenantUserId !== tenantUserId) {
+      const apVenueId = apData?.venueId as string | undefined;
+      const owned =
+        apData != null &&
+        (apData.tenantUserId === tenantUserId ||
+          (apVenueId ? (await getOwnedVenue(tenantUserId, apVenueId)) !== null : false));
+      if (!owned) {
         return errorResult('Guest not found or not owned by this account.');
       }
 

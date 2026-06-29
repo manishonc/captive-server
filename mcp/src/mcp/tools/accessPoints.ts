@@ -64,7 +64,16 @@ export function registerAccessPointTools(server: McpServer): void {
       if (!snap.exists) return errorResult('Access point not found.');
 
       const raw = snap.data() as Record<string, unknown>;
-      if (raw.tenantUserId !== tenantUserId) {
+      // Authorize via venue ownership (the source of truth), mirroring
+      // list_access_points, rather than trusting the AP's denormalized
+      // tenantUserId, which can be missing/stale on older or
+      // super-admin-created APs (and would otherwise hide owned APs here
+      // even though list_access_points returns them).
+      const venueId = raw.venueId as string | undefined;
+      const owned =
+        raw.tenantUserId === tenantUserId ||
+        (venueId ? (await getOwnedVenue(tenantUserId, venueId)) !== null : false);
+      if (!owned) {
         return errorResult('Access point not found or not owned by this account.');
       }
 
