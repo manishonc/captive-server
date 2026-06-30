@@ -8,6 +8,7 @@ import whatsappWebhookRoutes from './routes/whatsappWebhook';
 import socialWifiWebhookRoutes from './routes/socialWifiWebhook';
 import brevoWebhookRoutes from './routes/brevoWebhook';
 import trackingRoutes from './routes/tracking';
+import unsubscribeRoutes from './routes/unsubscribe';
 import internalRoutes from './routes/internal';
 import { startApMonitor } from './jobs/apMonitor';
 import { startCampaignScheduler } from './jobs/campaignScheduler';
@@ -25,6 +26,7 @@ app.use('/webhook/whatsapp', whatsappWebhookRoutes);
 app.use('/webhook/social-wifi', socialWifiWebhookRoutes);
 app.use('/webhook/brevo', brevoWebhookRoutes);
 app.use('/t', trackingRoutes);
+app.use('/u', unsubscribeRoutes);
 app.use('/internal', internalRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {

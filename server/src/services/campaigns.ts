@@ -28,6 +28,7 @@ import {
   swapVenueRatingUrl,
   swapTrackedLinks,
 } from './shortlinks';
+import { buildUnsubscribeUrl } from './unsubscribe';
 
 const CAMPAIGNS = 'CaptivePortal_Campaigns';
 const CAMPAIGN_SENDS = 'CaptivePortal_CampaignSends';
@@ -108,6 +109,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
 /** Opted-in = active + explicitly opted in + consent not explicitly withdrawn. */
 function isOptedIn(u: any): boolean {
   if (u.status === 'archived') return false;
+  if (u.unsubscribed === true) return false; // honored an unsubscribe link / one-click
   if (u.marketingConsent && u.marketingConsent.given === false) return false;
   return u.marketingOptIn === true || (u.marketingConsent && u.marketingConsent.given === true);
 }
@@ -249,6 +251,14 @@ async function dispatchOne(
     lastName: member.lastName,
     venueName,
     ratingUrl: venueId ? `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate` : '',
+    // Signed, per-recipient unsubscribe link. Fills the {{unsubscribeUrl}} token
+    // the CMS guarantees in every marketing body, and feeds the List-Unsubscribe
+    // header below. Empty string when the feature is unconfigured.
+    unsubscribeUrl: buildUnsubscribeUrl({
+      g: member.guestId,
+      v: venueId || undefined,
+      c: campaign.id,
+    }),
   };
   const linkCtx = {
     venueId,
@@ -268,7 +278,13 @@ async function dispatchOne(
     const trackedSwap = await swapTrackedLinks(body, linkCtx);
     body = trackedSwap.content;
     body = injectOpenPixel(body, sendId);
-    const id = await sendEmail(member.email, subject || '(no subject)', body, msg.delayMinutes);
+    const id = await sendEmail(
+      member.email,
+      subject || '(no subject)',
+      body,
+      msg.delayMinutes,
+      ctx.unsubscribeUrl || undefined,
+    );
     if (!id) return { ok: false, status: 'failed', reason: 'email_not_configured' };
     return {
       ok: true,
