@@ -8,13 +8,16 @@ const senderName = process.env.BREVO_SENDER_NAME || 'WiFi Portal';
  * Sends or schedules a transactional email via Brevo.
  * - If delayMinutes >= 1: schedules using Brevo's scheduledAt parameter
  * - Otherwise: sends immediately
+ * - If unsubscribeUrl is provided (marketing sends): adds RFC 8058 one-click
+ *   List-Unsubscribe headers so Gmail/Apple show a native unsubscribe button.
  * @returns Brevo messageId on success, null when skipped (env missing)
  */
 export async function sendEmail(
   to: string,
   subject: string,
   body: string,
-  delayMinutes: number
+  delayMinutes: number,
+  unsubscribeUrl?: string
 ): Promise<string | null> {
   if (!apiKey || !senderEmail) {
     console.warn('[BREVO] Skipping email: BREVO_API_KEY or BREVO_SENDER_EMAIL not set');
@@ -30,12 +33,38 @@ export async function sendEmail(
     htmlContent: body,
   };
 
+  if (unsubscribeUrl) {
+    params.headers = {
+      'List-Unsubscribe': `<${unsubscribeUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    };
+  }
+
   if (delayMinutes >= 1) {
     params.scheduledAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString();
   }
 
   const result = await client.transactionalEmails.sendTransacEmail(params);
   return result.messageId ?? null;
+}
+
+/**
+ * Best-effort mirror of an unsubscribe to Brevo's contact blocklist (so Brevo
+ * also suppresses the address). Firestore's `unsubscribed` flag remains the
+ * source of truth for our own audience filter, so failures here are non-fatal.
+ * A 404 (the recipient was never imported as a Brevo contact) is expected and
+ * ignored — we only create contacts implicitly via marketing.
+ */
+export async function blocklistContact(email: string): Promise<void> {
+  if (!apiKey || !email) return;
+  const res = await fetch(`https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`, {
+    method: 'PUT',
+    headers: { 'api-key': apiKey, 'content-type': 'application/json' },
+    body: JSON.stringify({ emailBlacklisted: true }),
+  });
+  if (!res.ok && res.status !== 404) {
+    console.warn(`[BREVO] blocklistContact ${email} -> HTTP ${res.status}`);
+  }
 }
 
 const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://cms.heidifi.ai';

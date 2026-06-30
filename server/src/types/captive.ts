@@ -112,6 +112,10 @@ export interface CaptivePortalUserDocument {
   privacyPolicyConsent: ConsentRecord;
   termsConsent: ConsentRecord;
   marketingConsent: ConsentRecord;
+  /** Set when the guest used an unsubscribe link / one-click. Excludes them from
+   *  every future marketing send (see services/campaigns.ts isOptedIn). */
+  unsubscribed?: boolean;
+  unsubscribedAt?: FieldValue | null;
 }
 
 export interface CaptivePortalSessionDocument {
