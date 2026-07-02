@@ -164,6 +164,45 @@ See also: `docs/marketing-test-send.md`
 
 ---
 
+## AI / MCP (campaign capability layer)
+
+The MCP service (`mcp/`, port 4001) exposes tenant-scoped campaign tools. The
+CMS AI mints short-lived tenant tokens via `POST /internal/mint-token`; the
+MCP campaign write tools proxy lifecycle actions back to `server/`.
+
+| Variable | Service | Description |
+|---|---|---|
+| `MCP_INTERNAL_SECRET` | mcp | Guards `POST /internal/mint-token`. Must equal the CMS's `MCP_INTERNAL_SECRET`. Fails closed if unset. |
+| `CAPTIVE_API_URL` | mcp | Base URL of `server/` for proxied campaign actions (default `http://localhost:4000`). |
+| `INTERNAL_API_SECRET` | mcp | Same secret as `server/`'s — the MCP service calls `server/`'s `/internal/campaigns/*`. |
+
+> CMS-side vars (set in the **CMS** deployment): `AI_GATEWAY_API_KEY` (Vercel AI
+> Gateway), `MCP_BASE_URL` (this MCP service's public URL), `MCP_INTERNAL_SECRET`
+> (= above), and optional `AI_CHAT_MODEL` / `AI_DESIGN_MODEL` overrides.
+
+---
+
+## Billing quotas (Phase: track + soft-enforce)
+
+| Variable | Service | Description |
+|---|---|---|
+| `ENFORCE_QUOTAS` | server + CMS | `true` flips soft quota warnings into hard blocks (sends stop at the plan limit with `skipped_quota` records). Leave unset while messaging is free. |
+
+---
+
+## SMS / WhatsApp opt-out (compliance)
+
+Inbound STOP/START/HELP handling lives at `POST /webhook/twilio/inbound` (SMS)
+and inside the existing WhatsApp webhook. Ops setup: point the Twilio
+Messaging Service's **inbound request URL** at
+`${SERVER_PUBLIC_URL}/webhook/twilio/inbound`.
+
+| Variable | Service | Description |
+|---|---|---|
+| `TWILIO_ADVANCED_OPT_OUT` | server | Set `true` when the Messaging Service has Advanced Opt-Out enabled — Twilio then sends the confirmation replies and we only sync guest opt-out state (no double replies). |
+
+---
+
 ## RADIUS (optional)
 
 | Variable | Description |

@@ -5,6 +5,11 @@ import { registerGuestTools } from './tools/guests';
 import { registerCampaignTools } from './tools/campaigns';
 import { registerAnalyticsTools } from './tools/analytics';
 import { registerVenueConfigTools } from './tools/venueConfig';
+import { registerCampaignWriteTools } from './tools/campaignWrites';
+import { registerTemplateTools } from './tools/templates';
+import { registerBrandingTools } from './tools/branding';
+import { registerAudienceTools } from './tools/audience';
+import { registerUsageTools } from './tools/usage';
 
 /**
  * Build a fresh McpServer with all tools registered.
@@ -19,6 +24,16 @@ import { registerVenueConfigTools } from './tools/venueConfig';
  *   campaigns:     list_campaigns, get_campaign
  *   analytics:     get_capture_stats, get_campaign_stats
  *   config:        get_venue_marketing_config, get_splash_config
+ *
+ * Tier 2 write/utility tools (the campaign capability layer for the CMS AI
+ * and external MCP clients):
+ *   campaigns:     create_campaign, update_campaign, send_campaign,
+ *                  pause/resume/cancel_campaign, activate/deactivate_campaign,
+ *                  archive/restore_campaign, test_send_campaign
+ *   templates:     list_templates, get_template, create_template
+ *   audience:      preview_audience (per-channel opted-in counts)
+ *   branding:      get_branding
+ *   plan/usage:    get_usage
  */
 export function buildMcpServer(): McpServer {
   const server = new McpServer({
@@ -33,6 +48,11 @@ export function buildMcpServer(): McpServer {
   registerCampaignTools(server);
   registerAnalyticsTools(server);
   registerVenueConfigTools(server);
+  registerCampaignWriteTools(server);
+  registerTemplateTools(server);
+  registerBrandingTools(server);
+  registerAudienceTools(server);
+  registerUsageTools(server);
 
   return server;
 }

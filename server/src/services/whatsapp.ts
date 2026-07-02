@@ -83,6 +83,43 @@ export async function sendWhatsAppTemplate(
 }
 
 /**
+ * Sends a free-form WhatsApp TEXT message. Only deliverable inside the 24h
+ * customer-service window an inbound message opens — used for opt-out
+ * confirmations from the webhook (marketing always uses templates).
+ * Returns the wamid on success, null when unconfigured.
+ */
+export async function sendWhatsAppText(to: string, text: string): Promise<string | null> {
+  if (!isConfigured()) {
+    console.warn('[WHATSAPP] Skipping text: WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN not set');
+    return null;
+  }
+
+  const response = await fetch(`${BASE_URL}/${PHONE_NUMBER_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: text },
+    }),
+  });
+
+  const data = await response.json() as Record<string, unknown>;
+  if (!response.ok) {
+    const err = data?.error as Record<string, unknown> | undefined;
+    throw new Error(
+      `[WHATSAPP API ERROR] ${err?.code ?? response.status}: ${err?.message ?? JSON.stringify(data)}`
+    );
+  }
+  const messages = data?.messages as Array<{ id: string }> | undefined;
+  return messages?.[0]?.id ?? null;
+}
+
+/**
  * Converts a phone + country code into E.164 format for WhatsApp.
  * WhatsApp numbers must NOT include the "whatsapp:" prefix — just plain E.164.
  */
