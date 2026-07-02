@@ -33,6 +33,14 @@ export const config = {
   // Dev-only static-token bypass (Phase A; must be unset in production).
   devStaticToken: process.env.MCP_DEV_STATIC_TOKEN || '',
   devTenantId: process.env.MCP_DEV_TENANT_ID || '',
+
+  // Shared secret guarding /internal/* (CMS server-to-server token minting).
+  internalSecret: process.env.MCP_INTERNAL_SECRET || '',
+
+  // The main captive-server API (server/, port 4000) for proxied campaign
+  // lifecycle actions; guarded by ITS internal secret.
+  serverApiUrl: (process.env.CAPTIVE_API_URL || 'http://localhost:4000').replace(/\/$/, ''),
+  serverInternalSecret: process.env.INTERNAL_API_SECRET || '',
 };
 
 /** The `.well-known/oauth-protected-resource` document URL, advertised on 401s. */

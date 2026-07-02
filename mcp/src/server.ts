@@ -7,6 +7,7 @@ import { registerRouter } from './routes/register';
 import { authorizeRouter } from './routes/authorize';
 import { tokenRouter } from './routes/token';
 import { revokeRouter } from './routes/revoke';
+import { internalRouter } from './routes/internal';
 import { startTokenCleanup } from './jobs/tokenCleanup';
 
 const app = express();
@@ -31,6 +32,9 @@ app.use(revokeRouter);
 
 // MCP protocol endpoint (bearer-protected).
 app.use('/mcp', mcpRouter);
+
+// Server-to-server endpoints (CMS AI token minting; x-internal-secret guarded).
+app.use('/internal', internalRouter);
 
 app.listen(config.port, () => {
   console.log(`[heidifi-mcp] listening on port ${config.port}`);

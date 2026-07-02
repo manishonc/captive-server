@@ -21,6 +21,9 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { sendEmail } from './brevo';
 import { scheduleSms, toE164 } from './twilio';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from './whatsapp';
+import { getEntitlements, quotasEnforced, type Channel as MessagingChannel } from './entitlements';
+import { recordSends } from './usage';
+import { injectPoweredBy } from './poweredBy';
 import { getVenueName } from './venue';
 import {
   VISITOR_BASE_URL,
@@ -98,6 +101,8 @@ interface AudienceMember {
   phoneCountryCode: string;
   accessPointId: string | null;
   venueId: string | null;
+  /** Channel-specific suppressions captured at materialization time. */
+  optOuts?: { email?: boolean; sms?: boolean; whatsapp?: boolean };
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -106,12 +111,36 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-/** Opted-in = active + explicitly opted in + consent not explicitly withdrawn. */
-function isOptedIn(u: any): boolean {
+/** Base marketing consent = active + explicitly opted in + not withdrawn. */
+function hasMarketingConsent(u: any): boolean {
   if (u.status === 'archived') return false;
-  if (u.unsubscribed === true) return false; // honored an unsubscribe link / one-click
   if (u.marketingConsent && u.marketingConsent.given === false) return false;
   return u.marketingOptIn === true || (u.marketingConsent && u.marketingConsent.given === true);
+}
+
+/**
+ * Channel-aware opt-in. Suppressions are independent per channel: an email
+ * unsubscribe (`unsubscribed`, via /u/:token) doesn't block SMS, and an SMS
+ * STOP (`smsOptOut`, via the Twilio inbound webhook) doesn't block email.
+ */
+export function isOptedInFor(u: any, channel: 'email' | 'sms' | 'whatsapp'): boolean {
+  if (!hasMarketingConsent(u)) return false;
+  if (channel === 'email' && u.unsubscribed === true) return false;
+  if (channel === 'sms' && u.smsOptOut === true) return false;
+  if (channel === 'whatsapp' && u.whatsappOptOut === true) return false;
+  return true;
+}
+
+// CTIA compliance: every marketing SMS must carry opt-out instructions. The
+// suffix is appended unless the author already wrote their own (keep this
+// regex in sync with the CMS MessageBuilder preview).
+const SMS_OPT_OUT_SUFFIX = '\nReply STOP to unsubscribe';
+const SMS_OPT_OUT_PATTERN = /\breply\s+stop\b|\bstop\b.{0,20}(unsubscribe|opt.?out|cancel)/i;
+
+function ensureSmsOptOutSuffix(content: string): string {
+  const safe = String(content ?? '');
+  if (SMS_OPT_OUT_PATTERN.test(safe)) return safe;
+  return `${safe}${SMS_OPT_OUT_SUFFIX}`;
 }
 
 /** Replace {{token}} placeholders from a per-guest context. Unknowns → empty. */
@@ -180,7 +209,10 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
         if (out.length >= MAX_AUDIENCE) return;
         const u = doc.data();
         if (seen.has(doc.id)) return;
-        if (!isOptedIn(u)) return;
+        // Base consent gates audience membership; channel-specific opt-outs
+        // (email unsubscribe / SMS STOP / WhatsApp STOP) suppress per message
+        // in dispatchOne via the optOuts flags captured below.
+        if (!hasMarketingConsent(u)) return;
         if (wantEntityType && u.entityType !== wantEntityType) return;
         if (after !== null || before !== null) {
           const raw = u.createdAt || u.timestamp;
@@ -199,6 +231,11 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
           phoneCountryCode: u.phoneCountryCode || '',
           accessPointId: u.captivePortalAccessPointId || null,
           venueId: apVenue.get(u.captivePortalAccessPointId) ?? null,
+          optOuts: {
+            email: u.unsubscribed === true,
+            sms: u.smsOptOut === true,
+            whatsapp: u.whatsappOptOut === true,
+          },
         });
       });
     }),
@@ -269,6 +306,12 @@ async function dispatchOne(
 
   const scheduledForSend = msg.delayMinutes > 0;
 
+  // Channel-scoped suppression: an email unsubscribe doesn't block SMS and
+  // vice versa; each message honors its own channel's opt-out flag.
+  if (member.optOuts?.[msg.channel] === true) {
+    return { ok: false, status: 'failed', reason: 'opted_out_channel' };
+  }
+
   if (msg.channel === 'email') {
     if (!member.email) return { ok: false, status: 'failed', reason: 'no_email' };
     const subject = interpolate(String(msg.subject ?? ''), ctx);
@@ -278,6 +321,13 @@ async function dispatchOne(
     const trackedSwap = await swapTrackedLinks(body, linkCtx);
     body = trackedSwap.content;
     body = injectOpenPixel(body, sendId);
+    // "Powered by HeidiFi" footer — removable per plan (hidePoweredBy flag).
+    try {
+      const entitlements = await getEntitlements(campaign.tenantUserId);
+      if (!entitlements.flags.hidePoweredBy) body = injectPoweredBy(body);
+    } catch {
+      body = injectPoweredBy(body); // fail-open to branded
+    }
     const id = await sendEmail(
       member.email,
       subject || '(no subject)',
@@ -305,6 +355,7 @@ async function dispatchOne(
     content = rateSwap.content;
     const trackedSwap = await swapTrackedLinks(content, linkCtx);
     content = trackedSwap.content;
+    content = ensureSmsOptOutSuffix(content);
     const id = await scheduleSms(to, content, msg.delayMinutes);
     if (!id) return { ok: false, status: 'failed', reason: 'sms_not_configured' };
     return {
@@ -423,6 +474,21 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
   const venueNameCache = new Map<string, string>();
   let sent = 0;
   let failed = 0;
+  let skippedQuota = 0;
+
+  // Quota accounting for this run. `remaining` snapshots plan+credits before
+  // the run; per-channel counters track this run's accepted sends. Hard
+  // enforcement (ENFORCE_QUOTAS=true) stops a channel at its limit and marks
+  // the rest skipped_quota; soft mode only records a quotaWarning.
+  const entitlements = await getEntitlements(campaign.tenantUserId).catch(() => null);
+  const enforce = quotasEnforced() && entitlements !== null;
+  const sentPerChannel: Record<MessagingChannel, number> = { email: 0, sms: 0, whatsapp: 0 };
+
+  const channelBlocked = (channel: MessagingChannel): boolean => {
+    if (!enforce || !entitlements) return false;
+    const remaining = entitlements.remaining[channel];
+    return remaining !== null && sentPerChannel[channel] >= remaining;
+  };
 
   // One unit of work per (message, guest).
   const work: Array<{ msg: CampaignMessage; member: AudienceMember; messageIndex: number }> = [];
@@ -431,19 +497,60 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
   });
 
   await pMap(work, DISPATCH_CONCURRENCY, async ({ msg, member, messageIndex }) => {
+    if (channelBlocked(msg.channel as MessagingChannel)) {
+      skippedQuota += 1;
+      await db.collection(CAMPAIGN_SENDS).add({
+        campaignId: campaign.id,
+        tenantUserId: campaign.tenantUserId,
+        wifiGuestId: member.guestId,
+        channel: msg.channel,
+        messageIndex,
+        to: msg.channel === 'email' ? member.email : member.phone,
+        deliveryStatus: 'skipped_quota',
+        statusUpdatedAt: FieldValue.serverTimestamp(),
+        scheduledAt: FieldValue.serverTimestamp(),
+      }).catch(() => {});
+      return;
+    }
     const r = await recordAndDispatch(campaign, msg, messageIndex, member, venueNameCache);
-    if (r.ok) sent += 1;
-    else failed += 1;
+    if (r.ok) {
+      sent += 1;
+      sentPerChannel[msg.channel as MessagingChannel] += 1;
+    } else {
+      failed += 1;
+    }
   });
 
-  await ref.update({
+  // Meter accepted sends (single choke point for all campaign messaging).
+  await Promise.all(
+    (Object.keys(sentPerChannel) as MessagingChannel[])
+      .filter((channel) => sentPerChannel[channel] > 0)
+      .map((channel) => recordSends(campaign.tenantUserId, channel, sentPerChannel[channel])),
+  );
+
+  const update: Record<string, unknown> = {
     status: 'sent',
     'stats.sent': FieldValue.increment(sent),
     sentAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
-  });
+  };
+  if (skippedQuota > 0) {
+    update.quotaWarning = `${skippedQuota} message(s) skipped: monthly quota reached. Buy addon credits or raise the plan quota.`;
+  } else if (entitlements) {
+    // Soft warning when this run pushed a channel past its allowance.
+    const over = (Object.keys(sentPerChannel) as MessagingChannel[]).filter((channel) => {
+      const remaining = entitlements.remaining[channel];
+      return remaining !== null && sentPerChannel[channel] > remaining;
+    });
+    if (over.length > 0) {
+      update.quotaWarning = `Sent past the monthly quota on: ${over.join(', ')}. Enforcement is off, but consider addon credits.`;
+    }
+  }
+  await ref.update(update);
 
-  console.log(`[CAMPAIGN] ${campaign.id} dispatched: ${sent} sent, ${failed} failed (audience ${audience.length})`);
+  console.log(
+    `[CAMPAIGN] ${campaign.id} dispatched: ${sent} sent, ${failed} failed, ${skippedQuota} skipped_quota (audience ${audience.length})`,
+  );
   return { sent, failed };
 }
 
@@ -622,18 +729,40 @@ export async function fireAutomationsForGuest(
     if (seg.venueIds && seg.venueIds.length > 0 && !seg.venueIds.includes(venueId)) continue;
 
     const messages = (campaign.messages || []).filter((m) => campaign.channels.includes(m.channel));
+
+    // Quota check (5-min-cached entitlements — good enough for the low
+    // per-guest volume of automations). Hard enforcement skips over-quota
+    // channels; soft mode sends and lets metering surface the overage.
+    const entitlements = quotasEnforced()
+      ? await getEntitlements(campaign.tenantUserId).catch(() => null)
+      : null;
+
     let sent = 0;
+    const sentPerChannel: Record<MessagingChannel, number> = { email: 0, sms: 0, whatsapp: 0 };
     for (let i = 0; i < messages.length; i++) {
+      const channel = messages[i].channel as MessagingChannel;
+      if (entitlements) {
+        const remaining = entitlements.remaining[channel];
+        if (remaining !== null && remaining <= 0) continue; // skipped_quota
+      }
       const r = await recordAndDispatch(campaign, messages[i], i, member, venueNameCache, {
         wifiEvent,
         source: 'automation',
       });
-      if (r.ok) sent += 1;
+      if (r.ok) {
+        sent += 1;
+        sentPerChannel[channel] += 1;
+      }
     }
     if (sent > 0) {
       await doc.ref
         .update({ 'stats.sent': FieldValue.increment(sent) })
         .catch((err) => console.error('[CAMPAIGN AUTOMATION stats]', err));
+      await Promise.all(
+        (Object.keys(sentPerChannel) as MessagingChannel[])
+          .filter((channel) => sentPerChannel[channel] > 0)
+          .map((channel) => recordSends(campaign.tenantUserId, channel, sentPerChannel[channel])),
+      );
     }
   }
 }

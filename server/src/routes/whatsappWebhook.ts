@@ -14,6 +14,8 @@ import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { recordDeliveryStatus } from '../services/campaignTracking';
+import { classifyInbound, setChannelOptOut } from '../services/optOut';
+import { sendWhatsAppText } from '../services/whatsapp';
 
 const router = Router();
 
@@ -94,12 +96,48 @@ router.post('/', async (req: Request, res: Response) => {
           }
         }
 
-        // ── Inbound messages (optional — log for now) ────────────────────────
+        // ── Inbound messages: honor opt-out keywords + quick-reply buttons ──
         const messages = value?.messages as Array<Record<string, unknown>>;
         if (messages?.length) {
           for (const msg of messages) {
             console.log('[WHATSAPP WEBHOOK] Inbound message from %s: type=%s', msg?.from, msg?.type);
-            // TODO: handle inbound replies (e.g. opt-out keywords like STOP)
+            const from = String(msg?.from ?? '').trim(); // digits, no leading +
+            if (!from) continue;
+
+            // Meta policy: honor opt-out requests. Cover both plain-text
+            // keywords and template quick-reply buttons ("Unsubscribe").
+            let text = '';
+            if (msg?.type === 'text') {
+              text = String((msg.text as Record<string, unknown>)?.body ?? '');
+            } else if (msg?.type === 'button') {
+              text = String((msg.button as Record<string, unknown>)?.text ?? '');
+            } else if (msg?.type === 'interactive') {
+              const interactive = msg.interactive as Record<string, Record<string, unknown>>;
+              text = String(interactive?.button_reply?.title ?? interactive?.list_reply?.title ?? '');
+            }
+
+            const kind = classifyInbound(text);
+            if (!kind) continue;
+
+            try {
+              if (kind === 'stop') {
+                await setChannelOptOut(`+${from}`, 'whatsapp', true);
+                // Confirmation is allowed: an inbound message opens the 24h
+                // customer-service window for free-form replies.
+                await sendWhatsAppText(
+                  `+${from}`,
+                  'You have been unsubscribed from WhatsApp updates. Reply START to resubscribe.',
+                ).catch(() => {});
+              } else if (kind === 'start') {
+                await setChannelOptOut(`+${from}`, 'whatsapp', false);
+                await sendWhatsAppText(
+                  `+${from}`,
+                  'You are resubscribed to WhatsApp updates. Reply STOP to unsubscribe.',
+                ).catch(() => {});
+              }
+            } catch (err) {
+              console.error('[WHATSAPP WEBHOOK] opt-out handling failed:', err);
+            }
           }
         }
       }

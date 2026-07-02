@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "settings": {
+    "backgroundColor": "#f4f5f7",
+    "contentBackgroundColor": "#ffffff",
+    "contentWidth": 600,
+    "fontFamily": "georgia",
+    "textColor": "#222222",
+    "linkColor": "#1c2b4a"
+  },
+  "blocks": [
+    {
+      "id": "blk_header",
+      "type": "header",
+      "props": {
+        "logoUrl": "https://askheidi.b-cdn.net/logo.png",
+        "title": "Alpine Lodge",
+        "subtitle": "Your home in the Alps"
+      },
+      "styles": {
+        "padding": {
+          "top": 32,
+          "right": 32,
+          "bottom": 16,
+          "left": 32
+        },
+        "align": "center"
+      }
+    },
+    {
+      "id": "blk_text",
+      "type": "text",
+      "props": {
+        "html": "<p>Hi {{firstName}}, welcome to <b>Alpine Lodge</b>!</p>"
+      },
+      "styles": {
+        "padding": {
+          "top": 8,
+          "right": 32,
+          "bottom": 8,
+          "left": 32
+        }
+      }
+    },
+    {
+      "id": "blk_btn",
+      "type": "button",
+      "props": {
+        "label": "Book again & save",
+        "href": "https://alpinelodge.example.com/offers",
+        "backgroundColor": "#1c2b4a",
+        "color": "#ffffff",
+        "borderRadius": 8
+      },
+      "styles": {
+        "padding": {
+          "top": 16,
+          "right": 32,
+          "bottom": 16,
+          "left": 32
+        },
+        "align": "center"
+      }
+    },
+    {
+      "id": "blk_cols",
+      "type": "columns",
+      "props": {
+        "ratio": "50-50",
+        "columns": [
+          [
+            {
+              "id": "blk_c1",
+              "type": "text",
+              "props": {
+                "html": "<p>Left column</p>"
+              },
+              "styles": {
+                "padding": {
+                  "top": 4,
+                  "right": 8,
+                  "bottom": 4,
+                  "left": 0
+                }
+              }
+            }
+          ],
+          [
+            {
+              "id": "blk_c2",
+              "type": "image",
+              "props": {
+                "src": "https://askheidi.b-cdn.net/photo.jpg",
+                "alt": "Lodge view"
+              },
+              "styles": {
+                "padding": {
+                  "top": 4,
+                  "right": 0,
+                  "bottom": 4,
+                  "left": 8
+                }
+              }
+            }
+          ]
+        ]
+      },
+      "styles": {
+        "padding": {
+          "top": 8,
+          "right": 32,
+          "bottom": 8,
+          "left": 32
+        }
+      }
+    },
+    {
+      "id": "blk_social",
+      "type": "social",
+      "props": {
+        "links": [
+          {
+            "network": "instagram",
+            "url": "https://instagram.com/alpinelodge"
+          },
+          {
+            "network": "website",
+            "url": "https://alpinelodge.example.com"
+          }
+        ]
+      },
+      "styles": {
+        "padding": {
+          "top": 16,
+          "right": 32,
+          "bottom": 24,
+          "left": 32
+        },
+        "align": "center"
+      }
+    }
+  ],
+  "footer": {
+    "showAddress": true,
+    "addressText": "Bahnhofstrasse 1, 3920 Zermatt"
+  }
+}
