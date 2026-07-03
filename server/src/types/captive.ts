@@ -94,6 +94,33 @@ export interface CaptivePortalMarketingDocument {
   rating?: number | null;
 }
 
+export type ConnectedPageFieldType = 'checkbox' | 'text';
+
+export interface ConnectedPageField {
+  /** Slug (^[a-z0-9][a-z0-9_-]{0,39}$) — also used as a Firestore field-path segment. */
+  id: string;
+  type: ConnectedPageFieldType;
+  label: string;
+  placeholder?: string;   // text type only
+  required?: boolean;
+  enabled?: boolean;
+}
+
+export interface ConnectedPageConfig {
+  title: string;
+  subtitle: string;
+  buttonText: string;
+  buttonUrl: string;
+  showButton: boolean;
+  customFields: ConnectedPageField[];
+}
+
+export interface ConnectedFormResponse {
+  value: boolean | string;
+  label: string;
+  submittedAt: string;  // ISO 8601
+}
+
 export interface CaptivePortalUserDocument {
   firstName: string;
   lastName: string;
@@ -116,6 +143,9 @@ export interface CaptivePortalUserDocument {
    *  every future marketing send (see services/campaigns.ts isOptedIn). */
   unsubscribed?: boolean;
   unsubscribedAt?: FieldValue | null;
+  /** Answers submitted from the post-connection "connected" page custom fields, keyed by field id. */
+  connectedFormResponses?: Record<string, ConnectedFormResponse>;
+  connectedFormUpdatedAt?: FieldValue;
 }
 
 export interface CaptivePortalSessionDocument {
