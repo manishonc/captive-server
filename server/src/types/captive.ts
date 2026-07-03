@@ -22,6 +22,8 @@ export interface CreateUserRequestBody {
   privacyPolicyConsent?: ConsentRecord;
   termsConsent?: ConsentRecord;
   marketingConsent?: ConsentRecord;
+  /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
+  splashResponses?: Record<string, unknown>;
 }
 
 export interface MarketingSmsMessage {
@@ -127,6 +129,64 @@ export interface ConnectedFormResponse {
   submittedAt: string;  // ISO 8601
 }
 
+export interface SplashFieldConfig {
+  /** Show/hide the field's .field-group on the splash form. */
+  enabled: boolean;
+  /** Custom label; '' keeps the template's baked-in label. */
+  label: string;
+  /** Enforced client-side in goToConsent(); server stays permissive like /create-user. */
+  required: boolean;
+}
+
+export interface LoginPageConfig {
+  fields: {
+    firstName: SplashFieldConfig;
+    lastName: SplashFieldConfig;
+    email: SplashFieldConfig;
+    phone: SplashFieldConfig;
+  };
+  /** #btnNext label. */
+  buttonText: string;
+  /** Extra splash-form fields, same shape/rules as the connected page (max 8). */
+  customFields: ConnectedPageField[];
+}
+
+export interface ConsentPageConfig {
+  /** .consent-heading */
+  heading: string;
+  /** .consent-sub */
+  subheading: string;
+  /** .consent-box paragraphs (1..4, each ≤1000 chars). Joined with '\n\n' this is the
+   *  exact text stored in each guest's ConsentRecord. */
+  bodyParagraphs: string[];
+  /** #btnAccept label. */
+  acceptButtonText: string;
+  /** #btnDecline label. */
+  declineButtonText: string;
+}
+
+export interface SplashScreenConfig {
+  templateId: string;
+  title: string;
+  subtitle: string;
+  logoUrl: string;
+  showLogo: boolean;
+  primaryColor: string;
+  backgroundColor: string;
+  /** @deprecated superseded by loginPage.fields; kept for stale portal builds and old docs. */
+  collectEmail: boolean;
+  /** @deprecated superseded by loginPage.fields; kept for stale portal builds and old docs. */
+  collectName: boolean;
+  /** false skips the consent step entirely (submitConsent(false)). */
+  showMarketingOptIn: boolean;
+  showPrivacyPolicy: boolean;
+  showTermsOfService: boolean;
+  redirectUrl: string;
+  loginPage: LoginPageConfig;
+  consentPage: ConsentPageConfig;
+  connectedPage: ConnectedPageConfig;
+}
+
 export interface CaptivePortalUserDocument {
   firstName: string;
   lastName: string;
@@ -152,6 +212,8 @@ export interface CaptivePortalUserDocument {
   /** Answers submitted from the post-connection "connected" page custom fields, keyed by field id. */
   connectedFormResponses?: Record<string, ConnectedFormResponse>;
   connectedFormUpdatedAt?: FieldValue;
+  /** Answers from splash-form custom fields (loginPage.customFields), keyed by field id. */
+  splashFormResponses?: Record<string, ConnectedFormResponse>;
 }
 
 export interface CaptivePortalSessionDocument {
@@ -188,4 +250,6 @@ export interface UnifiAuthorizeRequestBody {
   privacyPolicyConsent?: ConsentRecord;
   termsConsent?: ConsentRecord;
   marketingConsent?: ConsentRecord;
+  /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
+  splashResponses?: Record<string, unknown>;
 }

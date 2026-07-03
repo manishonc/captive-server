@@ -7,6 +7,7 @@ const express_1 = require("express");
 const twilio_1 = __importDefault(require("twilio"));
 const firebase_1 = require("../firebase");
 const firestore_1 = require("firebase-admin/firestore");
+const campaignTracking_1 = require("../services/campaignTracking");
 const router = (0, express_1.Router)();
 router.post('/', async (req, res) => {
     // Validate Twilio signature if SERVER_PUBLIC_URL is configured
@@ -45,6 +46,8 @@ router.post('/', async (req, res) => {
         else {
             console.warn('[TWILIO WEBHOOK] No marketing record found for MessageSid:', MessageSid);
         }
+        // Also reflect onto campaign sends (no-op if this SID isn't a campaign send).
+        await (0, campaignTracking_1.recordDeliveryStatus)('messageSid', MessageSid, MessageStatus);
     }
     catch (err) {
         console.error('[TWILIO WEBHOOK ERROR]', err);
