@@ -109,9 +109,15 @@ export interface ConnectedPageField {
 export interface ConnectedPageConfig {
   title: string;
   subtitle: string;
+  showTitle: boolean;
+  showSubtitle: boolean;
+  /** Connected-page-specific logo visibility (splash logo asset is reused). */
+  showLogo: boolean;
   buttonText: string;
   buttonUrl: string;
   showButton: boolean;
+  /** When true the Submit button is hidden and answers store on each interaction. */
+  autoSubmit: boolean;
   customFields: ConnectedPageField[];
 }
 
