@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConnectedPageField, ConsentRecord, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConnectedPageField, ConnectedFormResponse, ConsentRecord, LoginPageConfig, ConsentPageConfig, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } from '../services/whatsapp';
@@ -17,6 +17,49 @@ const defaultConsent = (): ConsentRecord => ({
   timestamp: new Date().toISOString(),
   version: '1.0',
 });
+
+const FIELD_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+// Validate raw splash custom-field answers ({fieldId: value}) against the venue's
+// configured loginPage.customFields — same rules as /connected-form. Unknown,
+// disabled, or malformed ids are dropped silently; returns {} when nothing valid
+// remains so callers can skip the write entirely.
+async function buildSplashFormResponses(
+  venueId: string | null | undefined,
+  raw: unknown,
+): Promise<Record<string, ConnectedFormResponse>> {
+  if (!venueId || !raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > 20) return {};
+
+  try {
+    const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(`venue_${venueId}`).get();
+    const configuredFields: ConnectedPageField[] = Array.isArray(configDoc.data()?.loginPage?.customFields)
+      ? configDoc.data()!.loginPage.customFields
+      : [];
+    const fieldById = new Map(
+      configuredFields
+        .filter((f) => f && f.enabled !== false && typeof f.id === 'string' && FIELD_ID_PATTERN.test(f.id))
+        .map((f) => [f.id, f]),
+    );
+
+    const submittedAt = new Date().toISOString();
+    const responses: Record<string, ConnectedFormResponse> = {};
+    for (const [id, value] of entries) {
+      const field = fieldById.get(id);
+      if (!field) continue;
+      responses[id] = {
+        value: field.type === 'checkbox' ? Boolean(value) : String(value ?? '').slice(0, 500),
+        label: String(field.label || '').slice(0, 80),
+        submittedAt,
+      };
+    }
+    return responses;
+  } catch (err) {
+    console.error('[SPLASH RESPONSES ERROR]', err);
+    return {};
+  }
+}
 
 router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, res: Response) => {
   const {
@@ -37,6 +80,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   const timestamp = req.body.timestamp || new Date().toISOString();
 
   let captivePortalAccessPointId: string | null = null;
+  let venueId: string | null = null;
 
   try {
     const snapshot = await db
@@ -47,6 +91,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
     if (!snapshot.empty) {
       captivePortalAccessPointId = snapshot.docs[0].id;
+      venueId = snapshot.docs[0].data().venueId || null;
       snapshot.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() })
         .catch((err) => console.error('[AP LASTSEEN ERROR]', err));
     } else {
@@ -74,6 +119,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
   const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
   const marketingOptIn = marketingConsent?.given ?? false;
+  const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
 
   let wifiGuestId: string;
 
@@ -96,6 +142,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
+      ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
     };
 
     try {
@@ -109,8 +156,14 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   } else {
     wifiGuestId = existingWifiGuestId;
     console.log('[RECONNECT]', wifiGuestId, email, captivePortalAccessPointId);
+    // Merge any fresh splash answers via field paths so repeat visitors don't
+    // wipe earlier responses to fields they skipped this time.
+    const reconnectUpdates: Record<string, unknown> = { connectionCount: FieldValue.increment(1) };
+    for (const [id, response] of Object.entries(splashFormResponses)) {
+      reconnectUpdates[`splashFormResponses.${id}`] = response;
+    }
     db.collection('CaptivePortal_Users').doc(wifiGuestId)
-      .update({ connectionCount: FieldValue.increment(1) })
+      .update(reconnectUpdates)
       .catch((err) => console.error('[RECONNECT COUNT ERROR]', err));
   }
 
@@ -496,33 +549,79 @@ async function scheduleEmailForEvent(
 // TODO: onDisconnect – call scheduleSmsForEvent / scheduleEmailForEvent
 //       when a user disconnects from the WiFi network.
 
-// ── Field names in CaptivePortal_Documents — update if your schema differs ──
-const DOC_TYPE_FIELD      = 'type';        // field that identifies the document kind
-const DOC_PUBLISHED_FIELD = 'published';   // boolean field — true means live
-const DOC_TYPE_PRIVACY    = 'privacy_policy';
-const DOC_TYPE_TERMS      = 'terms_of_service';
+// ── Guest-facing Terms/Privacy documents (CaptivePortal_Documents) ─────────
+// Resolution order: venue override (scope='entity', entityId=venueId) → global
+// platform default (scope='global') → legacy docs written before the scope field
+// existed (identified by a published:true boolean; the CMS writes status instead).
+// Terms lists the canonical CMS type first and the pre-rename alias second.
+const DOC_TYPES_PRIVACY = ['privacy_policy'];
+const DOC_TYPES_TERMS   = ['terms_conditions', 'terms_of_service'];
 
-async function fetchDocument(type: string): Promise<{ title?: string; content?: string } | null> {
-  const snapshot = await db
-    .collection('CaptivePortal_Documents')
-    .where(DOC_TYPE_FIELD, '==', type)
-    .where(DOC_PUBLISHED_FIELD, '==', true)
-    .limit(1)
-    .get();
-
-  if (snapshot.empty) {
-    console.warn(`[DOCUMENTS] No published document found for type="${type}"`);
+async function resolveVenueIdFromApmac(apmac: string): Promise<string | null> {
+  const mac = String(apmac || '').toLowerCase().trim();
+  if (!mac) return null;
+  try {
+    const snap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', mac)
+      .limit(1)
+      .get();
+    if (snap.empty) return null;
+    return snap.docs[0].data().venueId || null;
+  } catch (err) {
+    console.error('[DOCUMENTS] AP lookup error:', err);
     return null;
   }
+}
 
+type PortalDocContent = { title?: string; content?: string };
+
+function docFromSnap(snapshot: FirebaseFirestore.QuerySnapshot): PortalDocContent | null {
+  if (snapshot.empty) return null;
   const data = snapshot.docs[0].data();
-  console.log(`[DOCUMENTS] Fetched type="${type}" doc=${snapshot.docs[0].id}`);
   return { title: data?.title, content: data?.latestContent };
 }
 
-router.get('/privacy-policy', async (_req, res) => {
+async function fetchDocumentForVenue(types: string[], venueId: string | null): Promise<PortalDocContent | null> {
+  const collection = db.collection('CaptivePortal_Documents');
+
+  if (venueId) {
+    const overrideSnap = await collection
+      .where('type', 'in', types)
+      .where('scope', '==', 'entity')
+      .where('entityId', '==', venueId)
+      .where('status', '==', 'published')
+      .limit(1)
+      .get();
+    const override = docFromSnap(overrideSnap);
+    if (override) {
+      console.log(`[DOCUMENTS] Venue override for type in [${types}] venue=${venueId}`);
+      return override;
+    }
+  }
+
+  const globalSnap = await collection
+    .where('type', 'in', types)
+    .where('scope', '==', 'global')
+    .where('status', '==', 'published')
+    .limit(1)
+    .get();
+  const globalDoc = docFromSnap(globalSnap);
+  if (globalDoc) return globalDoc;
+
+  const legacySnap = await collection
+    .where('type', 'in', types)
+    .where('published', '==', true)
+    .limit(1)
+    .get();
+  const legacyDoc = docFromSnap(legacySnap);
+  if (!legacyDoc) console.warn(`[DOCUMENTS] No published document found for types=[${types}]`);
+  return legacyDoc;
+}
+
+router.get('/privacy-policy', async (req, res) => {
   try {
-    const doc = await fetchDocument(DOC_TYPE_PRIVACY);
+    const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
+    const doc = await fetchDocumentForVenue(DOC_TYPES_PRIVACY, venueId);
     if (!doc) return res.status(404).json({ success: false });
     res.json({ success: true, ...doc });
   } catch (err) {
@@ -531,9 +630,10 @@ router.get('/privacy-policy', async (_req, res) => {
   }
 });
 
-router.get('/terms', async (_req, res) => {
+router.get('/terms', async (req, res) => {
   try {
-    const doc = await fetchDocument(DOC_TYPE_TERMS);
+    const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
+    const doc = await fetchDocumentForVenue(DOC_TYPES_TERMS, venueId);
     if (!doc) return res.status(404).json({ success: false });
     res.json({ success: true, ...doc });
   } catch (err) {
@@ -555,6 +655,32 @@ const CONNECTED_PAGE_DEFAULTS = {
   customFields: [] as ConnectedPageField[],
 };
 
+const LOGIN_PAGE_DEFAULTS: LoginPageConfig = {
+  fields: {
+    firstName: { enabled: true, label: '', required: true },
+    lastName:  { enabled: true, label: '', required: true },
+    email:     { enabled: true, label: '', required: true },
+    // Matches pre-config behavior: phone is always shown but never validated.
+    phone:     { enabled: true, label: '', required: false },
+  },
+  buttonText: 'Continue',
+  customFields: [],
+};
+
+// bodyParagraphs must stay byte-identical to the copy baked into the templates'
+// .consent-box (and the legacy CONSENT_TEXT in form-logic.js) so default-config
+// venues don't flash mismatched text when JS re-applies the config.
+const CONSENT_PAGE_DEFAULTS: ConsentPageConfig = {
+  heading: 'We care about your privacy',
+  subheading: 'Stay in touch with us and find out more about the best offers',
+  bodyParagraphs: [
+    'I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.',
+    'I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.',
+  ],
+  acceptButtonText: 'Accept',
+  declineButtonText: "I don't want to stay in touch.",
+};
+
 const SPLASH_DEFAULTS = {
   templateId: 'classic',
   title: 'Connect to WiFi',
@@ -569,8 +695,58 @@ const SPLASH_DEFAULTS = {
   showPrivacyPolicy: true,
   showTermsOfService: true,
   redirectUrl: '',
+  loginPage: LOGIN_PAGE_DEFAULTS,
+  consentPage: CONSENT_PAGE_DEFAULTS,
   connectedPage: CONNECTED_PAGE_DEFAULTS,
 };
+
+// Deep-merge a stored loginPage with defaults. Old docs have no loginPage at all —
+// derive field visibility from the legacy collectName/collectEmail flags instead.
+function mergeLoginPage(docData: Record<string, any>): LoginPageConfig {
+  const stored = (docData.loginPage && typeof docData.loginPage === 'object' && !Array.isArray(docData.loginPage))
+    ? docData.loginPage
+    : null;
+
+  if (!stored) {
+    const collectName = docData.collectName !== false;
+    const collectEmail = docData.collectEmail !== false;
+    return {
+      ...LOGIN_PAGE_DEFAULTS,
+      fields: {
+        firstName: { ...LOGIN_PAGE_DEFAULTS.fields.firstName, enabled: collectName, required: collectName },
+        lastName:  { ...LOGIN_PAGE_DEFAULTS.fields.lastName,  enabled: collectName, required: collectName },
+        email:     { ...LOGIN_PAGE_DEFAULTS.fields.email,     enabled: collectEmail, required: collectEmail },
+        phone:     { ...LOGIN_PAGE_DEFAULTS.fields.phone },
+      },
+    };
+  }
+
+  const storedFields = (stored.fields && typeof stored.fields === 'object') ? stored.fields : {};
+  const fields = {} as LoginPageConfig['fields'];
+  (Object.keys(LOGIN_PAGE_DEFAULTS.fields) as Array<keyof LoginPageConfig['fields']>).forEach((key) => {
+    // Per-field merge: a doc carrying only fields.phone must not clobber the rest.
+    fields[key] = { ...LOGIN_PAGE_DEFAULTS.fields[key], ...(storedFields[key] || {}) };
+  });
+  return {
+    fields,
+    buttonText: typeof stored.buttonText === 'string' && stored.buttonText.trim() ? stored.buttonText : LOGIN_PAGE_DEFAULTS.buttonText,
+    customFields: Array.isArray(stored.customFields) ? stored.customFields : [],
+  };
+}
+
+function mergeConsentPage(docData: Record<string, any>): ConsentPageConfig {
+  const stored = (docData.consentPage && typeof docData.consentPage === 'object' && !Array.isArray(docData.consentPage))
+    ? docData.consentPage
+    : {};
+  const merged: ConsentPageConfig = { ...CONSENT_PAGE_DEFAULTS, ...stored };
+  // Never serve an empty consent text — it becomes the guest's ConsentRecord.
+  if (!Array.isArray(merged.bodyParagraphs)
+      || merged.bodyParagraphs.length === 0
+      || !merged.bodyParagraphs.every((p: unknown) => typeof p === 'string' && p.trim())) {
+    merged.bodyParagraphs = CONSENT_PAGE_DEFAULTS.bodyParagraphs;
+  }
+  return merged;
+}
 
 router.get('/splash-config', async (req: Request, res: Response) => {
   const { apmac: apmacParam, ap } = req.query as { apmac?: string; ap?: string };
@@ -602,6 +778,8 @@ router.get('/splash-config', async (req: Request, res: Response) => {
     const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
     if (!Array.isArray(connectedPage.customFields)) connectedPage.customFields = [];
     config.connectedPage = connectedPage;
+    config.loginPage = mergeLoginPage(docData);
+    config.consentPage = mergeConsentPage(docData);
     // strip Firestore-internal fields
     delete config.createdAt;
     delete config.updatedAt;
@@ -621,7 +799,6 @@ const CONNECTED_FORM_WINDOW_MS = 60_000;
 // Auto-save mode posts on every checkbox toggle / text blur, so the window
 // allows a burst of legitimate interactions.
 const CONNECTED_FORM_MAX_PER_WINDOW = 10;
-const FIELD_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 function connectedFormRateLimited(key: string): boolean {
   const now = Date.now();
@@ -807,6 +984,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
 
   // Look up AP by MAC to get unifiConfig + venueId
   let captivePortalAccessPointId: string | null = null;
+  let venueId: string | null = null;
   let unifiConfig: UnifiConfig | null = null;
   let sessionTimeoutSeconds = 36000;
 
@@ -824,6 +1002,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     const apDoc = apSnap.docs[0];
     const apData = apDoc.data();
     captivePortalAccessPointId = apDoc.id;
+    venueId = apData.venueId || null;
     sessionTimeoutSeconds = apData.sessionTimeout || 36000;
 
     if (!apData.unifiConfig?.controllerUrl || !apData.unifiConfig?.username || !apData.unifiConfig?.password) {
@@ -874,6 +1053,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
 
   const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
   const marketingOptIn = marketingConsent?.given ?? false;
+  const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
   let wifiGuestId: string;
 
   if (!existingWifiGuestId) {
@@ -895,6 +1075,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       privacyPolicyConsent: privacyPolicyConsent || defaultConsent(),
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
+      ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
     };
 
     try {
@@ -909,8 +1090,12 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   } else {
     wifiGuestId = existingWifiGuestId;
     console.log('[UNIFI] Reconnect', wifiGuestId, email, normalizedApMac);
+    const reconnectUpdates: Record<string, unknown> = { connectionCount: FieldValue.increment(1) };
+    for (const [id, response] of Object.entries(splashFormResponses)) {
+      reconnectUpdates[`splashFormResponses.${id}`] = response;
+    }
     db.collection('CaptivePortal_Users').doc(wifiGuestId)
-      .update({ connectionCount: FieldValue.increment(1) })
+      .update(reconnectUpdates)
       .catch((err) => console.error('[UNIFI RECONNECT COUNT ERROR]', err));
   }
 

@@ -12,6 +12,31 @@ var CONNECTED_DEFAULTS = {
   customFields: [],
 };
 
+var LOGIN_DEFAULTS = {
+  fields: {
+    firstName: { enabled: true, label: '', required: true },
+    lastName:  { enabled: true, label: '', required: true },
+    email:     { enabled: true, label: '', required: true },
+    // Matches pre-config behavior: phone always shown, never validated.
+    phone:     { enabled: true, label: '', required: false },
+  },
+  buttonText: 'Continue',
+  customFields: [],
+};
+
+// Must stay byte-identical to the copy baked into the templates' .consent-box
+// so default-config venues don't flash mismatched text when JS re-applies it.
+var CONSENT_DEFAULTS = {
+  heading: 'We care about your privacy',
+  subheading: 'Stay in touch with us and find out more about the best offers',
+  bodyParagraphs: [
+    'I consent to the collection and use of my personal data, provided via WiFi portal registration, by this venue for marketing purposes. I understand that I may withdraw my consent at any time, and that this will not affect the legality of any processing carried out prior to my withdrawal.',
+    'I also consent to receiving marketing communications from this venue via email or other electronic means. I understand that I can unsubscribe at any time using the method provided in each communication.',
+  ],
+  acceptButtonText: 'Accept',
+  declineButtonText: "I don't want to stay in touch.",
+};
+
 var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFIG : {
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
@@ -24,8 +49,74 @@ var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFI
   showMarketingOptIn: true,
   showPrivacyPolicy: true,
   showTermsOfService: true,
+  loginPage: LOGIN_DEFAULTS,
+  consentPage: CONSENT_DEFAULTS,
   connectedPage: CONNECTED_DEFAULTS,
 };
+
+// Merge a (possibly partial or missing) loginPage with defaults. Old configs
+// have no loginPage at all — derive visibility from legacy collectName/collectEmail.
+function normalizeLoginPage(cfg) {
+  cfg = cfg || {};
+  var stored = (cfg.loginPage && typeof cfg.loginPage === 'object' && !Array.isArray(cfg.loginPage))
+    ? cfg.loginPage
+    : null;
+
+  if (!stored) {
+    var collectName = cfg.collectName !== false;
+    var collectEmail = cfg.collectEmail !== false;
+    return {
+      fields: {
+        firstName: { enabled: collectName,  label: '', required: collectName },
+        lastName:  { enabled: collectName,  label: '', required: collectName },
+        email:     { enabled: collectEmail, label: '', required: collectEmail },
+        phone:     { enabled: true, label: '', required: false },
+      },
+      buttonText: LOGIN_DEFAULTS.buttonText,
+      customFields: [],
+    };
+  }
+
+  var storedFields = (stored.fields && typeof stored.fields === 'object') ? stored.fields : {};
+  var fields = {};
+  Object.keys(LOGIN_DEFAULTS.fields).forEach(function (key) {
+    var def = LOGIN_DEFAULTS.fields[key];
+    var s = storedFields[key] || {};
+    fields[key] = {
+      enabled: (s.enabled === undefined) ? def.enabled : s.enabled !== false,
+      label: (typeof s.label === 'string') ? s.label : def.label,
+      required: (s.required === undefined) ? def.required : s.required === true,
+    };
+  });
+  return {
+    fields: fields,
+    buttonText: (typeof stored.buttonText === 'string' && stored.buttonText.trim())
+      ? stored.buttonText : LOGIN_DEFAULTS.buttonText,
+    customFields: (Array.isArray(stored.customFields) ? stored.customFields : []).filter(function (f) {
+      return f && f.enabled !== false && f.id && f.label &&
+        (f.type === 'checkbox' || f.type === 'text');
+    }),
+  };
+}
+
+function normalizeConsentPage(cfg) {
+  cfg = cfg || {};
+  var cp = (cfg.consentPage && typeof cfg.consentPage === 'object' && !Array.isArray(cfg.consentPage))
+    ? cfg.consentPage
+    : {};
+  var paragraphs = Array.isArray(cp.bodyParagraphs)
+    ? cp.bodyParagraphs.filter(function (p) { return typeof p === 'string' && p.trim(); })
+    : [];
+  return {
+    heading: cp.heading || CONSENT_DEFAULTS.heading,
+    subheading: (cp.subheading === undefined || cp.subheading === null)
+      ? CONSENT_DEFAULTS.subheading : cp.subheading,
+    // Never fall back to empty — this text becomes the guest's ConsentRecord.
+    bodyParagraphs: paragraphs.length ? paragraphs : CONSENT_DEFAULTS.bodyParagraphs,
+    acceptButtonText: cp.acceptButtonText || CONSENT_DEFAULTS.acceptButtonText,
+    declineButtonText: cp.declineButtonText || CONSENT_DEFAULTS.declineButtonText,
+  };
+}
 
 // Apply branding to the DOM. Safe to call repeatedly (used for live CMS preview).
 function applyPortalConfig(cfg) {
@@ -55,37 +146,156 @@ function applyPortalConfig(cfg) {
   var subEl = document.querySelector('.section-sub');
   if (subEl && !subEl.closest('#stepConnected')) subEl.textContent = cfg.subtitle;
 
-  // Conditional fields
-  if (!cfg.collectName) {
-    ['firstName', 'lastName'].forEach(function(id) {
-      var el = document.getElementById(id);
-      var fg = el && el.closest('.field-group');
-      if (fg) fg.style.display = 'none';
+  // Login-form fields + consent-step copy (both no-ops on missing elements)
+  applyLoginPage(cfg);
+  applyConsentPage(cfg);
+
+  // Footer links — set both ways so live preview toggles can re-show them
+  var pl = document.getElementById('privacyLink');
+  if (pl) pl.style.display = (cfg.showPrivacyPolicy === false) ? 'none' : '';
+  var tl = document.getElementById('termsLink');
+  if (tl) tl.style.display = (cfg.showTermsOfService === false) ? 'none' : '';
+}
+
+// Show/hide/relabel the built-in splash fields, set the Continue button text,
+// and rebuild the configured custom fields. Idempotent — live preview re-runs
+// it on every config push, so everything toggles in BOTH directions.
+function applyLoginPage(cfg) {
+  var lp = normalizeLoginPage(cfg);
+
+  Object.keys(lp.fields).forEach(function (id) {
+    var f = lp.fields[id];
+    var el = document.getElementById(id);
+    var fg = el && el.closest('.field-group');
+    if (!fg) return;
+    fg.style.display = f.enabled ? '' : 'none';
+    var lbl = fg.querySelector('.field-label');
+    if (lbl) {
+      // Cache the template's baked-in label so clearing a custom label restores it.
+      if (!lbl.dataset.orig) lbl.dataset.orig = lbl.textContent.trim();
+      lbl.textContent = (f.label || lbl.dataset.orig) + (f.required ? ' *' : '');
+    }
+  });
+
+  var btn = document.getElementById('btnNext');
+  if (btn) btn.textContent = lp.buttonText;
+
+  // Custom splash fields — rebuilt fresh each run, inserted before #step1Error
+  // (present in every template).
+  var existing = document.getElementById('splashFields');
+  if (existing) existing.parentNode.removeChild(existing);
+  if (!lp.customFields.length) return;
+  var errEl = document.getElementById('step1Error');
+  if (!errEl) return;
+
+  var sampleGroup = document.querySelector('#step1 .field-group') || document.querySelector('.field-group');
+  var fieldGroupClass = sampleGroup ? sampleGroup.className : 'field-group';
+  var wrap = document.createElement('div');
+  wrap.id = 'splashFields';
+  lp.customFields.forEach(function (field) {
+    wrap.appendChild(buildCustomFieldGroup(field, fieldGroupClass, {}));
+  });
+  errEl.parentNode.insertBefore(wrap, errEl);
+}
+
+// Replace the consent step's hardcoded copy with the configured text. Paragraphs
+// are rebuilt with createElement + textContent — never innerHTML (tenant input).
+function applyConsentPage(cfg) {
+  var cp = normalizeConsentPage(cfg);
+  var heading = document.querySelector('.consent-heading');
+  if (heading) heading.textContent = cp.heading;
+  var sub = document.querySelector('.consent-sub');
+  if (sub) sub.textContent = cp.subheading;
+  var box = document.querySelector('.consent-box');
+  if (box) {
+    while (box.firstChild) box.removeChild(box.firstChild);
+    cp.bodyParagraphs.forEach(function (text) {
+      var p = document.createElement('p');
+      p.textContent = text;
+      box.appendChild(p);
     });
   }
-  if (!cfg.collectEmail) {
-    var emailEl = document.getElementById('email');
-    var emailFg = emailEl && emailEl.closest('.field-group');
-    if (emailFg) emailFg.style.display = 'none';
-  }
+  var accept = document.getElementById('btnAccept');
+  if (accept && !accept.disabled) accept.textContent = cp.acceptButtonText;
+  var decline = document.getElementById('btnDecline');
+  if (decline) decline.textContent = cp.declineButtonText;
+}
 
-  // Footer links
-  if (!cfg.showPrivacyPolicy) {
-    var pl = document.getElementById('privacyLink');
-    if (pl) pl.style.display = 'none';
+// Shared checkbox/text field builder used by the splash form and the connected
+// card. opts: { autoSubmit, onAutoSave, onAutoSaveDebounced } — connected-page
+// auto-save wiring only; the splash form passes {}.
+function buildCustomFieldGroup(field, fieldGroupClass, opts) {
+  opts = opts || {};
+  var group = document.createElement('div');
+  group.className = fieldGroupClass;
+  var labelText = field.label + (field.required && !opts.autoSubmit ? ' *' : '');
+
+  if (field.type === 'checkbox') {
+    var checkLabel = document.createElement('label');
+    checkLabel.style.display = 'flex';
+    checkLabel.style.alignItems = 'center';
+    checkLabel.style.gap = '10px';
+    checkLabel.style.cursor = 'pointer';
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.setAttribute('data-field-id', field.id);
+    box.setAttribute('data-field-type', 'checkbox');
+    box.setAttribute('data-label', field.label);
+    if (field.required) box.setAttribute('data-required', '1');
+    box.style.width = '18px';
+    box.style.height = '18px';
+    box.style.flexShrink = '0';
+    box.style.accentColor = 'var(--primary)';
+    if (opts.onAutoSave) box.addEventListener('change', opts.onAutoSave);
+    var span = document.createElement('span');
+    span.textContent = labelText;
+    checkLabel.appendChild(box);
+    checkLabel.appendChild(span);
+    group.appendChild(checkLabel);
+  } else {
+    var fieldLabel = document.createElement('label');
+    fieldLabel.className = 'field-label';
+    fieldLabel.textContent = labelText;
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 500;
+    if (field.placeholder) input.placeholder = field.placeholder;
+    input.setAttribute('data-field-id', field.id);
+    input.setAttribute('data-field-type', 'text');
+    input.setAttribute('data-label', field.label);
+    if (field.required) input.setAttribute('data-required', '1');
+    if (opts.onAutoSaveDebounced) input.addEventListener('input', opts.onAutoSaveDebounced);
+    if (opts.onAutoSave) input.addEventListener('blur', opts.onAutoSave);
+    group.appendChild(fieldLabel);
+    group.appendChild(input);
   }
-  if (!cfg.showTermsOfService) {
-    var tl = document.getElementById('termsLink');
-    if (tl) tl.style.display = 'none';
+  return group;
+}
+
+// Switch which step is visible based on CONFIG.view: 'connected' (GET /success),
+// 'consent' (CMS preview of step 2), or default → the login form. Re-runnable so
+// the CMS live preview can flip views without an iframe reload.
+function applyView(cfg) {
+  if (cfg.view === 'connected') { renderConnectedView(cfg); return; }
+  var previous = document.getElementById('stepConnected');
+  if (previous) previous.parentNode.removeChild(previous);
+  var step1 = document.getElementById('step1');
+  var step2 = document.getElementById('step2');
+  if (cfg.view === 'consent') {
+    if (step1) step1.classList.add('hidden');
+    if (step2) step2.classList.remove('hidden');
+  } else {
+    if (step1) step1.classList.remove('hidden');
+    if (step2) step2.classList.add('hidden');
   }
 }
 
 // Apply immediately (synchronous, no flash)
 applyPortalConfig(CONFIG);
 
-// Connected view (GET /success): same template file, but the login form is
-// swapped for a success card built from the template's own building blocks.
-if (CONFIG.view === 'connected') renderConnectedView(CONFIG);
+// View switch: /success injects view:'connected', the CMS consent preview
+// injects view:'consent'; everything else shows the login form.
+applyView(CONFIG);
 
 // ── Connected view renderer ────────────────────────────────────────────────
 // Clones #step1 and rebuilds it as the "You're connected" card using only the
@@ -190,52 +400,11 @@ function renderConnectedView(cfg) {
     };
 
     page.customFields.forEach(function (field) {
-      var group = document.createElement('div');
-      group.className = fieldGroupClass;
-      var labelText = field.label + (field.required && !page.autoSubmit ? ' *' : '');
-
-      if (field.type === 'checkbox') {
-        var checkLabel = document.createElement('label');
-        checkLabel.style.display = 'flex';
-        checkLabel.style.alignItems = 'center';
-        checkLabel.style.gap = '10px';
-        checkLabel.style.cursor = 'pointer';
-        var box = document.createElement('input');
-        box.type = 'checkbox';
-        box.setAttribute('data-field-id', field.id);
-        box.setAttribute('data-field-type', 'checkbox');
-        box.setAttribute('data-label', field.label);
-        if (field.required) box.setAttribute('data-required', '1');
-        box.style.width = '18px';
-        box.style.height = '18px';
-        box.style.flexShrink = '0';
-        box.style.accentColor = 'var(--primary)';
-        if (page.autoSubmit) box.addEventListener('change', autoSave);
-        var span = document.createElement('span');
-        span.textContent = labelText;
-        checkLabel.appendChild(box);
-        checkLabel.appendChild(span);
-        group.appendChild(checkLabel);
-      } else {
-        var fieldLabel = document.createElement('label');
-        fieldLabel.className = 'field-label';
-        fieldLabel.textContent = labelText;
-        var input = document.createElement('input');
-        input.type = 'text';
-        input.maxLength = 500;
-        if (field.placeholder) input.placeholder = field.placeholder;
-        input.setAttribute('data-field-id', field.id);
-        input.setAttribute('data-field-type', 'text');
-        input.setAttribute('data-label', field.label);
-        if (field.required) input.setAttribute('data-required', '1');
-        if (page.autoSubmit) {
-          input.addEventListener('input', autoSaveDebounced);
-          input.addEventListener('blur', autoSave);
-        }
-        group.appendChild(fieldLabel);
-        group.appendChild(input);
-      }
-      wrap.appendChild(group);
+      wrap.appendChild(buildCustomFieldGroup(field, fieldGroupClass, page.autoSubmit ? {
+        autoSubmit: true,
+        onAutoSave: autoSave,
+        onAutoSaveDebounced: autoSaveDebounced,
+      } : {}));
     });
 
     // Auto-save mode stores on every interaction — no Submit button needed.
@@ -399,11 +568,13 @@ if (window.PREVIEW_MODE) {
     var d = e.data;
     if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
     // Only fields applyable without a reload; templateId is handled via iframe reload.
-    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo', 'connectedPage'].forEach(function (k) {
+    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo',
+     'showPrivacyPolicy', 'showTermsOfService',
+     'loginPage', 'consentPage', 'connectedPage', 'view'].forEach(function (k) {
       if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
     });
     applyPortalConfig(CONFIG);
-    if (CONFIG.view === 'connected') renderConnectedView(CONFIG);
+    applyView(CONFIG);
     console.log('[heidifi preview] applied live config from', e.origin);
   });
   console.log('[heidifi preview] live preview listener attached');

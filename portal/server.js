@@ -57,7 +57,7 @@ app.get('/guest/s/:site', (req, res) => {
 // Pass ?preview=1 to render with the preview banner (dashboard use only).
 // Aruba never appends this param so real users are unaffected.
 app.get('/', async (req, res) => {
-  const { cmd, mac, ip, network, apmac, ap, id, site, post, url, preview, templateId: templateIdOverride } = req.query;
+  const { cmd, mac, ip, network, apmac, ap, id, site, post, url, preview, view, templateId: templateIdOverride } = req.query;
   const resolvedApmac = apmac || ap;
   const resolvedMac = mac || id;
   if (cmd || ap) {
@@ -76,7 +76,12 @@ app.get('/', async (req, res) => {
       return res.sendFile(path.join(__dirname, 'public', 'unregistered.html'));
     }
 
-    const config = (result && result.config) || null;
+    let config = (result && result.config) || null;
+    // Preview-only view switch (CMS consent-page editor) — same mechanism as
+    // /success's view:'connected'. Gated on preview so guests can't skip step 1.
+    if (preview === '1' && view === 'consent') {
+      config = { ...(config || {}), view: 'consent' };
+    }
     // In preview mode, allow ?templateId= to override the saved template (CMS template picker)
     const rawId = (preview === '1' && templateIdOverride && VALID_TEMPLATES.includes(templateIdOverride))
       ? templateIdOverride
@@ -115,11 +120,17 @@ function proxyGet(backendPath, res) {
   proxyReq.end();
 }
 
+// Forward the AP MAC so the backend can resolve venue-specific document overrides.
+function docPath(backendPath, req) {
+  const apmac = String(req.query.apmac || '').trim();
+  return apmac ? `${backendPath}?apmac=${encodeURIComponent(apmac)}` : backendPath;
+}
+
 // GET /api/privacy-policy — proxies to backend GET /privacy-policy
-app.get('/api/privacy-policy', (_req, res) => proxyGet('/privacy-policy', res));
+app.get('/api/privacy-policy', (req, res) => proxyGet(docPath('/privacy-policy', req), res));
 
 // GET /api/terms — proxies to backend GET /terms
-app.get('/api/terms', (_req, res) => proxyGet('/terms', res));
+app.get('/api/terms', (req, res) => proxyGet(docPath('/terms', req), res));
 
 // POST /api/unifi-authorize — proxy to server POST /unifi/authorize (UniFi guest access)
 app.post('/api/unifi-authorize', (req, res) => {

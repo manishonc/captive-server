@@ -6,19 +6,41 @@ function clientMac() { return param('mac') || param('id'); }
 function apMac() { return param('apmac') || param('ap'); }
 
 // ── 3. Step 1 → Step 2 transition ─────────────────────────────────────────
-function goToConsent() {
-  var firstName = document.getElementById('firstName').value.trim();
-  var lastName  = document.getElementById('lastName').value.trim();
-  var email     = document.getElementById('email').value.trim();
-  var err       = document.getElementById('step1Error');
+var FIELD_ERROR_MSGS = {
+  firstName: 'Please enter your first name.',
+  lastName:  'Please enter your last name.',
+  email:     'Please enter a valid email address.',
+  phone:     'Please enter your phone number.',
+};
 
-  if (CONFIG.collectName) {
-    if (!firstName) { showErr(err, 'Please enter your first name.'); return; }
-    if (!lastName)  { showErr(err, 'Please enter your last name.');  return; }
+function goToConsent() {
+  var lp  = normalizeLoginPage(CONFIG);
+  var err = document.getElementById('step1Error');
+
+  var ids = ['firstName', 'lastName', 'email', 'phone'];
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    var f = lp.fields[id];
+    if (!f.enabled || !f.required) continue;
+    var value = document.getElementById(id).value.trim();
+    var invalid = (id === 'email') ? (!value || !value.includes('@')) : !value;
+    if (invalid) { showErr(err, FIELD_ERROR_MSGS[id]); return; }
   }
-  if (CONFIG.collectEmail) {
-    if (!email || !email.includes('@')) {
-      showErr(err, 'Please enter a valid email address.'); return;
+
+  // Required custom splash fields
+  var wrap = document.getElementById('splashFields');
+  if (wrap) {
+    var inputs = wrap.querySelectorAll('[data-field-id]');
+    for (var j = 0; j < inputs.length; j++) {
+      var input = inputs[j];
+      if (input.getAttribute('data-required') !== '1') continue;
+      var empty = input.getAttribute('data-field-type') === 'checkbox'
+        ? !input.checked
+        : !(input.value || '').trim();
+      if (empty) {
+        showErr(err, 'Please fill in: ' + input.getAttribute('data-label'));
+        return;
+      }
     }
   }
   err.style.display = 'none';
@@ -45,14 +67,30 @@ function showErr(el, msg) {
 });
 
 // ── 4. Consent text ────────────────────────────────────────────────────────
-var CONSENT_TEXT =
-  'I consent to the collection and use of my personal data, provided via ' +
-  'WiFi portal registration, by this venue for marketing purposes. I understand ' +
-  'that I may withdraw my consent at any time, and that this will not affect the ' +
-  'legality of any processing carried out prior to my withdrawal.\n\n' +
-  'I also consent to receiving marketing communications from this venue via email ' +
-  'or other electronic means. I understand that I can unsubscribe at any time ' +
-  'using the method provided in each communication.';
+// The ConsentRecord must store the exact copy the guest saw — tenants can
+// customize it via consentPage.bodyParagraphs (normalizeConsentPage falls back
+// to the platform default when unset).
+function getConsentText() {
+  return normalizeConsentPage(CONFIG).bodyParagraphs.join('\n\n');
+}
+
+// Gather custom splash-field answers as {fieldId: value}; undefined when the
+// venue has no splash custom fields so legacy request bodies stay unchanged.
+function collectSplashResponses() {
+  var wrap = document.getElementById('splashFields');
+  if (!wrap) return undefined;
+  var inputs = wrap.querySelectorAll('[data-field-id]');
+  if (!inputs.length) return undefined;
+  var responses = {};
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var id = input.getAttribute('data-field-id');
+    responses[id] = input.getAttribute('data-field-type') === 'checkbox'
+      ? input.checked
+      : (input.value || '').trim();
+  }
+  return responses;
+}
 
 // ── 5. Step 2 → Submit ────────────────────────────────────────────────────
 async function submitConsent(marketing) {
@@ -75,10 +113,11 @@ async function submitConsent(marketing) {
 
   var now = new Date().toISOString();
   var ver = '1.0';
+  var consentText = getConsentText();
 
-  var privacyPolicyConsent = { given: true,    timestamp: now, version: ver, text: CONSENT_TEXT };
-  var termsConsent         = { given: true,    timestamp: now, version: ver, text: CONSENT_TEXT };
-  var marketingConsent     = { given: marketing, timestamp: now, version: ver, text: CONSENT_TEXT };
+  var privacyPolicyConsent = { given: true,    timestamp: now, version: ver, text: consentText };
+  var termsConsent         = { given: true,    timestamp: now, version: ver, text: consentText };
+  var marketingConsent     = { given: marketing, timestamp: now, version: ver, text: consentText };
 
   // GDPR audit cookie — 1 year
   document.cookie = 'gdpr_consent=' + encodeURIComponent(JSON.stringify({
@@ -92,6 +131,7 @@ async function submitConsent(marketing) {
   var email     = document.getElementById('email').value.trim();
   var phone     = document.getElementById('phone').value.trim();
   var dialCode  = document.getElementById('selectedCode').textContent;
+  var splashResponses = collectSplashResponses();
 
   try {
     var res = await fetch('/api/create-user', {
@@ -108,6 +148,7 @@ async function submitConsent(marketing) {
         privacyPolicyConsent,
         termsConsent,
         marketingConsent,
+        splashResponses,
       }),
     });
     if (!res.ok) throw new Error('Server error');
@@ -126,6 +167,7 @@ async function submitConsent(marketing) {
           privacyPolicyConsent,
           termsConsent,
           marketingConsent,
+          splashResponses,
         }),
       });
       var authData = await authRes.json().catch(function() { return {}; });
@@ -156,7 +198,7 @@ async function submitConsent(marketing) {
     showErr(err, 'Something went wrong. Please try again.');
     btnAccept.disabled  = false;
     btnDecline.disabled = false;
-    btnAccept.textContent = 'Accept';
+    btnAccept.textContent = normalizeConsentPage(CONFIG).acceptButtonText;
   }
 }
 
@@ -182,7 +224,9 @@ function openDoc(e, type) {
   }
 
   document.getElementById('ppContent').textContent = 'Loading\u2026';
-  fetch(cfg.api)
+  // Forward the AP MAC so the backend can serve this venue's document override.
+  var docUrl = apMac() ? cfg.api + '?apmac=' + encodeURIComponent(apMac()) : cfg.api;
+  fetch(docUrl)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       var text = d.content || (cfg.label + ' not available.');
