@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConsentRecord, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
+import { CreateUserRequestBody, CaptivePortalUserDocument, CaptivePortalMarketingDocument, CaptivePortalSessionDocument, ConnectedPageField, ConsentRecord, WifiEvent, UnifiAuthorizeRequestBody, UnifiConfig } from '../types/captive';
 import { scheduleSms, toE164 } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } from '../services/whatsapp';
@@ -542,6 +542,15 @@ router.get('/terms', async (_req, res) => {
   }
 });
 
+const CONNECTED_PAGE_DEFAULTS = {
+  title: "You're Connected!",
+  subtitle: 'You now have internet access.',
+  buttonText: 'Open heidifi.ai',
+  buttonUrl: 'https://heidifi.ai/',
+  showButton: true,
+  customFields: [] as ConnectedPageField[],
+};
+
 const SPLASH_DEFAULTS = {
   templateId: 'classic',
   title: 'Connect to WiFi',
@@ -556,6 +565,7 @@ const SPLASH_DEFAULTS = {
   showPrivacyPolicy: true,
   showTermsOfService: true,
   redirectUrl: '',
+  connectedPage: CONNECTED_PAGE_DEFAULTS,
 };
 
 router.get('/splash-config', async (req: Request, res: Response) => {
@@ -578,7 +588,16 @@ router.get('/splash-config', async (req: Request, res: Response) => {
     const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
     if (!configDoc.exists) return res.json({ success: true, config: SPLASH_DEFAULTS });
 
-    const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...configDoc.data() };
+    const docData = configDoc.data() || {};
+    const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...docData };
+    // The top-level spread is shallow — a partial connectedPage doc would clobber
+    // the nested defaults, so merge that object explicitly.
+    const docConnected = (docData.connectedPage && typeof docData.connectedPage === 'object' && !Array.isArray(docData.connectedPage))
+      ? docData.connectedPage
+      : {};
+    const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
+    if (!Array.isArray(connectedPage.customFields)) connectedPage.customFields = [];
+    config.connectedPage = connectedPage;
     // strip Firestore-internal fields
     delete config.createdAt;
     delete config.updatedAt;
@@ -587,6 +606,113 @@ router.get('/splash-config', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[SPLASH CONFIG ERROR]', err);
     res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
+  }
+});
+
+// ── Connected-page custom form submissions ─────────────────────────────────
+// Guests are anonymous here (no auth token), so abuse is bounded by a small
+// in-memory sliding window keyed on client MAC + IP.
+const connectedFormHits = new Map<string, number[]>();
+const CONNECTED_FORM_WINDOW_MS = 60_000;
+const CONNECTED_FORM_MAX_PER_WINDOW = 5;
+const FIELD_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+function connectedFormRateLimited(key: string): boolean {
+  const now = Date.now();
+  if (connectedFormHits.size > 1000) {
+    for (const [k, times] of connectedFormHits) {
+      if (times.every((t) => now - t >= CONNECTED_FORM_WINDOW_MS)) connectedFormHits.delete(k);
+    }
+  }
+  const hits = (connectedFormHits.get(key) || []).filter((t) => now - t < CONNECTED_FORM_WINDOW_MS);
+  if (hits.length >= CONNECTED_FORM_MAX_PER_WINDOW) {
+    connectedFormHits.set(key, hits);
+    return true;
+  }
+  hits.push(now);
+  connectedFormHits.set(key, hits);
+  return false;
+}
+
+// POST /connected-form — store custom-field answers from the connected page onto
+// the guest's CaptivePortal_Users doc (matched by client MAC). Every soft failure
+// (unknown AP, guest not found, no valid fields) returns 200 { stored: false } —
+// the guest already has internet; their UX must never error here.
+router.post('/connected-form', async (req: Request, res: Response) => {
+  const { apmac: rawApmac, mac: rawMac, responses } = (req.body || {}) as {
+    apmac?: string; mac?: string; responses?: Record<string, unknown>;
+  };
+  const apmac = String(rawApmac || '').toLowerCase().trim();
+  const mac = String(rawMac || '').toLowerCase().trim();
+
+  if (connectedFormRateLimited(`${mac || 'nomac'}|${req.ip || ''}`)) {
+    return res.status(429).json({ success: false, message: 'Too many submissions' });
+  }
+
+  if (!apmac || !mac || !responses || typeof responses !== 'object' || Array.isArray(responses)) {
+    return res.json({ success: true, stored: false });
+  }
+  const entries = Object.entries(responses);
+  if (entries.length === 0 || entries.length > 20) {
+    return res.json({ success: true, stored: false });
+  }
+
+  try {
+    const apSnap = await db.collection('CaptivePortal_AccessPoints')
+      .where('mac', '==', apmac)
+      .limit(1)
+      .get();
+    if (apSnap.empty) {
+      console.warn('[CONNECTED FORM] Unknown AP:', apmac);
+      return res.json({ success: true, stored: false });
+    }
+    const venueId = apSnap.docs[0].data().venueId;
+    if (!venueId) return res.json({ success: true, stored: false });
+
+    const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(`venue_${venueId}`).get();
+    const configuredFields: ConnectedPageField[] = Array.isArray(configDoc.data()?.connectedPage?.customFields)
+      ? configDoc.data()!.connectedPage.customFields
+      : [];
+    const fieldById = new Map(
+      configuredFields
+        .filter((f) => f && f.enabled !== false && typeof f.id === 'string' && FIELD_ID_PATTERN.test(f.id))
+        .map((f) => [f.id, f]),
+    );
+
+    const submittedAt = new Date().toISOString();
+    const updates: Record<string, unknown> = {};
+    for (const [id, raw] of entries) {
+      const field = fieldById.get(id);
+      if (!field) continue; // unknown, disabled, or since-deleted field — drop silently
+      const value = field.type === 'checkbox' ? Boolean(raw) : String(raw ?? '').slice(0, 500);
+      updates[`connectedFormResponses.${id}`] = {
+        value,
+        label: String(field.label || '').slice(0, 80),
+        submittedAt,
+      };
+    }
+    const storedCount = Object.keys(updates).length;
+    if (storedCount === 0) {
+      return res.json({ success: true, stored: false });
+    }
+
+    // Newest guest doc for this client MAC. No composite mac+createdAt index
+    // exists — result sets per MAC are tiny, so sort in memory by the ISO timestamp.
+    const userSnap = await db.collection('CaptivePortal_Users').where('mac', '==', mac).get();
+    if (userSnap.empty) {
+      console.warn('[CONNECTED FORM] No guest found for mac:', mac);
+      return res.json({ success: true, stored: false });
+    }
+    const newest = userSnap.docs.reduce((a, b) =>
+      String(a.data().timestamp || '') >= String(b.data().timestamp || '') ? a : b);
+
+    updates.connectedFormUpdatedAt = FieldValue.serverTimestamp();
+    await newest.ref.update(updates);
+    console.log('[CONNECTED FORM] Stored %d responses for guest %s', storedCount, newest.id);
+    return res.json({ success: true, stored: true });
+  } catch (err) {
+    console.error('[CONNECTED FORM ERROR]', err);
+    return res.json({ success: true, stored: false });
   }
 });
 

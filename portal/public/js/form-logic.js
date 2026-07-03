@@ -57,7 +57,10 @@ var CONSENT_TEXT =
 // ── 5. Step 2 → Submit ────────────────────────────────────────────────────
 async function submitConsent(marketing) {
   if (window.PREVIEW_MODE) {
-    window.location.href = '/success?preview=1';
+    var previewQs = new URLSearchParams({ preview: '1' });
+    if (apMac()) previewQs.set('apmac', apMac());
+    if (param('templateId')) previewQs.set('templateId', param('templateId'));
+    window.location.href = '/success?' + previewQs.toString();
     return;
   }
 
@@ -130,7 +133,9 @@ async function submitConsent(marketing) {
         throw new Error(authData.message || 'Could not authorize WiFi access');
       }
       var dest = param('url');
-      window.location.href = (dest && /^https?:\/\//i.test(dest)) ? dest : '/success';
+      var successUrl = '/success?apmac=' + encodeURIComponent(apMac())
+        + '&mac=' + encodeURIComponent(clientMac());
+      window.location.href = (dest && /^https?:\/\//i.test(dest)) ? dest : successUrl;
       return;
     }
 

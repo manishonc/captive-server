@@ -1,4 +1,13 @@
 // ── 0. Portal branding config (injected server-side; fallback for direct loads) ──
+var CONNECTED_DEFAULTS = {
+  title: "You're Connected!",
+  subtitle: 'You now have internet access.',
+  buttonText: 'Open heidifi.ai',
+  buttonUrl: 'https://heidifi.ai/',
+  showButton: true,
+  customFields: [],
+};
+
 var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFIG : {
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
@@ -11,6 +20,7 @@ var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFI
   showMarketingOptIn: true,
   showPrivacyPolicy: true,
   showTermsOfService: true,
+  connectedPage: CONNECTED_DEFAULTS,
 };
 
 // Apply branding to the DOM. Safe to call repeatedly (used for live CMS preview).
@@ -32,11 +42,15 @@ function applyPortalConfig(cfg) {
     document.querySelectorAll('.logo-wrap img').forEach(function(el) { el.src = cfg.logoUrl; });
   }
 
-  // Text
-  var headingEl = document.querySelector('.section-heading');
-  if (headingEl) headingEl.textContent = cfg.title;
-  var subEl = document.querySelector('.section-sub');
-  if (subEl) subEl.textContent = cfg.subtitle;
+  // Text — skipped on the connected view: the injected card is inserted before
+  // #step1, so it owns the first .section-heading/.section-sub and manages its
+  // own copy (login text here would overwrite the connected heading).
+  if (cfg.view !== 'connected') {
+    var headingEl = document.querySelector('.section-heading');
+    if (headingEl) headingEl.textContent = cfg.title;
+    var subEl = document.querySelector('.section-sub');
+    if (subEl) subEl.textContent = cfg.subtitle;
+  }
 
   // Conditional fields
   if (!cfg.collectName) {
@@ -66,6 +80,256 @@ function applyPortalConfig(cfg) {
 // Apply immediately (synchronous, no flash)
 applyPortalConfig(CONFIG);
 
+// Connected view (GET /success): same template file, but the login form is
+// swapped for a success card built from the template's own building blocks.
+if (CONFIG.view === 'connected') renderConnectedView(CONFIG);
+
+// ── Connected view renderer ────────────────────────────────────────────────
+// Clones #step1 and rebuilds it as the "You're connected" card using only the
+// class vocabulary every template shares (.step, .section-heading, .section-sub,
+// .field-group, .field-label, .btn-primary, .error-msg) so each template's own
+// CSS styles it natively — no per-template markup needed.
+
+function _connParam(k) {
+  return new URLSearchParams(window.location.search).get(k) || '';
+}
+
+function normalizeConnectedPage(cp) {
+  cp = cp || {};
+  return {
+    title: cp.title || CONNECTED_DEFAULTS.title,
+    subtitle: (cp.subtitle === undefined || cp.subtitle === null) ? CONNECTED_DEFAULTS.subtitle : cp.subtitle,
+    buttonText: cp.buttonText || CONNECTED_DEFAULTS.buttonText,
+    // https-only, mirroring server-side validation — anything else falls back
+    buttonUrl: (typeof cp.buttonUrl === 'string' && /^https:\/\//i.test(cp.buttonUrl))
+      ? cp.buttonUrl : CONNECTED_DEFAULTS.buttonUrl,
+    showButton: cp.showButton !== false,
+    customFields: (Array.isArray(cp.customFields) ? cp.customFields : []).filter(function (f) {
+      return f && f.enabled !== false && f.id && f.label &&
+        (f.type === 'checkbox' || f.type === 'text');
+    }),
+  };
+}
+
+function renderConnectedView(cfg) {
+  var step1 = document.getElementById('step1');
+  if (!step1) return;
+  var page = normalizeConnectedPage(cfg.connectedPage);
+
+  // Live preview rebuilds the card on every config push
+  var previous = document.getElementById('stepConnected');
+  if (previous) previous.parentNode.removeChild(previous);
+
+  var card = step1.cloneNode(true);
+
+  // Cloning duplicates every id — strip them all so form-logic.js keeps
+  // targeting the (hidden) originals.
+  var withIds = card.querySelectorAll('[id]');
+  for (var i = 0; i < withIds.length; i++) withIds[i].removeAttribute('id');
+
+  // Drop login-only chrome; remember the template's field-group styling first.
+  var groups = card.querySelectorAll('.field-group');
+  var fieldGroupClass = groups.length ? groups[0].className : 'field-group';
+  ['.field-group', '.country-dropdown', '.error-msg', '.btn-text'].forEach(function (sel) {
+    var nodes = card.querySelectorAll(sel);
+    for (var j = 0; j < nodes.length; j++) nodes[j].parentNode.removeChild(nodes[j]);
+  });
+
+  var heading = card.querySelector('.section-heading');
+  if (heading) heading.textContent = page.title;
+  var sub = card.querySelector('.section-sub');
+  if (sub) sub.textContent = page.subtitle;
+
+  // The login "Continue" button becomes the destination link (an anchor:
+  // target=_blank is what pops the macOS CNA into the real browser).
+  var loginBtn = card.querySelector('.btn-primary');
+  var destBtn = null;
+  if (loginBtn) {
+    if (page.showButton) {
+      destBtn = document.createElement('a');
+      destBtn.className = loginBtn.className;
+      destBtn.id = 'connectedBtn';
+      destBtn.href = page.buttonUrl;
+      destBtn.target = '_blank';
+      destBtn.rel = 'noopener';
+      destBtn.style.display = 'block';
+      destBtn.style.textAlign = 'center';
+      destBtn.style.textDecoration = 'none';
+      destBtn.style.boxSizing = 'border-box';
+      destBtn.textContent = page.buttonText;
+      loginBtn.parentNode.replaceChild(destBtn, loginBtn);
+    } else {
+      loginBtn.parentNode.removeChild(loginBtn);
+    }
+  }
+
+  if (page.customFields.length) {
+    var wrap = document.createElement('div');
+    wrap.id = 'connectedFields';
+    wrap.style.marginTop = '18px';
+    wrap.style.textAlign = 'left';
+
+    page.customFields.forEach(function (field) {
+      var group = document.createElement('div');
+      group.className = fieldGroupClass;
+      var labelText = field.label + (field.required ? ' *' : '');
+
+      if (field.type === 'checkbox') {
+        var checkLabel = document.createElement('label');
+        checkLabel.style.display = 'flex';
+        checkLabel.style.alignItems = 'center';
+        checkLabel.style.gap = '10px';
+        checkLabel.style.cursor = 'pointer';
+        var box = document.createElement('input');
+        box.type = 'checkbox';
+        box.setAttribute('data-field-id', field.id);
+        box.setAttribute('data-field-type', 'checkbox');
+        box.setAttribute('data-label', field.label);
+        if (field.required) box.setAttribute('data-required', '1');
+        box.style.width = '18px';
+        box.style.height = '18px';
+        box.style.flexShrink = '0';
+        box.style.accentColor = 'var(--primary)';
+        var span = document.createElement('span');
+        span.textContent = labelText;
+        checkLabel.appendChild(box);
+        checkLabel.appendChild(span);
+        group.appendChild(checkLabel);
+      } else {
+        var fieldLabel = document.createElement('label');
+        fieldLabel.className = 'field-label';
+        fieldLabel.textContent = labelText;
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.maxLength = 500;
+        if (field.placeholder) input.placeholder = field.placeholder;
+        input.setAttribute('data-field-id', field.id);
+        input.setAttribute('data-field-type', 'text');
+        input.setAttribute('data-label', field.label);
+        if (field.required) input.setAttribute('data-required', '1');
+        group.appendChild(fieldLabel);
+        group.appendChild(input);
+      }
+      wrap.appendChild(group);
+    });
+
+    var submitBtn = document.createElement('button');
+    submitBtn.className = 'btn-primary';
+    submitBtn.id = 'connectedSubmit';
+    submitBtn.type = 'button';
+    submitBtn.textContent = 'Submit';
+    submitBtn.addEventListener('click', submitConnectedForm);
+    wrap.appendChild(submitBtn);
+
+    card.appendChild(wrap);
+
+    var thanks = document.createElement('p');
+    thanks.className = 'section-sub';
+    thanks.id = 'connectedThanks';
+    thanks.style.display = 'none';
+    thanks.style.marginTop = '18px';
+    thanks.textContent = 'Thanks! Your response has been saved.';
+    card.appendChild(thanks);
+
+    var errEl = document.createElement('p');
+    errEl.className = 'error-msg';
+    errEl.id = 'connectedError';
+    errEl.style.display = 'none';
+    card.appendChild(errEl);
+  }
+
+  card.id = 'stepConnected';
+  step1.parentNode.insertBefore(card, step1);
+  step1.classList.add('hidden');
+  var step2 = document.getElementById('step2');
+  if (step2) step2.classList.add('hidden');
+
+  // iOS CNA never opens links on its own — auto-fire the destination like the
+  // old static page did, but only when there is nothing to fill in first.
+  var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent || '');
+  if (isIOS && destBtn) {
+    destBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      var w = window.open(page.buttonUrl, '_blank');
+      if (!w) window.location.href = page.buttonUrl;
+    });
+    if (!window.PREVIEW_MODE && !page.customFields.length) {
+      window.addEventListener('load', function () {
+        setTimeout(function () {
+          var w = window.open(page.buttonUrl, '_blank');
+          if (!w) { window.location.href = page.buttonUrl; }
+          // Poke Apple's detect URL to trigger CNA dismissal
+          setTimeout(function () {
+            window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+          }, 600);
+        }, 500);
+      });
+    }
+  }
+}
+
+function submitConnectedForm() {
+  var wrap = document.getElementById('connectedFields');
+  var errEl = document.getElementById('connectedError');
+  var thanks = document.getElementById('connectedThanks');
+  if (!wrap) return;
+
+  var responses = {};
+  var missing = null;
+  var inputs = wrap.querySelectorAll('[data-field-id]');
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var id = input.getAttribute('data-field-id');
+    var required = input.getAttribute('data-required') === '1';
+    if (input.getAttribute('data-field-type') === 'checkbox') {
+      if (required && !input.checked && !missing) missing = input.getAttribute('data-label');
+      responses[id] = input.checked;
+    } else {
+      var value = (input.value || '').trim();
+      if (required && !value && !missing) missing = input.getAttribute('data-label');
+      responses[id] = value;
+    }
+  }
+
+  if (missing) {
+    if (errEl) {
+      errEl.textContent = 'Please fill in: ' + missing;
+      errEl.style.display = 'block';
+    }
+    return;
+  }
+  if (errEl) errEl.style.display = 'none';
+
+  if (window.PREVIEW_MODE) {
+    wrap.style.display = 'none';
+    if (thanks) thanks.style.display = 'block';
+    return;
+  }
+
+  var btn = document.getElementById('connectedSubmit');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  fetch('/api/connected-form', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      apmac: _connParam('apmac') || _connParam('ap'),
+      mac: _connParam('mac') || _connParam('id'),
+      responses: responses,
+    }),
+  }).then(function (r) {
+    if (!r.ok) throw new Error('bad status');
+    wrap.style.display = 'none';
+    if (thanks) thanks.style.display = 'block';
+  }).catch(function () {
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit'; }
+    if (errEl) {
+      errEl.textContent = 'Could not save your response. Please try again.';
+      errEl.style.display = 'block';
+    }
+  });
+}
+
 // ── Live preview: accept config pushed from the CMS editor (preview mode only) ──
 // Gated on PREVIEW_MODE so live guest sessions never accept external messages.
 // The payload is display-only (title/subtitle/colors) on a page already flagged
@@ -84,10 +348,11 @@ if (window.PREVIEW_MODE) {
     var d = e.data;
     if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
     // Only fields applyable without a reload; templateId is handled via iframe reload.
-    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo'].forEach(function (k) {
+    ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo', 'connectedPage'].forEach(function (k) {
       if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
     });
     applyPortalConfig(CONFIG);
+    if (CONFIG.view === 'connected') renderConnectedView(CONFIG);
     console.log('[heidifi preview] applied live config from', e.origin);
   });
   console.log('[heidifi preview] live preview listener attached');

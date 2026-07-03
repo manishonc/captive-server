@@ -9,7 +9,9 @@ const SERVER_PORT = parseInt(process.env.SERVER_PORT || '4000', 10);
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+// redirect:false — /success is a real route now; without it the static layer
+// 301s the bare /success (a directory in public/) before the route can run.
+app.use(express.static(path.join(__dirname, 'public'), { index: false, redirect: false }));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 const TEMPLATES_DIR = path.join(__dirname, 'public', 'templates');
@@ -171,9 +173,44 @@ app.post('/api/create-user', (req, res) => {
   proxyReq.end();
 });
 
+// POST /api/connected-form — proxy to server to store connected-page form answers
+app.post('/api/connected-form', (req, res) => {
+  const useHttps = SERVER_PORT === 443;
+  const http = require(useHttps ? 'https' : 'http');
+  const payload = JSON.stringify(req.body);
+  const proxyReq = http.request({
+    hostname: process.env.SERVER_HOST || 'server',
+    port: SERVER_PORT,
+    path: '/connected-form',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+  }, (proxyRes) => {
+    let data = '';
+    proxyRes.on('data', (chunk) => { data += chunk; });
+    proxyRes.on('end', () => {
+      res.status(proxyRes.statusCode).set('Content-Type', 'application/json').send(data);
+    });
+  });
+  proxyReq.on('error', (err) => {
+    console.error('[CONNECTED FORM PROXY ERROR]', err.message);
+    res.status(502).json({ success: false, message: 'Could not reach server' });
+  });
+  proxyReq.write(payload);
+  proxyReq.end();
+});
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // POST /submit — log guest data, return auto-submit form to Aruba cloud auth
-app.post('/submit', (req, res) => {
-  const { firstName, lastName, email, mac, ip, url, post } = req.body;
+app.post('/submit', async (req, res) => {
+  const { firstName, lastName, email, mac, ip, url, post, apmac } = req.body;
   const ua = req.headers['user-agent'] || '';
   const isAndroid = /Android/i.test(ua);
 
@@ -188,9 +225,30 @@ app.post('/submit', (req, res) => {
     timestamp: new Date().toISOString()
   }));
 
+  // Configured connected-page destination; hardcoded defaults kept when the
+  // backend is unreachable — auth must never block on config.
+  let buttonUrl = 'https://heidifi.ai/';
+  let primaryColor = '#667eea';
+  try {
+    const result = await fetchSplashConfig(apmac);
+    const config = (result && result.config) || {};
+    const cp = config.connectedPage || {};
+    if (typeof cp.buttonUrl === 'string' && /^https:\/\//i.test(cp.buttonUrl)) {
+      buttonUrl = cp.buttonUrl;
+    }
+    if (/^#[0-9a-fA-F]{6}$/.test(config.primaryColor || '')) {
+      primaryColor = config.primaryColor;
+    }
+  } catch (err) {
+    console.error('[SUBMIT CONFIG ERROR]', err);
+  }
+  let buttonHost = 'heidifi.ai';
+  try { buttonHost = new URL(buttonUrl).hostname; } catch { /* keep default */ }
+
   const switchUrl = `https://${post}/swarm.cgi`;
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
-  const redirectUrl = `http://${portalDomain}/success`;
+  const redirectUrl = `http://${portalDomain}/success`
+    + `?apmac=${encodeURIComponent(apmac || '')}&mac=${encodeURIComponent(mac || '')}`;
 
   if (isAndroid) {
     // Android closes the CNA the instant it detects internet (right when swarm.cgi
@@ -211,9 +269,9 @@ app.post('/submit', (req, res) => {
     h1{font-size:22px;color:#333;margin-bottom:8px}
     .sub{font-size:14px;color:#888;margin-bottom:20px;line-height:1.5}
     .url-box{background:#f0f4ff;border-radius:10px;padding:14px;margin-bottom:20px}
-    .url-box span{font-size:20px;font-weight:700;color:#667eea;letter-spacing:.5px}
+    .url-box span{font-size:20px;font-weight:700;color:${primaryColor};letter-spacing:.5px}
     .hint{font-size:12px;color:#aaa;margin-bottom:20px}
-    button{width:100%;padding:14px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer}
+    button{width:100%;padding:14px;background:${primaryColor};color:#fff;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer}
     button:disabled{opacity:.6;cursor:not-allowed}
   </style>
 </head>
@@ -224,16 +282,16 @@ app.post('/submit', (req, res) => {
     </div>
     <h1>You're Connected!</h1>
     <p class="sub">You now have WiFi access.<br>Open your browser and visit:</p>
-    <div class="url-box"><span>heidifi.ai</span></div>
+    <div class="url-box"><span>${escapeHtml(buttonHost)}</span></div>
     <p class="hint" id="hint">Activating connection in <strong id="n">5</strong>s&hellip;</p>
     <button id="btn" onclick="connect()">Connect Now</button>
   </div>
 
-  <form id="f" method="POST" action="${switchUrl}" style="display:none">
+  <form id="f" method="POST" action="${escapeHtml(switchUrl)}" style="display:none">
     <input type="hidden" name="cmd" value="authenticate">
-    <input type="hidden" name="user" value="${email}">
+    <input type="hidden" name="user" value="${escapeHtml(email)}">
     <input type="hidden" name="password" value="guest">
-    <input type="hidden" name="url" value="https://heidifi.ai/">
+    <input type="hidden" name="url" value="${escapeHtml(buttonUrl)}">
   </form>
 
   <script>
@@ -260,11 +318,11 @@ app.post('/submit', (req, res) => {
 <head><title>Connecting...</title></head>
 <body>
   <p style="text-align:center;margin-top:40vh;font-family:sans-serif;color:#555;">Connecting you to the internet...</p>
-  <form id="loginForm" method="POST" action="${switchUrl}">
+  <form id="loginForm" method="POST" action="${escapeHtml(switchUrl)}">
     <input type="hidden" name="cmd" value="authenticate" />
-    <input type="hidden" name="user" value="${email}" />
+    <input type="hidden" name="user" value="${escapeHtml(email)}" />
     <input type="hidden" name="password" value="guest" />
-    <input type="hidden" name="url" value="${redirectUrl}" />
+    <input type="hidden" name="url" value="${escapeHtml(redirectUrl)}" />
   </form>
   <script>document.getElementById('loginForm').submit();</script>
 </body>
@@ -272,9 +330,36 @@ app.post('/submit', (req, res) => {
   }
 });
 
-// GET /success — shown after authentication, lets user open real browser
-app.get('/success', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'success', 'index.html'));
+// GET /success — shown after authentication, lets user open real browser.
+// Renders the venue's splash template with view:'connected' so the page matches
+// the selected design (config.js builds the connected card). Falls back to the
+// legacy static page whenever the backend or rendering is unavailable.
+const STATIC_SUCCESS_HTML = path.join(__dirname, 'public', 'success', 'index.html');
+app.get('/success', async (req, res) => {
+  const { apmac, ap, preview, templateId: templateIdOverride } = req.query;
+  const resolvedApmac = apmac || ap;
+  try {
+    const result = await fetchSplashConfig(resolvedApmac);
+    if (!result || result.registered === false) {
+      return res.sendFile(STATIC_SUCCESS_HTML);
+    }
+    // view:'connected' rides inside the config JSON so no template needs editing.
+    const config = { ...(result.config || {}), view: 'connected' };
+    const rawId = (preview === '1' && templateIdOverride && VALID_TEMPLATES.includes(templateIdOverride))
+      ? templateIdOverride
+      : (config.templateId || DEFAULT_TEMPLATE);
+    const templateId = VALID_TEMPLATES.includes(rawId) ? rawId : DEFAULT_TEMPLATE;
+    const templatePath = path.join(TEMPLATES_DIR, `${templateId}.html`);
+    const html = await ejs.renderFile(templatePath, {
+      portalConfig: config,
+      portalConfigJson: JSON.stringify(config),
+      previewMode: preview === '1',
+    });
+    res.send(html);
+  } catch (err) {
+    console.error('[SUCCESS RENDER ERROR]', err);
+    res.sendFile(STATIC_SUCCESS_HTML);
+  }
 });
 
 // Health check
