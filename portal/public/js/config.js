@@ -2,9 +2,13 @@
 var CONNECTED_DEFAULTS = {
   title: "You're Connected!",
   subtitle: 'You now have internet access.',
+  showTitle: true,
+  showSubtitle: true,
+  showLogo: true,
   buttonText: 'Open heidifi.ai',
   buttonUrl: 'https://heidifi.ai/',
   showButton: true,
+  autoSubmit: false,
   customFields: [],
 };
 
@@ -42,15 +46,14 @@ function applyPortalConfig(cfg) {
     document.querySelectorAll('.logo-wrap img').forEach(function(el) { el.src = cfg.logoUrl; });
   }
 
-  // Text — skipped on the connected view: the injected card is inserted before
-  // #step1, so it owns the first .section-heading/.section-sub and manages its
-  // own copy (login text here would overwrite the connected heading).
-  if (cfg.view !== 'connected') {
-    var headingEl = document.querySelector('.section-heading');
-    if (headingEl) headingEl.textContent = cfg.title;
-    var subEl = document.querySelector('.section-sub');
-    if (subEl) subEl.textContent = cfg.subtitle;
-  }
+  // Text — template-level headings only. The connected card (#stepConnected)
+  // owns its own heading/subtitle; without this scoping the splash title would
+  // overwrite the connected card's copy on templates where the card's heading
+  // is the first .section-heading in the document.
+  var headingEl = document.querySelector('.section-heading');
+  if (headingEl && !headingEl.closest('#stepConnected')) headingEl.textContent = cfg.title;
+  var subEl = document.querySelector('.section-sub');
+  if (subEl && !subEl.closest('#stepConnected')) subEl.textContent = cfg.subtitle;
 
   // Conditional fields
   if (!cfg.collectName) {
@@ -99,17 +102,23 @@ function normalizeConnectedPage(cp) {
   return {
     title: cp.title || CONNECTED_DEFAULTS.title,
     subtitle: (cp.subtitle === undefined || cp.subtitle === null) ? CONNECTED_DEFAULTS.subtitle : cp.subtitle,
+    showTitle: cp.showTitle !== false,
+    showSubtitle: cp.showSubtitle !== false,
+    showLogo: cp.showLogo !== false,
     buttonText: cp.buttonText || CONNECTED_DEFAULTS.buttonText,
     // https-only, mirroring server-side validation — anything else falls back
     buttonUrl: (typeof cp.buttonUrl === 'string' && /^https:\/\//i.test(cp.buttonUrl))
       ? cp.buttonUrl : CONNECTED_DEFAULTS.buttonUrl,
     showButton: cp.showButton !== false,
+    autoSubmit: cp.autoSubmit === true,
     customFields: (Array.isArray(cp.customFields) ? cp.customFields : []).filter(function (f) {
       return f && f.enabled !== false && f.id && f.label &&
         (f.type === 'checkbox' || f.type === 'text');
     }),
   };
 }
+
+var _connAutoSaveTimer = null;
 
 function renderConnectedView(cfg) {
   var step1 = document.getElementById('step1');
@@ -120,47 +129,49 @@ function renderConnectedView(cfg) {
   var previous = document.getElementById('stepConnected');
   if (previous) previous.parentNode.removeChild(previous);
 
-  var card = step1.cloneNode(true);
+  // Build the card fresh from the shared class vocabulary. Cloning #step1 and
+  // stripping it proved fragile: templates differ in whether the heading lives
+  // inside the step, and a rebuild would clone the now-hidden step1 (inheriting
+  // .hidden). A deterministic build renders identically on every template.
+  var card = document.createElement('div');
+  card.id = 'stepConnected';
+  card.className = (step1.className.replace(/\bhidden\b/g, ' ').replace(/\s+/g, ' ').trim()) || 'step';
 
-  // Cloning duplicates every id — strip them all so form-logic.js keeps
-  // targeting the (hidden) originals.
-  var withIds = card.querySelectorAll('[id]');
-  for (var i = 0; i < withIds.length; i++) withIds[i].removeAttribute('id');
+  var sampleGroup = document.querySelector('.field-group');
+  var fieldGroupClass = sampleGroup ? sampleGroup.className : 'field-group';
+  var sampleBtn = document.getElementById('btnNext') || document.querySelector('.btn-primary');
+  var btnClass = sampleBtn ? sampleBtn.className : 'btn-primary';
 
-  // Drop login-only chrome; remember the template's field-group styling first.
-  var groups = card.querySelectorAll('.field-group');
-  var fieldGroupClass = groups.length ? groups[0].className : 'field-group';
-  ['.field-group', '.country-dropdown', '.error-msg', '.btn-text'].forEach(function (sel) {
-    var nodes = card.querySelectorAll(sel);
-    for (var j = 0; j < nodes.length; j++) nodes[j].parentNode.removeChild(nodes[j]);
-  });
+  if (page.showTitle) {
+    var heading = document.createElement('h1');
+    heading.className = 'section-heading';
+    heading.textContent = page.title;
+    card.appendChild(heading);
+  }
+  if (page.showSubtitle && page.subtitle) {
+    var sub = document.createElement('p');
+    sub.className = 'section-sub';
+    sub.textContent = page.subtitle;
+    card.appendChild(sub);
+  }
 
-  var heading = card.querySelector('.section-heading');
-  if (heading) heading.textContent = page.title;
-  var sub = card.querySelector('.section-sub');
-  if (sub) sub.textContent = page.subtitle;
-
-  // The login "Continue" button becomes the destination link (an anchor:
-  // target=_blank is what pops the macOS CNA into the real browser).
-  var loginBtn = card.querySelector('.btn-primary');
+  // Destination link: an anchor with target=_blank is what pops the macOS CNA
+  // into the real browser.
   var destBtn = null;
-  if (loginBtn) {
-    if (page.showButton) {
-      destBtn = document.createElement('a');
-      destBtn.className = loginBtn.className;
-      destBtn.id = 'connectedBtn';
-      destBtn.href = page.buttonUrl;
-      destBtn.target = '_blank';
-      destBtn.rel = 'noopener';
-      destBtn.style.display = 'block';
-      destBtn.style.textAlign = 'center';
-      destBtn.style.textDecoration = 'none';
-      destBtn.style.boxSizing = 'border-box';
-      destBtn.textContent = page.buttonText;
-      loginBtn.parentNode.replaceChild(destBtn, loginBtn);
-    } else {
-      loginBtn.parentNode.removeChild(loginBtn);
-    }
+  if (page.showButton) {
+    destBtn = document.createElement('a');
+    destBtn.className = btnClass;
+    destBtn.id = 'connectedBtn';
+    destBtn.href = page.buttonUrl;
+    destBtn.target = '_blank';
+    destBtn.rel = 'noopener';
+    destBtn.style.display = 'block';
+    destBtn.style.textAlign = 'center';
+    destBtn.style.textDecoration = 'none';
+    destBtn.style.boxSizing = 'border-box';
+    destBtn.style.marginTop = '16px';
+    destBtn.textContent = page.buttonText;
+    card.appendChild(destBtn);
   }
 
   if (page.customFields.length) {
@@ -169,10 +180,19 @@ function renderConnectedView(cfg) {
     wrap.style.marginTop = '18px';
     wrap.style.textAlign = 'left';
 
+    var autoSave = function () {
+      clearTimeout(_connAutoSaveTimer);
+      submitConnectedForm(true);
+    };
+    var autoSaveDebounced = function () {
+      clearTimeout(_connAutoSaveTimer);
+      _connAutoSaveTimer = setTimeout(function () { submitConnectedForm(true); }, 900);
+    };
+
     page.customFields.forEach(function (field) {
       var group = document.createElement('div');
       group.className = fieldGroupClass;
-      var labelText = field.label + (field.required ? ' *' : '');
+      var labelText = field.label + (field.required && !page.autoSubmit ? ' *' : '');
 
       if (field.type === 'checkbox') {
         var checkLabel = document.createElement('label');
@@ -190,6 +210,7 @@ function renderConnectedView(cfg) {
         box.style.height = '18px';
         box.style.flexShrink = '0';
         box.style.accentColor = 'var(--primary)';
+        if (page.autoSubmit) box.addEventListener('change', autoSave);
         var span = document.createElement('span');
         span.textContent = labelText;
         checkLabel.appendChild(box);
@@ -207,19 +228,26 @@ function renderConnectedView(cfg) {
         input.setAttribute('data-field-type', 'text');
         input.setAttribute('data-label', field.label);
         if (field.required) input.setAttribute('data-required', '1');
+        if (page.autoSubmit) {
+          input.addEventListener('input', autoSaveDebounced);
+          input.addEventListener('blur', autoSave);
+        }
         group.appendChild(fieldLabel);
         group.appendChild(input);
       }
       wrap.appendChild(group);
     });
 
-    var submitBtn = document.createElement('button');
-    submitBtn.className = 'btn-primary';
-    submitBtn.id = 'connectedSubmit';
-    submitBtn.type = 'button';
-    submitBtn.textContent = 'Submit';
-    submitBtn.addEventListener('click', submitConnectedForm);
-    wrap.appendChild(submitBtn);
+    // Auto-save mode stores on every interaction — no Submit button needed.
+    if (!page.autoSubmit) {
+      var submitBtn = document.createElement('button');
+      submitBtn.className = btnClass;
+      submitBtn.id = 'connectedSubmit';
+      submitBtn.type = 'button';
+      submitBtn.textContent = 'Submit';
+      submitBtn.addEventListener('click', function () { submitConnectedForm(false); });
+      wrap.appendChild(submitBtn);
+    }
 
     card.appendChild(wrap);
 
@@ -238,11 +266,17 @@ function renderConnectedView(cfg) {
     card.appendChild(errEl);
   }
 
-  card.id = 'stepConnected';
   step1.parentNode.insertBefore(card, step1);
   step1.classList.add('hidden');
   var step2 = document.getElementById('step2');
   if (step2) step2.classList.add('hidden');
+
+  // Connected-page logo toggle rides the same body classes the templates
+  // already style for the splash showLogo setting.
+  if (!page.showLogo) {
+    document.body.classList.remove('portal-has-logo');
+    document.body.classList.add('portal-no-logo');
+  }
 
   // iOS CNA never opens links on its own — auto-fire the destination like the
   // old static page did, but only when there is nothing to fill in first.
@@ -268,7 +302,11 @@ function renderConnectedView(cfg) {
   }
 }
 
-function submitConnectedForm() {
+var _connThanksTimer = null;
+
+// auto=true → fired by an input listener in auto-save mode: no required
+// validation, fields stay visible, and a short-lived "Saved" note is shown.
+function submitConnectedForm(auto) {
   var wrap = document.getElementById('connectedFields');
   var errEl = document.getElementById('connectedError');
   var thanks = document.getElementById('connectedThanks');
@@ -291,7 +329,7 @@ function submitConnectedForm() {
     }
   }
 
-  if (missing) {
+  if (!auto && missing) {
     if (errEl) {
       errEl.textContent = 'Please fill in: ' + missing;
       errEl.style.display = 'block';
@@ -300,14 +338,27 @@ function submitConnectedForm() {
   }
   if (errEl) errEl.style.display = 'none';
 
+  var showSaved = function () {
+    if (!thanks) return;
+    if (auto) {
+      thanks.textContent = 'Saved';
+      thanks.style.display = 'block';
+      clearTimeout(_connThanksTimer);
+      _connThanksTimer = setTimeout(function () { thanks.style.display = 'none'; }, 2000);
+    } else {
+      wrap.style.display = 'none';
+      thanks.textContent = 'Thanks! Your response has been saved.';
+      thanks.style.display = 'block';
+    }
+  };
+
   if (window.PREVIEW_MODE) {
-    wrap.style.display = 'none';
-    if (thanks) thanks.style.display = 'block';
+    showSaved();
     return;
   }
 
   var btn = document.getElementById('connectedSubmit');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  if (!auto && btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
 
   fetch('/api/connected-form', {
     method: 'POST',
@@ -319,9 +370,9 @@ function submitConnectedForm() {
     }),
   }).then(function (r) {
     if (!r.ok) throw new Error('bad status');
-    wrap.style.display = 'none';
-    if (thanks) thanks.style.display = 'block';
+    showSaved();
   }).catch(function () {
+    if (auto) return; // silent — next interaction retries
     if (btn) { btn.disabled = false; btn.textContent = 'Submit'; }
     if (errEl) {
       errEl.textContent = 'Could not save your response. Please try again.';

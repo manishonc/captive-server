@@ -545,9 +545,13 @@ router.get('/terms', async (_req, res) => {
 const CONNECTED_PAGE_DEFAULTS = {
   title: "You're Connected!",
   subtitle: 'You now have internet access.',
+  showTitle: true,
+  showSubtitle: true,
+  showLogo: true,
   buttonText: 'Open heidifi.ai',
   buttonUrl: 'https://heidifi.ai/',
   showButton: true,
+  autoSubmit: false,
   customFields: [] as ConnectedPageField[],
 };
 
@@ -614,7 +618,9 @@ router.get('/splash-config', async (req: Request, res: Response) => {
 // in-memory sliding window keyed on client MAC + IP.
 const connectedFormHits = new Map<string, number[]>();
 const CONNECTED_FORM_WINDOW_MS = 60_000;
-const CONNECTED_FORM_MAX_PER_WINDOW = 5;
+// Auto-save mode posts on every checkbox toggle / text blur, so the window
+// allows a burst of legitimate interactions.
+const CONNECTED_FORM_MAX_PER_WINDOW = 10;
 const FIELD_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 function connectedFormRateLimited(key: string): boolean {
