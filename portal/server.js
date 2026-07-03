@@ -4,7 +4,7 @@ const path = require('path');
 const ejs = require('ejs');
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const SERVER_PORT = parseInt(process.env.SERVER_PORT || '4000', 10);
 
 app.use(bodyParser.urlencoded({ extended: true }));
