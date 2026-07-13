@@ -1,0 +1,74 @@
+{
+  "name": "heidifi-ap-adoption-helper",
+  "version": "1.0.0",
+  "description": "One-click UniFi access point adoption for HeidiFi venues",
+  "main": "dist/main/main.js",
+  "author": "HeidiFi",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && npm run copy:static",
+    "copy:static": "mkdir -p dist/renderer && cp src/renderer/index.html src/renderer/styles.css assets/heidifi-logo.png dist/renderer/",
+    "start": "npm run build && electron .",
+    "test": "node --import tsx --test test/*.test.ts",
+    "icons": "bash scripts/make-icons.sh",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "build": {
+    "appId": "ai.heidifi.ap-adoption-helper",
+    "productName": "HeidiFi AP Adoption Helper",
+    "artifactName": "HeidiFi-AP-Adoption-Helper-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "dist/**",
+      "config.json"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "afterPack": "scripts/adhoc-sign.js",
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "identity": null
+    },
+    "dmg": {
+      "sign": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "dependencies": {
+    "ssh2": "1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/ssh2": "^1.15.5",
+    "electron": "43.1.0",
+    "electron-builder": "^26.15.3",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  }
+}
