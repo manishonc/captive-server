@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HeidiFi AP Adoption Helper</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <img src="./heidifi-logo.png" alt="HeidiFi" class="header-logo" />
+      <span class="header-name" id="app-name">AP Adoption Helper</span>
+    </header>
+
+    <!-- Idle / instructions -->
+    <section id="panel-idle" class="panel">
+      <h1>Set up your WiFi access point</h1>
+      <p class="lead">
+        Plug your access point into power and network (PoE), make sure this
+        computer is on the same network, then click below.
+      </p>
+      <button id="btn-scan" class="btn btn-primary">Find my device</button>
+    </section>
+
+    <!-- Scanning -->
+    <section id="panel-scanning" class="panel hidden">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="lead center">Looking for your access point&hellip;</p>
+    </section>
+
+    <!-- Results -->
+    <section id="panel-results" class="panel hidden">
+      <h2 id="results-title">Select your access point</h2>
+      <div id="device-list" class="device-list"></div>
+      <button id="btn-adopt" class="btn btn-primary" disabled>Send adoption request</button>
+      <button id="btn-rescan" class="btn btn-ghost">Scan again</button>
+    </section>
+
+    <!-- Sending -->
+    <section id="panel-adopting" class="panel hidden">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="lead center">Sending the adoption request&hellip;</p>
+    </section>
+
+    <!-- Success -->
+    <section id="panel-success" class="panel hidden">
+      <div class="result-icon success" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <h2 class="center">Request sent!</h2>
+      <p class="lead center">
+        Your administrator will approve it shortly. You can close this app.
+      </p>
+      <p id="success-note" class="note center hidden"></p>
+      <button id="btn-again" class="btn btn-ghost">Set up another access point</button>
+    </section>
+
+    <!-- Error -->
+    <section id="panel-error" class="panel hidden">
+      <div class="result-icon error" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="7" x2="12" y2="13"></line>
+          <circle cx="12" cy="17.5" r="0.5" fill="currentColor" stroke="none"></circle>
+        </svg>
+      </div>
+      <h2 id="error-title" class="center">Something went wrong</h2>
+      <p id="error-message" class="lead center"></p>
+      <button id="btn-retry" class="btn btn-primary">Scan again</button>
+    </section>
+
+    <!-- Advanced -->
+    <details id="advanced" class="advanced">
+      <summary>Advanced</summary>
+      <div class="advanced-body">
+        <label class="field">
+          <span>Controller inform URL</span>
+          <input id="input-url" type="text" spellcheck="false"
+                 placeholder="http://34.116.224.72:8085/inform" />
+        </label>
+        <label class="field">
+          <span>Access point SSH password <em>(only if the default was changed)</em></span>
+          <input id="input-password" type="password" placeholder="ubnt" />
+        </label>
+        <div class="advanced-row">
+          <button id="btn-save" class="btn btn-small">Save settings</button>
+          <span id="save-status" class="save-status" role="status"></span>
+        </div>
+        <div class="advanced-row">
+          <span id="preflight-chip" class="chip">Checking management server&hellip;</span>
+        </div>
+        <div class="field">
+          <span class="field-label">Selected device details</span>
+          <pre id="device-raw" class="mono">No device selected.</pre>
+        </div>
+        <div class="field">
+          <div class="log-head">
+            <span class="field-label">Log</span>
+            <button id="btn-copy-log" class="btn btn-small">Copy log</button>
+          </div>
+          <pre id="log" class="mono log"></pre>
+        </div>
+      </div>
+    </details>
+
+    <footer class="footer">
+      <a href="#" id="home-link">Powered by <strong>HeidiFi</strong></a>
+    </footer>
+  </main>
+  <script src="./renderer.js"></script>
+</body>
+</html>
