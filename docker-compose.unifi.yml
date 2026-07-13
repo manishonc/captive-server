@@ -30,8 +30,12 @@ services:
     volumes:
       - unifi_config:/config
     ports:
-      # AP inform — must be reachable from physical APs (8080 taken by Coolify on host)
-      - "8085:8080"
+      # AP inform channel — MUST be published on host 8080. After adoption the
+      # controller advertises its inform URL on port 8080, so physical APs need to
+      # reach <server-ip>:8080 for the *persistent* connection (8085 lets an AP
+      # start adopting but then drops it to "Adopting… disconnected"). Ensure host
+      # 8080 is free and open in the firewall.
+      - "8080:8080"
       # Controller UI + API — access at https://<server-ip>:8443
       - "8443:8443"
       # STUN (optional but recommended)
