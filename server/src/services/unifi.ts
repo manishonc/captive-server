@@ -371,7 +371,9 @@ export async function ensureWlan(
   const clash = wlans.find((w) => w.name === args.ssid && w._id !== args.wlanId);
   if (clash) throw new Error(`The WiFi name "${args.ssid}" is already in use on this controller.`);
 
-  const scope = { ap_group_ids: [args.apGroupId], ap_group_mode: 'specific' as const };
+  // Controller validates ap_group_mode against "all|groups|devices" — 'groups' scopes
+  // the WLAN to the ap_group_ids list.
+  const scope = { ap_group_ids: [args.apGroupId], ap_group_mode: 'groups' as const };
   const existing = (args.wlanId && wlans.find((w) => w._id === args.wlanId)) || null;
 
   if (existing) {
