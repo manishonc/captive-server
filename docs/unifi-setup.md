@@ -182,6 +182,75 @@ In the CMS → Captive Portal → Access Points → Add Access Point:
 | Admin Username | `captive-service` | Created in Step 3 above |
 | Admin Password | The password you set | Created in Step 3 above |
 
+> **Note:** With the shared-controller flow, the controller fields are normally NOT typed in
+> this form — they come from the CMS deployment's `UNIFI_*` env vars (see next section) and are
+> stamped onto the AP automatically. The fields above only appear when a super admin enables
+> the **"Override shared controller"** toggle to point one AP at a different controller/site.
+
+---
+
+## Part 5: Environment Variables — What Goes Where
+
+The same four variable names are needed in **two different deployments with different values**,
+because each app reaches the controller from a different network position. Missing/wrong values
+here are the #1 cause of "Add Access Point" failures.
+
+The password in all cases is the `captive-service` controller account password. That account
+must be a **local** controller account (not Ubiquiti SSO/MFA), role **Site Administrator** on
+the `default` site, with **"Show pending devices"** enabled.
+
+### 1. Vercel — CMS project (REQUIRED)
+
+The CMS's Add Access Point API checks these at AP-creation time and stamps them onto the AP
+document in Firestore. If `UNIFI_CONTROLLER_URL`, `UNIFI_USERNAME`, or `UNIFI_PASSWORD` is
+missing/empty, the modal shows: **"UniFi controller credentials are not configured on this
+server."**
+
+Vercel dashboard → CMS project → Settings → Environment Variables (Production):
+
+```
+UNIFI_CONTROLLER_URL = https://34.116.224.72:8443   # PUBLIC address — Vercel dials over the internet
+UNIFI_SITE           = default
+UNIFI_USERNAME       = captive-service
+UNIFI_PASSWORD       = <captive-service password>
+```
+
+Then **redeploy** the CMS — env changes do not apply to already-running deployments.
+
+### 2. Coolify — `server` app (captive-server)
+
+At runtime the captive-server reads credentials from the AP document (written by the CMS
+above); env vars are only a fallback — **except the URL, which env must override**: the
+captive-server container is on the same Docker network as the controller and cannot
+NAT-hairpin to the host's public IP, so it must dial the internal address.
+
+Coolify → Captive Portal project → `server` app → Environment Variables:
+
+```
+UNIFI_CONTROLLER_URL = https://unifi:8443            # INTERNAL Docker address — REQUIRED, never the public IP
+UNIFI_SITE           = default                        # fallback (code defaults to "default" anyway)
+UNIFI_USERNAME       = captive-service                # fallback, recommended
+UNIFI_PASSWORD       = <captive-service password>     # fallback, recommended
+```
+
+Then **Restart/Redeploy** the `server` app.
+
+### 3. Local dev — `cms/.env.local`
+
+Same values as Vercel (public controller URL). Restart `npm run dev` after editing —
+Next.js does not hot-reload env files.
+
+### Quick reference
+
+| | CMS (Vercel) | captive-server (Coolify) |
+|---|---|---|
+| `UNIFI_CONTROLLER_URL` | `https://34.116.224.72:8443` (public) | `https://unifi:8443` (internal) |
+| Why | Reaches controller over the internet | Same Docker network; can't hairpin to host public IP |
+| Username/password | **Required** — stamped onto each AP at creation | Fallback only — AP's stored config normally wins |
+
+Credential rotation and the site model (why everything is in one `default` site) are covered
+in [unifi-multi-tenancy-decision.md](./unifi-multi-tenancy-decision.md).
+
 ---
 
 ## AP Heartbeat & Monitoring
@@ -204,6 +273,15 @@ Future improvement: Poll the UniFi controller API (`GET /api/s/default/stat/devi
 ---
 
 ## Troubleshooting
+
+### "UniFi controller credentials are not configured on this server" in Add Access Point
+
+The CMS deployment (Vercel) is missing one of `UNIFI_CONTROLLER_URL` / `UNIFI_USERNAME` /
+`UNIFI_PASSWORD` — an empty value counts as missing. This check runs on the CMS server
+**before** the controller is ever contacted, so the controller being up/reachable is
+irrelevant. Fix per Part 5 §1 and redeploy. (Locally: fill `cms/.env.local` and restart dev
+server.) Workaround while env is unset: a super admin can enable "Override shared controller"
+in the modal and enter credentials manually.
 
 ### AP not adopting
 - Make sure port 8080 is open and reachable from the AP's network
