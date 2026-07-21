@@ -203,10 +203,12 @@ async function submitConsent(marketing) {
       }
       await waitForInternet(10000);
 
-      var dest = param('url');
-      var successUrl = '/success?apmac=' + encodeURIComponent(apMac())
+      // On UniFi param('url') is the device's captive-DETECTION url, never a
+      // tenant destination — captive.apple.com/hotspot-detect.html (whose body is
+      // the word "Success") or connectivitycheck.gstatic.com/generate_204 (blank).
+      // Honouring it skipped /success, so the venue's connected page never showed.
+      window.location.href = '/success?apmac=' + encodeURIComponent(apMac())
         + '&mac=' + encodeURIComponent(clientMac());
-      window.location.href = (dest && /^https?:\/\//i.test(dest)) ? dest : successUrl;
       return;
     }
 
