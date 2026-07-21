@@ -92,6 +92,33 @@ function collectSplashResponses() {
   return responses;
 }
 
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// The controller returns 200 as soon as it accepts authorize-guest, but it pushes
+// the grant to the AP asynchronously. Redirecting immediately sends the device to
+// its captive-detection URL while the AP firewall is still closed, so the OS
+// concludes it is still captive and re-opens the splash page. Poll a host outside
+// the walled garden — blocked over HTTPS pre-auth, so a rejection means the grant
+// has not landed yet — and only redirect once it answers.
+async function waitForInternet(timeoutMs) {
+  var deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, 1500);
+    try {
+      await fetch('https://www.gstatic.com/generate_204', {
+        mode: 'no-cors', cache: 'no-store', signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      return true;
+    } catch (e) {
+      clearTimeout(timer);
+      await sleep(400);
+    }
+  }
+  return false;
+}
+
 // ── 5. Step 2 → Submit ────────────────────────────────────────────────────
 async function submitConsent(marketing) {
   if (window.PREVIEW_MODE) {
@@ -174,6 +201,8 @@ async function submitConsent(marketing) {
       if (!authRes.ok || !authData.success) {
         throw new Error(authData.message || 'Could not authorize WiFi access');
       }
+      await waitForInternet(10000);
+
       var dest = param('url');
       var successUrl = '/success?apmac=' + encodeURIComponent(apMac())
         + '&mac=' + encodeURIComponent(clientMac());
