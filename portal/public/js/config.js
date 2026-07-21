@@ -293,6 +293,13 @@ function applyView(cfg) {
   }
 }
 
+// Timer state for the connected view. Declared HERE, above the initial
+// applyView() call, not next to renderConnectedView further down: that call runs
+// during module execution and reaches renderConnectedView via hoisting, but `var`
+// assignments below it have not run yet, so the arrays would still be undefined.
+var _connAutoSaveTimer = null;
+var _connRedirectTimers = [];
+
 // Apply immediately (synchronous, no flash)
 applyPortalConfig(CONFIG);
 
@@ -350,9 +357,6 @@ function normalizeConnectedPage(cp) {
 function isRedirectActive(page) {
   return page.redirectEnabled === true && /^https:\/\//i.test(page.redirectUrl || '');
 }
-
-var _connAutoSaveTimer = null;
-var _connRedirectTimers = [];
 
 function renderConnectedView(cfg) {
   var step1 = document.getElementById('step1');
