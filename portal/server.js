@@ -244,7 +244,16 @@ app.post('/submit', async (req, res) => {
     const result = await fetchSplashConfig(apmac);
     const config = (result && result.config) || {};
     const cp = config.connectedPage || {};
-    if (typeof cp.buttonUrl === 'string' && /^https:\/\//i.test(cp.buttonUrl)) {
+    // Android's CNA closes the moment swarm.cgi authenticates, so /success never
+    // renders and this is the ONLY destination these guests reach. When the venue
+    // configured a redirect that is their intended destination — honouring
+    // buttonUrl instead would send Android somewhere different from every other
+    // platform in the same venue.
+    const redirectActive = cp.redirectEnabled === true
+      && typeof cp.redirectUrl === 'string' && /^https:\/\//i.test(cp.redirectUrl);
+    if (redirectActive) {
+      buttonUrl = cp.redirectUrl;
+    } else if (typeof cp.buttonUrl === 'string' && /^https:\/\//i.test(cp.buttonUrl)) {
       buttonUrl = cp.buttonUrl;
     }
     if (/^#[0-9a-fA-F]{6}$/.test(config.primaryColor || '')) {
@@ -258,7 +267,9 @@ app.post('/submit', async (req, res) => {
 
   const switchUrl = `https://${post}/swarm.cgi`;
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
-  const redirectUrl = `http://${portalDomain}/success`
+  // Named to distinguish it from connectedPage.redirectUrl — this is where Aruba
+  // returns the guest so /success can render, not a tenant destination.
+  const successReturnUrl = `http://${portalDomain}/success`
     + `?apmac=${encodeURIComponent(apmac || '')}&mac=${encodeURIComponent(mac || '')}`;
 
   if (isAndroid) {
@@ -333,7 +344,7 @@ app.post('/submit', async (req, res) => {
     <input type="hidden" name="cmd" value="authenticate" />
     <input type="hidden" name="user" value="${escapeHtml(email)}" />
     <input type="hidden" name="password" value="guest" />
-    <input type="hidden" name="url" value="${escapeHtml(redirectUrl)}" />
+    <input type="hidden" name="url" value="${escapeHtml(successReturnUrl)}" />
   </form>
   <script>document.getElementById('loginForm').submit();</script>
 </body>

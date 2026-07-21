@@ -10,6 +10,9 @@ var CONNECTED_DEFAULTS = {
   showButton: true,
   autoSubmit: false,
   customFields: [],
+  redirectEnabled: false,
+  redirectUrl: '',
+  redirectDelaySeconds: 3,
 };
 
 var LOGIN_DEFAULTS = {
@@ -325,19 +328,41 @@ function normalizeConnectedPage(cp) {
       return f && f.enabled !== false && f.id && f.label &&
         (f.type === 'checkbox' || f.type === 'text');
     }),
+    // Last line of defence: this also runs on config pushed via preview
+    // postMessage, which is not origin-checked by default. Trust nothing.
+    redirectEnabled: cp.redirectEnabled === true,
+    redirectUrl: (typeof cp.redirectUrl === 'string' && /^https:\/\//i.test(cp.redirectUrl))
+      ? cp.redirectUrl : '',
+    redirectDelaySeconds: (function (v) {
+      var n = Number(v);
+      return isFinite(n) ? Math.min(30, Math.max(0, Math.round(n)))
+        : CONNECTED_DEFAULTS.redirectDelaySeconds;
+    })(cp.redirectDelaySeconds),
   };
 }
 
+// True when the venue wants guests sent to their own site instead of this page.
+function isRedirectActive(page) {
+  return page.redirectEnabled === true && /^https:\/\//i.test(page.redirectUrl || '');
+}
+
 var _connAutoSaveTimer = null;
+var _connRedirectTimers = [];
 
 function renderConnectedView(cfg) {
   var step1 = document.getElementById('step1');
   if (!step1) return;
   var page = normalizeConnectedPage(cfg.connectedPage);
+  var redirectActive = isRedirectActive(page);
 
   // Live preview rebuilds the card on every config push
   var previous = document.getElementById('stepConnected');
   if (previous) previous.parentNode.removeChild(previous);
+
+  // Timers outlive the node they were created for, so a preview keystroke storm
+  // would otherwise stack dozens of pending navigations and countdown ticks.
+  _connRedirectTimers.forEach(clearTimeout);
+  _connRedirectTimers = [];
 
   // Build the card fresh from the shared class vocabulary. Cloning #step1 and
   // stripping it proved fragile: templates differ in whether the heading lives
@@ -365,14 +390,26 @@ function renderConnectedView(cfg) {
     card.appendChild(sub);
   }
 
+  var destTarget = redirectActive ? page.redirectUrl : page.buttonUrl;
+
+  var redirectNote = null;
+  if (redirectActive) {
+    redirectNote = document.createElement('p');
+    redirectNote.className = 'section-sub';
+    redirectNote.id = 'connectedRedirectNote';
+    card.appendChild(redirectNote);
+  }
+
   // Destination link: an anchor with target=_blank is what pops the macOS CNA
-  // into the real browser.
+  // into the real browser. In redirect mode it renders even when showButton is
+  // off — it is the only user-gesture escape when window.open is popup-blocked,
+  // so that flag governs the label rather than the anchor's existence.
   var destBtn = null;
-  if (page.showButton) {
+  if (redirectActive || page.showButton) {
     destBtn = document.createElement('a');
     destBtn.className = btnClass;
-    destBtn.id = 'connectedBtn';
-    destBtn.href = page.buttonUrl;
+    destBtn.id = redirectActive ? 'connectedRedirectLink' : 'connectedBtn';
+    destBtn.href = destTarget;
     destBtn.target = '_blank';
     destBtn.rel = 'noopener';
     destBtn.style.display = 'block';
@@ -380,11 +417,13 @@ function renderConnectedView(cfg) {
     destBtn.style.textDecoration = 'none';
     destBtn.style.boxSizing = 'border-box';
     destBtn.style.marginTop = '16px';
-    destBtn.textContent = page.buttonText;
+    destBtn.textContent = (redirectActive && !page.showButton) ? 'Continue' : page.buttonText;
     card.appendChild(destBtn);
   }
 
-  if (page.customFields.length) {
+  // Redirect takes precedence over custom fields — guests leave this page before
+  // they could answer, so drop the wrapper, Submit, thanks and error nodes together.
+  if (!redirectActive && page.customFields.length) {
     var wrap = document.createElement('div');
     wrap.id = 'connectedFields';
     wrap.style.marginTop = '18px';
@@ -447,25 +486,59 @@ function renderConnectedView(cfg) {
     document.body.classList.add('portal-no-logo');
   }
 
-  // iOS CNA never opens links on its own — auto-fire the destination like the
-  // old static page did, but only when there is nothing to fill in first.
   var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent || '');
-  if (isIOS && destBtn) {
-    destBtn.addEventListener('click', function (e) {
-      e.preventDefault();
-      var w = window.open(page.buttonUrl, '_blank');
-      if (!w) window.location.href = page.buttonUrl;
-    });
+
+  // window.open is the only thing that escapes the chrome-less CNA sheet into the
+  // real browser; window.location keeps the guest trapped inside it with no
+  // address bar. dismissCna pokes Apple's detect URL so iOS closes the sheet.
+  function openDestination(dismissCna) {
+    var w = window.open(destTarget, '_blank');
+    if (!w) window.location.href = destTarget;
+    if (isIOS && dismissCna) {
+      _connRedirectTimers.push(setTimeout(function () {
+        window.location.href = 'http://captive.apple.com/hotspot-detect.html';
+      }, 600));
+    }
+  }
+
+  if (redirectActive) {
+    var host = page.redirectUrl;
+    try { host = new URL(page.redirectUrl).hostname; } catch (e) { /* keep full url */ }
+
+    if (window.PREVIEW_MODE) {
+      // Describe the behaviour instead of performing it — the editor iframe must
+      // never navigate away, and a countdown that hits zero and does nothing
+      // reads as broken.
+      redirectNote.textContent = 'Redirects to ' + host + ' after ' + page.redirectDelaySeconds + 's';
+      if (destBtn) destBtn.addEventListener('click', function (e) { e.preventDefault(); });
+    } else {
+      if (destBtn) {
+        destBtn.addEventListener('click', function (e) { e.preventDefault(); openDestination(true); });
+      }
+      var remaining = page.redirectDelaySeconds;
+      var tick = function () {
+        redirectNote.textContent = remaining > 0
+          ? 'Redirecting… ' + remaining + 's'
+          : 'Redirecting…';
+        if (remaining > 0) {
+          remaining -= 1;
+          _connRedirectTimers.push(setTimeout(tick, 1000));
+        }
+      };
+      tick();
+      // Floor so a 0s setting still paints the card before navigating away.
+      var delayMs = Math.max(300, page.redirectDelaySeconds * 1000);
+      window.addEventListener('load', function () {
+        _connRedirectTimers.push(setTimeout(function () { openDestination(true); }, delayMs));
+      });
+    }
+  } else if (isIOS && destBtn) {
+    // iOS CNA never opens links on its own — auto-fire the destination like the
+    // old static page did, but only when there is nothing to fill in first.
+    destBtn.addEventListener('click', function (e) { e.preventDefault(); openDestination(false); });
     if (!window.PREVIEW_MODE && !page.customFields.length) {
       window.addEventListener('load', function () {
-        setTimeout(function () {
-          var w = window.open(page.buttonUrl, '_blank');
-          if (!w) { window.location.href = page.buttonUrl; }
-          // Poke Apple's detect URL to trigger CNA dismissal
-          setTimeout(function () {
-            window.location.href = 'http://captive.apple.com/hotspot-detect.html';
-          }, 600);
-        }, 500);
+        _connRedirectTimers.push(setTimeout(function () { openDestination(true); }, 500));
       });
     }
   }

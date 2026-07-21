@@ -121,6 +121,13 @@ export interface ConnectedPageConfig {
   /** When true the Submit button is hidden and answers store on each interaction. */
   autoSubmit: boolean;
   customFields: ConnectedPageField[];
+  /** Send guests to redirectUrl instead of rendering this page. Takes precedence
+   *  over customFields — guests leave before they could answer. */
+  redirectEnabled: boolean;
+  /** https-only; anything else disables the redirect. Empty when unset. */
+  redirectUrl: string;
+  /** Seconds the connected page is shown before redirecting. Clamped 0-30. */
+  redirectDelaySeconds: number;
 }
 
 export interface ConnectedFormResponse {
@@ -181,7 +188,6 @@ export interface SplashScreenConfig {
   showMarketingOptIn: boolean;
   showPrivacyPolicy: boolean;
   showTermsOfService: boolean;
-  redirectUrl: string;
   loginPage: LoginPageConfig;
   consentPage: ConsentPageConfig;
   connectedPage: ConnectedPageConfig;
