@@ -333,7 +333,12 @@ function normalizeConnectedPage(cp) {
     redirectEnabled: cp.redirectEnabled === true,
     redirectUrl: (typeof cp.redirectUrl === 'string' && /^https:\/\//i.test(cp.redirectUrl))
       ? cp.redirectUrl : '',
+    // Guard the type before Number(): Number(null)/Number('')/Number(false) are
+    // all 0, a valid delay meaning "redirect immediately", so an unset value
+    // would become the most aggressive setting instead of the default.
     redirectDelaySeconds: (function (v) {
+      if (typeof v !== 'number' && typeof v !== 'string') return CONNECTED_DEFAULTS.redirectDelaySeconds;
+      if (typeof v === 'string' && v.trim() === '') return CONNECTED_DEFAULTS.redirectDelaySeconds;
       var n = Number(v);
       return isFinite(n) ? Math.min(30, Math.max(0, Math.round(n)))
         : CONNECTED_DEFAULTS.redirectDelaySeconds;

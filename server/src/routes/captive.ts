@@ -784,7 +784,13 @@ router.get('/splash-config', async (req: Request, res: Response) => {
     // Raw spread — a doc carrying a huge or negative delay would otherwise reach
     // the portal verbatim and strand the guest. URL scheme checking stays with the
     // two consumers (portal/server.js, portal/public/js/config.js), as for buttonUrl.
-    const delay = Number(connectedPage.redirectDelaySeconds);
+    // Guard the type before Number(): Number(null)/Number('')/Number(false) are
+    // all 0, a valid delay meaning "redirect immediately", so an unset value
+    // would become the most aggressive setting instead of the default.
+    const rawDelay = connectedPage.redirectDelaySeconds;
+    const delay = (typeof rawDelay === 'number' || (typeof rawDelay === 'string' && rawDelay.trim() !== ''))
+      ? Number(rawDelay)
+      : NaN;
     connectedPage.redirectDelaySeconds = Number.isFinite(delay)
       ? Math.min(REDIRECT_DELAY_MAX, Math.max(0, Math.round(delay)))
       : CONNECTED_PAGE_DEFAULTS.redirectDelaySeconds;
