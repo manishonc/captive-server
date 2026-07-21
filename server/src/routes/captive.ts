@@ -653,7 +653,12 @@ const CONNECTED_PAGE_DEFAULTS = {
   showButton: true,
   autoSubmit: false,
   customFields: [] as ConnectedPageField[],
+  redirectEnabled: false,
+  redirectUrl: '',
+  redirectDelaySeconds: 3,
 };
+
+const REDIRECT_DELAY_MAX = 30;
 
 const LOGIN_PAGE_DEFAULTS: LoginPageConfig = {
   fields: {
@@ -694,7 +699,6 @@ const SPLASH_DEFAULTS = {
   showMarketingOptIn: true,
   showPrivacyPolicy: true,
   showTermsOfService: true,
-  redirectUrl: '',
   loginPage: LOGIN_PAGE_DEFAULTS,
   consentPage: CONSENT_PAGE_DEFAULTS,
   connectedPage: CONNECTED_PAGE_DEFAULTS,
@@ -777,6 +781,19 @@ router.get('/splash-config', async (req: Request, res: Response) => {
       : {};
     const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
     if (!Array.isArray(connectedPage.customFields)) connectedPage.customFields = [];
+    // Raw spread — a doc carrying a huge or negative delay would otherwise reach
+    // the portal verbatim and strand the guest. URL scheme checking stays with the
+    // two consumers (portal/server.js, portal/public/js/config.js), as for buttonUrl.
+    // Guard the type before Number(): Number(null)/Number('')/Number(false) are
+    // all 0, a valid delay meaning "redirect immediately", so an unset value
+    // would become the most aggressive setting instead of the default.
+    const rawDelay = connectedPage.redirectDelaySeconds;
+    const delay = (typeof rawDelay === 'number' || (typeof rawDelay === 'string' && rawDelay.trim() !== ''))
+      ? Number(rawDelay)
+      : NaN;
+    connectedPage.redirectDelaySeconds = Number.isFinite(delay)
+      ? Math.min(REDIRECT_DELAY_MAX, Math.max(0, Math.round(delay)))
+      : CONNECTED_PAGE_DEFAULTS.redirectDelaySeconds;
     config.connectedPage = connectedPage;
     config.loginPage = mergeLoginPage(docData);
     config.consentPage = mergeConsentPage(docData);
