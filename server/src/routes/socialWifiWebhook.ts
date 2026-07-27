@@ -4,8 +4,14 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { WifiEvent } from '../types/captive';
 import { scheduleSms } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
-import { sendWhatsAppTemplate } from '../services/whatsapp';
-import { swapVenueRatingUrl, swapTrackedLinks, ShortLinkContext } from '../services/shortlinks';
+import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
+import {
+  swapVenueRatingUrl,
+  swapTrackedLinks,
+  createShortLink,
+  ShortLinkContext,
+  VISITOR_BASE_URL,
+} from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
 
@@ -222,24 +228,55 @@ async function scheduleWhatsAppForVenue(
     if (!msg.templateName || !msg.languageCode) continue;
 
     const delayMinutes: number = msg.delayMinutes ?? 0;
-    const components = msg.components ?? [
-      { type: 'body', parameters: [
-        { type: 'text', text: firstName || 'Guest' },
-        { type: 'text', text: venueName || 'our venue' },
-      ]},
-    ];
+
+    // Pre-allocate the Marketing doc (like the SMS branch above) so the short
+    // link minted below has a marketingDocId to attribute clicks back to.
+    const mRef = db.collection('CaptivePortal_Marketing').doc();
+    const ctx: ShortLinkContext = { venueId, marketingDocId: mRef.id, wifiGuestId, channel: 'whatsapp' };
+    const shortCodes: string[] = [];
+
+    // The template body is fixed Meta-side, so unlike SMS/email there is no URL
+    // to swap — inject firstName/venueName as {{1}}/{{2}} and pass the tracked
+    // short link as the dynamic "Rate Us" URL button parameter. Omitting the
+    // button component makes Meta reject the whole send (error 132000).
+    let components: WhatsAppTemplateComponent[] | undefined = msg.components;
+    if (!components) {
+      const built: WhatsAppTemplateComponent[] = [
+        { type: 'body', parameters: [
+          { type: 'text', text: firstName || 'Guest' },
+          { type: 'text', text: venueName || 'our venue' },
+        ]},
+      ];
+      try {
+        const code = await createShortLink({
+          targetType: 'venue-rate',
+          targetUrl: `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`,
+          ...ctx,
+        });
+        shortCodes.push(code);
+        built.push({
+          type: 'button',
+          sub_type: 'url',
+          index: 0,
+          parameters: [{ type: 'text', text: `s/${code}` }],
+        });
+      } catch (err) {
+        console.error('[SOCIAL_WIFI/WA] Shortlink mint error:', err);
+      }
+      components = built;
+    }
 
     const sendFn = async () => {
       const wamid = await sendWhatsAppTemplate(phone, { templateName: msg.templateName, languageCode: msg.languageCode, components, delayMinutes });
       if (wamid) {
         console.log('[SOCIAL_WIFI/WA] Sent msg %d for guest %s, wamid=%s', i, wifiGuestId, wamid);
-        await db.collection('CaptivePortal_Marketing').add({
+        await mRef.set({
           wifiEvent, channel: 'whatsapp', accessPointId, wifiGuestId, wamid,
           to: phone, templateName: msg.templateName, languageCode: msg.languageCode,
           messageIndex: i, delayMinutes,
           sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
           scheduledAt: FieldValue.serverTimestamp(), deliveryStatus: 'sent',
-          shortCodes: [], clickCount: 0, firstClickedAt: null, lastClickedAt: null,
+          shortCodes, clickCount: 0, firstClickedAt: null, lastClickedAt: null,
           firstVisitId: null, visitedAt: null, visitCount: 0, ratingId: null, ratedAt: null, rating: null,
         }).catch((err) => console.error('[SOCIAL_WIFI/WA] Marketing record error:', err));
       }

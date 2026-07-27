@@ -73,9 +73,16 @@ coolify deploy gf2b7yzehmsjosbontvc0jl5 --context HeidiFi-Coolify
 4. Enter a recipient — an email for email, a phone in full international format
    (e.g. `+41791234567`) for SMS/WhatsApp — and click **Send test now**.
 5. Confirm it arrives within a few seconds (not after the configured delay).
-6. Confirm **no** `CaptivePortal_Marketing` doc and **no** `CaptivePortal_ShortLinks`
-   doc were created for the test. For WhatsApp, the "Rate Us" button should point to
-   `https://visit.askheidi.app/{venueId}/rate`.
+6. Confirm **no** `CaptivePortal_Marketing` doc was created for the test.
+
+   Email and SMS tests also create no `CaptivePortal_ShortLinks` doc. **WhatsApp is
+   different**: it mints a real short link so the button resolves and renders exactly
+   the URL a live send would — `https://visit.askheidi.app/s/{code}`. A test that used
+   a different button suffix would not verify the one thing most likely to be wrong
+   (the rendered URL), which is how a malformed link previously survived testing.
+
+   That doc carries `isTest: true` and an empty `marketingDocId`, so `recordSendClick`
+   skips the funnel counters and test clicks never reach analytics.
 
 ### Direct endpoint check (curl)
 ```bash
