@@ -5,9 +5,11 @@
  *
  * Brevo posts events like delivered / hard_bounce / soft_bounce / blocked /
  * spam / opened / unique_opened / click, each carrying the `message-id` we stored
- * on the send record. We map those to CaptivePortal_CampaignSends so campaign
- * email funnels reflect real delivery + engagement (Brevo has no native delay
- * tracking, but it does report these post-send).
+ * on the send record. We map those onto BOTH send collections, since the same
+ * message id identifies either:
+ *   - CaptivePortal_CampaignSends  — Tenant Campaign Manager broadcasts
+ *   - CaptivePortal_Marketing      — venue automation (onConnect etc.)
+ * Each write-back is a no-op when the id belongs to the other collection.
  *
  * Configure the webhook URL in Brevo → Transactional → Settings → Webhooks.
  */
@@ -18,6 +20,11 @@ import {
   recordOpenByMessageId,
   recordClickByMessageId,
 } from '../services/campaignTracking';
+import {
+  recordMarketingDeliveryStatus,
+  recordMarketingOpen,
+} from '../services/marketingTracking';
+import { normalizeBrevoStatus } from '../services/deliveryStatus';
 
 const router = Router();
 
@@ -37,10 +44,23 @@ router.post('/', async (req: Request, res: Response) => {
       try {
         if (event === 'opened' || event === 'unique_opened') {
           await recordOpenByMessageId(messageId);
+          await recordMarketingOpen(messageId);
         } else if (event === 'click' || event === 'clicks') {
           await recordClickByMessageId(messageId, typeof ev.link === 'string' ? ev.link : undefined);
+          // Deliberately NOT mirrored onto Marketing. That collection's
+          // `clickCount` is fed by our own short-link resolver, which filters
+          // automated scans; Brevo's wrapped links are fetched by the same
+          // scanners and would put unfiltered clicks back into a metric we
+          // specifically cleaned up. Short links already cover venue
+          // automation, so nothing is lost.
         } else {
           await recordDeliveryStatus('messageId', messageId, event, ev.reason);
+          // Marketing docs feed the CMS status bars, which bucket by a fixed
+          // vocabulary — raw Brevo event names would land in no bucket.
+          const status = normalizeBrevoStatus(event);
+          if (status) {
+            await recordMarketingDeliveryStatus('messageId', messageId, status, ev.reason);
+          }
         }
       } catch (err) {
         console.error('[BREVO WEBHOOK] event processing error:', event, err);

@@ -56,4 +56,32 @@ export function shouldAdvanceStatus(current: unknown, incoming: unknown): boolea
   return incomingRank > currentRank;
 }
 
+/**
+ * Brevo event names -> the delivery vocabulary the CMS analytics buckets by
+ * (`scheduled | queued | sent | delivered | read | failed | undelivered`).
+ *
+ * Writing raw Brevo names onto a Marketing doc would land the record in no
+ * bucket at all — counted in the send total, invisible in the status bars.
+ * That's the same silent gap `queued` had on the SMS side.
+ *
+ * Returns null for events that must NOT move the status:
+ *  - transient failures (soft_bounce, deferred) are routinely followed by a
+ *    delivered, so treating them as terminal would misreport a healthy send
+ *  - engagement events are recorded as opens, not statuses
+ *  - anything unrecognised, rather than guessing a bucket for it
+ */
+export function normalizeBrevoStatus(event: string): string | null {
+  const e = String(event || '').toLowerCase().trim();
+
+  if (e === 'delivered') return 'delivered';
+  if (['request', 'sent'].includes(e)) return 'sent';
+  if (['hard_bounce', 'blocked', 'spam', 'invalid_email', 'error', 'failed'].includes(e)) {
+    return 'failed';
+  }
+
+  // soft_bounce | deferred | opened | unique_opened | click | unsubscribed |
+  // list_addition | anything new Brevo adds later.
+  return null;
+}
+
 export { STATUS_RANK };
