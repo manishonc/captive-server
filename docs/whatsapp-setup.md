@@ -189,3 +189,35 @@ In the CMS, go to any venue's **Access Point** → **Marketing** → **WhatsApp*
 **Delivery status not updating:**
 - Confirm the webhook is subscribed to the `messages` field in Meta
 - Check server logs for `[WHATSAPP WEBHOOK]` entries
+
+### Is the webhook actually delivering? (two checks)
+
+Every WhatsApp send sits at `deliveryStatus: 'sent'` until Meta calls us back. If the whole estate is stuck there, work out **which half is broken** before touching anything — the answer changes the fix completely.
+
+**1. Is our endpoint live?** Send a verification request with a deliberately wrong token:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://api.heidifi.ai/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=probe"
+```
+
+- **403** — the route is live, reachable, and rejecting bad tokens. Our side is fine; the problem is in the Meta dashboard.
+- **404 / timeout** — the route isn't deployed or isn't exposed. Fix the deployment first.
+
+**2. Has the webhook ever fired?** `statusUpdatedAt` is written only by the webhook handler, so its presence is proof of life:
+
+```bash
+node -e "
+const admin=require('firebase-admin');
+admin.initializeApp({credential:admin.credential.cert(require('./service-account.json'))});
+admin.firestore().collection('CaptivePortal_Marketing').where('channel','==','whatsapp').get().then(s=>{
+  let ran=0; s.forEach(d=>{ if(d.data().statusUpdatedAt) ran++; });
+  console.log(\`\${ran} of \${s.size} whatsapp docs have statusUpdatedAt\`); process.exit(0);
+});"
+```
+
+**0 of N, combined with a 403 from check 1, means Meta was never configured to call us** — the code is working and waiting. Go back to [Meta App Setup step 4](#4-configure-the-webhook): set the callback URL, complete verification with the matching token, and — most commonly missed — **subscribe to the `messages` webhook field**. Status events ride on that subscription; without it Meta accepts the URL and sends nothing.
+
+A useful cross-check: inbound opt-outs (STOP replies) travel through the same webhook. If no `CaptivePortal_Users` doc has ever had `whatsappOptOut: true`, that's the same subscription gap showing up twice, not two separate faults.
+
+*Observed 2026-07-27: 0 of 116 WhatsApp docs had `statusUpdatedAt`, 0 opt-outs recorded, endpoint returning 403 — i.e. the subscription had never been set up.*
