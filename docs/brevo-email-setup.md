@@ -60,6 +60,36 @@ On a successful send, a document is written to `CaptivePortal_Marketing`:
 }
 ```
 
+### 6. Delivery + open write-back
+
+`POST /webhook/brevo` resolves each event by `message-id` against **both** send collections — `CaptivePortal_CampaignSends` (Campaign Manager) and `CaptivePortal_Marketing` (venue automation). The id only ever belongs to one, so the other write-back is a no-op.
+
+Fields added to the Marketing doc as events arrive:
+
+| Field | From |
+|---|---|
+| `deliveryStatus`, `statusUpdatedAt` | delivery events, normalized (below) |
+| `deliveryError` | the event's `reason` |
+| `openCounted`, `openedAt` | first open only — the unique-open flag |
+| `openCount`, `lastOpenedAt` | every reported open, repeats included |
+
+**Statuses are normalized, not stored raw.** The CMS status bars bucket by a fixed vocabulary (`scheduled | queued | sent | delivered | read | failed | undelivered`); a raw Brevo event name would land in no bucket — counted in the send total but invisible in the UI, the same silent gap `queued` had on the SMS side.
+
+| Brevo event | Stored as |
+|---|---|
+| `delivered` | `delivered` |
+| `request`, `sent` | `sent` |
+| `hard_bounce`, `blocked`, `spam`, `invalid_email`, `error` | `failed` |
+| `soft_bounce`, `deferred` | *not written* — transient, and routinely followed by a `delivered` |
+| `opened`, `unique_opened` | *not a status* — recorded as an open |
+| anything unrecognised | *not written* |
+
+Statuses only ever move forward (`services/deliveryStatus.ts`), so an out-of-order or duplicate callback can't demote a record.
+
+**Clicks are deliberately not mirrored onto Marketing.** That collection's `clickCount` is fed by our own short-link resolver, which filters automated scans. Brevo's wrapped links are fetched by those same scanners, so mirroring them would put unfiltered clicks back into a metric that was specifically cleaned up. Short links already cover venue-automation email, so nothing is lost.
+
+**On open-rate accuracy:** Brevo tracks opens with a pixel. That undercounts clients with images off and overcounts prefetching proxies. Treat it as an engagement signal, not a headcount.
+
 ---
 
 ## WiFi Events

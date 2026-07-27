@@ -1,8 +1,7 @@
 import { Router, Request, Response } from 'express';
 import twilio from 'twilio';
-import { db } from '../firebase';
-import { FieldValue } from 'firebase-admin/firestore';
 import { recordDeliveryStatus } from '../services/campaignTracking';
+import { recordMarketingDeliveryStatus } from '../services/marketingTracking';
 
 const router = Router();
 
@@ -31,18 +30,10 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   try {
-    const snapshot = await db
-      .collection('CaptivePortal_Marketing')
-      .where('messageSid', '==', MessageSid)
-      .limit(1)
-      .get();
-
-    if (!snapshot.empty) {
-      await snapshot.docs[0].ref.update({
-        deliveryStatus: MessageStatus,
-        statusUpdatedAt: FieldValue.serverTimestamp(),
-      });
-    } else {
+    // Twilio doesn't order these either — queued/sent/delivered can arrive out
+    // of sequence. The helper only ever moves the status forward.
+    const matched = await recordMarketingDeliveryStatus('messageSid', MessageSid, MessageStatus);
+    if (!matched) {
       console.warn('[TWILIO WEBHOOK] No marketing record found for MessageSid:', MessageSid);
     }
 
