@@ -118,13 +118,19 @@ export async function recordDeliveryStatus(
   await applyDeliveryStatus(snap.docs[0].ref, rawStatus, error);
 }
 
-/** Record an email open (idempotent unique-open; counts repeats in openCount). */
-async function applyOpen(ref: DocumentReference): Promise<void> {
+/**
+ * Record an email open (idempotent unique-open; counts repeats in openCount).
+ * Returns whether the doc existed — the open-pixel route uses that to decide
+ * whether to try the other send collection.
+ */
+async function applyOpen(ref: DocumentReference): Promise<boolean> {
   let send: any = null;
   let firstOpen = false;
+  let existed = false;
   await db.runTransaction(async (tx) => {
     const doc = await tx.get(ref);
     if (!doc.exists) return;
+    existed = true;
     const d = doc.data() as any;
     send = d;
     const update: Record<string, unknown> = {
@@ -140,12 +146,17 @@ async function applyOpen(ref: DocumentReference): Promise<void> {
     if (firstOpen) bumpCampaignStat(d.campaignId, 'opened', tx);
   });
   if (firstOpen && send) await writeEvent(send, ref.id, 'open');
+  return existed;
 }
 
-/** Open pixel hit — sendId is the CampaignSends doc id embedded in the pixel URL. */
-export async function recordOpenBySendId(sendId: string): Promise<void> {
-  if (!sendId) return;
-  await applyOpen(db.collection(CAMPAIGN_SENDS).doc(sendId));
+/**
+ * Open pixel hit — sendId is the CampaignSends doc id embedded in the pixel URL.
+ * Returns false when no such send exists, which means the id belongs to the
+ * venue-automation collection instead (see services/marketingTracking.ts).
+ */
+export async function recordOpenBySendId(sendId: string): Promise<boolean> {
+  if (!sendId) return false;
+  return applyOpen(db.collection(CAMPAIGN_SENDS).doc(sendId));
 }
 
 /** Brevo "opened" event — resolve the send via the stored Brevo messageId. */

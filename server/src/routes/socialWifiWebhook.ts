@@ -13,6 +13,9 @@ import {
   VISITOR_BASE_URL,
 } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
+import { injectOpenPixel } from '../services/openPixel';
+import { interpolate } from '../services/mergeTags';
+import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
 
 const router = Router();
@@ -139,7 +142,7 @@ router.post('/', async (req: Request, res: Response) => {
       .catch((err) => console.error('[SOCIAL_WIFI] SMS schedule error:', err));
     scheduleWhatsAppForVenue(accessPointId, wifiGuestId, firstName, phone, wifiEvent)
       .catch((err) => console.error('[SOCIAL_WIFI] WhatsApp schedule error:', err));
-    scheduleEmailForVenue(accessPointId, wifiGuestId, email, wifiEvent)
+    scheduleEmailForVenue(accessPointId, wifiGuestId, firstName, email, wifiEvent)
       .catch((err) => console.error('[SOCIAL_WIFI] Email schedule error:', err));
 
   } catch (err) {
@@ -294,6 +297,7 @@ async function scheduleWhatsAppForVenue(
 async function scheduleEmailForVenue(
   accessPointId: string,
   wifiGuestId: string,
+  firstName: string,
   email: string,
   wifiEvent: WifiEvent,
 ): Promise<void> {
@@ -310,6 +314,8 @@ async function scheduleEmailForVenue(
   const emailConfig = marketingDoc.data()?.events?.[wifiEvent]?.email;
   if (!emailConfig?.enabled || !emailConfig?.messages?.length) return;
 
+  const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
+
   for (let i = 0; i < emailConfig.messages.length; i++) {
     const msg = emailConfig.messages[i];
     if (!msg.subject || !msg.body) continue;
@@ -317,8 +323,19 @@ async function scheduleEmailForVenue(
     const delayMinutes = msg.delayMinutes ?? 0;
     const mRef = db.collection('CaptivePortal_Marketing').doc();
     const ctx: ShortLinkContext = { venueId, marketingDocId: mRef.id, wifiGuestId, channel: 'email' };
+
+    // Merge tags + signed unsubscribe — see routes/captive.ts for the rationale.
+    const mergeCtx: Record<string, string> = {
+      firstName: firstName || '',
+      venueName: venueName || '',
+      ratingUrl: `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`,
+      unsubscribeUrl: buildUnsubscribeUrl({ g: wifiGuestId, v: venueId }),
+    };
+
+    const finalSubject = interpolate(String(msg.subject), mergeCtx);
     const shortCodes: string[] = [];
-    let finalBody = msg.body;
+    // Interpolate before the swaps so {{ratingUrl}} becomes a tracked link.
+    let finalBody = interpolate(String(msg.body), mergeCtx);
     try {
       const rateSwap = await swapVenueRatingUrl(finalBody, ctx);
       finalBody = rateSwap.content;
@@ -328,15 +345,26 @@ async function scheduleEmailForVenue(
       shortCodes.push(...trackedSwap.codes);
     } catch (err) { console.error('[SOCIAL_WIFI/EMAIL] Shortlink swap error:', err); }
 
-    const messageId = await sendEmail(email, msg.subject, finalBody, delayMinutes);
+    // Open tracking — see the identical call in routes/captive.ts. After the
+    // link swaps so the pixel URL isn't itself rewritten.
+    finalBody = injectOpenPixel(finalBody, mRef.id);
+
+    const messageId = await sendEmail(
+      email,
+      finalSubject,
+      finalBody,
+      delayMinutes,
+      mergeCtx.unsubscribeUrl || undefined,
+    );
     if (messageId) {
       console.log('[SOCIAL_WIFI/EMAIL] Scheduled msg %d for guest %s, id=%s', i, wifiGuestId, messageId);
       await mRef.set({
         wifiEvent, channel: 'email', accessPointId, wifiGuestId, messageId,
-        to: email, subject: msg.subject, body: finalBody, messageIndex: i, delayMinutes,
+        to: email, subject: finalSubject, body: finalBody, messageIndex: i, delayMinutes,
         sendAt: new Date(Date.now() + delayMinutes * 60 * 1000).toISOString(),
         scheduledAt: FieldValue.serverTimestamp(), deliveryStatus: 'scheduled',
         shortCodes, clickCount: 0, firstClickedAt: null, lastClickedAt: null,
+        openCounted: false, openedAt: null, openCount: 0, lastOpenedAt: null,
         firstVisitId: null, visitedAt: null, visitCount: 0, ratingId: null, ratedAt: null, rating: null,
       }).catch((err) => console.error('[SOCIAL_WIFI/EMAIL] Marketing record error:', err));
     }
