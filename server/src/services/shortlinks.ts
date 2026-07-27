@@ -30,6 +30,11 @@ export interface ShortLinkData extends ShortLinkContext {
   targetType: 'venue-rate' | 'custom';
   targetUrl: string;
   trackedLinkTemplateId?: string;
+  /**
+   * Minted by an admin "Send test", not a real send. Such docs carry an empty
+   * marketingDocId so the resolver's click handler skips the funnel counters.
+   */
+  isTest?: boolean;
 }
 
 /**

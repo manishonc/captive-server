@@ -53,9 +53,16 @@ WhatsApp only allows sending pre-approved **template messages** — you cannot s
 
 Templates must be created and approved in **Meta Business Suite → WhatsApp Manager → Message Templates** before they can be used.
 
-Each template message in HeidiFi supports two variables injected automatically:
+Each template message in HeidiFi supports two **body** variables injected automatically:
 - `{{1}}` → guest's first name
 - `{{2}}` → venue name
+
+A template may also carry a **dynamic URL button** for the rating link. Button variables are numbered
+**per-button** (`{{1}}` of that button) and Meta **appends** the parameter to the registered base URL
+rather than substituting into it — so the base must be bare, with no path and no `{{n}}`. Getting
+this wrong renders a 404 link on every send. See
+[`whatsapp-templates/restaurant_feedback_request.md`](whatsapp-templates/restaurant_feedback_request.md)
+for the registered values and the failure this caused in production.
 
 ---
 
@@ -149,8 +156,12 @@ The temporary token on the API Setup page expires — use a System User token in
 1. In Meta app → **WhatsApp** → **Message Templates** → **Create Template**
 2. Category: **Marketing** or **Utility**
 3. Add body text with `{{1}}` (guest name) and `{{2}}` (venue name) as variables
-4. Submit for approval — typically takes a few minutes to a few hours
-5. Once approved, use the template name in the CMS marketing config
+4. If the template has a rating-link button, add it as **Visit website → Dynamic** with the base URL
+   exactly `https://visit.askheidi.app/` — no path, no `{{n}}`. Meta appends our `s/<code>`
+   parameter to whatever you type here.
+5. Submit for approval — typically takes a few minutes to a few hours
+6. Once approved, use the template name in the CMS marketing config, and record the registered values
+   in [`whatsapp-templates/`](whatsapp-templates/) so the registration is reviewable
 
 ---
 

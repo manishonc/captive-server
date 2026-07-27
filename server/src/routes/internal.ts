@@ -2,8 +2,10 @@
  * Internal, secret-guarded endpoints called server-to-server by the CMS.
  *
  * Currently exposes POST /internal/test-send — sends a single marketing
- * message IMMEDIATELY (no scheduling, no analytics doc, no short-link) so an
- * admin can preview how a configured message looks in their inbox/phone.
+ * message IMMEDIATELY (no scheduling, no analytics doc) so an admin can preview
+ * how a configured message looks in their inbox/phone. WhatsApp tests do mint a
+ * real short link, so the button renders the same URL a live send would, but
+ * it carries no marketingDocId and so never moves the funnel counters.
  *
  * Auth: the caller must send `x-internal-secret` matching INTERNAL_API_SECRET
  * (same shared-secret pattern as /ap-heartbeat).
@@ -13,6 +15,7 @@ import { Router, Request, Response } from 'express';
 import { scheduleSms } from '../services/twilio';
 import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
+import { createShortLink, VISITOR_BASE_URL } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
 import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics } from '../services/unifiWlan';
 import {
@@ -104,8 +107,14 @@ router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Respon
     // Resolve venueName from the venue record (same as the live dispatch).
     const venueName = await getVenueName(venueId || '');
 
-    // Build components exactly like the live path, but with a direct rating URL
-    // suffix (no short-link / no click tracking — this is just a test).
+    // Build components exactly like the live path, including the `s/<code>`
+    // button suffix. Passing a different suffix here (this used to send
+    // `<venueId>/rate`) means the test never exercises the real button shape —
+    // which is how a malformed rendered URL survived testing before.
+    //
+    // The short link is real so the button resolves, but it is minted with an
+    // empty marketingDocId and isTest: true, so recordSendClick's
+    // `if (data.marketingDocId)` guard keeps test clicks out of the funnel.
     const components: WhatsAppTemplateComponent[] = [
       {
         type: 'body',
@@ -116,11 +125,20 @@ router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Respon
       },
     ];
     if (venueId) {
+      const code = await createShortLink({
+        targetType: 'venue-rate',
+        targetUrl: `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`,
+        venueId,
+        marketingDocId: '',
+        wifiGuestId: '',
+        channel: 'whatsapp',
+        isTest: true,
+      });
       components.push({
         type: 'button',
         sub_type: 'url',
         index: 0,
-        parameters: [{ type: 'text', text: `${encodeURIComponent(venueId)}/rate` }],
+        parameters: [{ type: 'text', text: `s/${code}` }],
       });
     }
 
