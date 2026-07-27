@@ -24,6 +24,8 @@ const CAMPAIGNS = 'CaptivePortal_Campaigns';
 type EventType = 'delivered' | 'bounce' | 'open' | 'click' | 'convert';
 
 /** Map a raw provider status into our funnel buckets. */
+import { shouldAdvanceStatus } from './deliveryStatus';
+
 function classify(status: string): 'delivered' | 'bounced' | 'failed' | null {
   const s = String(status || '').toLowerCase();
   // Opens are handled by recordOpen*, never routed here.
@@ -71,10 +73,15 @@ async function applyDeliveryStatus(
     if (!doc.exists) return;
     const d = doc.data() as any;
     send = d;
-    const update: Record<string, unknown> = {
-      deliveryStatus: rawStatus,
-      statusUpdatedAt: FieldValue.serverTimestamp(),
-    };
+    const update: Record<string, unknown> = {};
+    // Provider callbacks aren't ordered — only move the status forward, so a
+    // late `delivered` can't demote a record that already reached `read`. The
+    // counted flags below are evaluated regardless: they have their own
+    // first-outcome-wins guards and must still fire on an out-of-order arrival.
+    if (shouldAdvanceStatus(d.deliveryStatus, rawStatus)) {
+      update.deliveryStatus = rawStatus;
+      update.statusUpdatedAt = FieldValue.serverTimestamp();
+    }
     if (error) update.deliveryError = error;
     // Mutually exclusive: a recipient counts toward delivered OR bounced, never
     // both (a delivered-then-bounced or bounced-then-delivered sequence keeps the
@@ -88,7 +95,8 @@ async function applyDeliveryStatus(
       update.bouncedAt = FieldValue.serverTimestamp();
       bumped = 'bounced';
     }
-    tx.update(ref, update);
+    // A duplicate or out-of-order callback can leave nothing to write.
+    if (Object.keys(update).length > 0) tx.update(ref, update);
     if (bumped) bumpCampaignStat(d.campaignId, bumped, tx);
   });
 

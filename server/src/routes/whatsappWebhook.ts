@@ -14,6 +14,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { recordDeliveryStatus } from '../services/campaignTracking';
+import { shouldAdvanceStatus } from '../services/deliveryStatus';
 import { classifyInbound, setChannelOptOut } from '../services/optOut';
 import { sendWhatsAppText } from '../services/whatsapp';
 
@@ -76,14 +77,26 @@ router.post('/', async (req: Request, res: Response) => {
                 .get();
 
               if (!snapshot.empty) {
-                const update: Record<string, unknown> = {
-                  deliveryStatus: statusValue,
-                  statusUpdatedAt: FieldValue.serverTimestamp(),
-                };
+                const doc = snapshot.docs[0];
+                const update: Record<string, unknown> = {};
+
+                // Meta doesn't order these — a `delivered` can land after a
+                // `read`. Only move forward, or the read is lost.
+                if (shouldAdvanceStatus(doc.data()?.deliveryStatus, statusValue)) {
+                  update.deliveryStatus = statusValue;
+                  update.statusUpdatedAt = FieldValue.serverTimestamp();
+                }
                 if (errorData) update.deliveryError = errorData;
 
-                await snapshot.docs[0].ref.update(update);
-                console.log('[WHATSAPP WEBHOOK] Status update wamid=%s status=%s', wamid, statusValue);
+                if (Object.keys(update).length > 0) {
+                  await doc.ref.update(update);
+                  console.log('[WHATSAPP WEBHOOK] Status update wamid=%s status=%s', wamid, statusValue);
+                } else {
+                  console.log(
+                    '[WHATSAPP WEBHOOK] Ignored out-of-order/duplicate status wamid=%s status=%s (current=%s)',
+                    wamid, statusValue, doc.data()?.deliveryStatus,
+                  );
+                }
               } else {
                 console.warn('[WHATSAPP WEBHOOK] No marketing record for wamid:', wamid);
               }
