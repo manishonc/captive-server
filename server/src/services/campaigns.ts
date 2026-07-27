@@ -24,6 +24,8 @@ import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from './whatsapp';
 import { getEntitlements, quotasEnforced, type Channel as MessagingChannel } from './entitlements';
 import { recordSends } from './usage';
 import { injectPoweredBy } from './poweredBy';
+import { injectOpenPixel } from './openPixel';
+import { interpolate } from './mergeTags';
 import { getVenueName } from './venue';
 import {
   VISITOR_BASE_URL,
@@ -44,16 +46,6 @@ const FIRESTORE_IN_LIMIT = 30;
 const MAX_AUDIENCE = 10000;
 /** How many recipients to dispatch concurrently. */
 const DISPATCH_CONCURRENCY = 8;
-/** Public base URL for the open-tracking pixel (email only). No tracking if unset. */
-const TRACKING_BASE = (process.env.SERVER_PUBLIC_URL || '').replace(/\/$/, '');
-
-/** Append a 1×1 open-tracking pixel to an email body, keyed by the send id. */
-function injectOpenPixel(body: string, sendId: string): string {
-  if (!TRACKING_BASE) return body;
-  const pixel = `<img src="${TRACKING_BASE}/t/o/${sendId}" width="1" height="1" alt="" style="display:none" />`;
-  return `${body}${pixel}`;
-}
-
 type Channel = 'email' | 'sms' | 'whatsapp';
 
 interface CampaignMessage {
@@ -141,15 +133,6 @@ function ensureSmsOptOutSuffix(content: string): string {
   const safe = String(content ?? '');
   if (SMS_OPT_OUT_PATTERN.test(safe)) return safe;
   return `${safe}${SMS_OPT_OUT_SUFFIX}`;
-}
-
-/** Replace {{token}} placeholders from a per-guest context. Unknowns → empty. */
-function interpolate(tpl: string, ctx: Record<string, string>): string {
-  if (!tpl) return tpl;
-  return tpl.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
-    const v = ctx[key];
-    return v === undefined || v === null ? '' : String(v);
-  });
 }
 
 /**

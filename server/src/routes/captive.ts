@@ -8,6 +8,9 @@ import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } f
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '../services/unifi';
 import { getVenueName } from '../services/venue';
+import { injectOpenPixel } from '../services/openPixel';
+import { interpolate } from '../services/mergeTags';
+import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { fireAutomationsForGuest } from '../services/campaigns';
 
 const router = Router();
@@ -186,7 +189,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   if (marketingOptIn && captivePortalAccessPointId) {
     scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
-    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent)
       .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
     scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[WHATSAPP SCHEDULE ERROR]', err));
@@ -450,6 +453,7 @@ async function scheduleWhatsAppForEvent(
 async function scheduleEmailForEvent(
   accessPointId: string,
   wifiGuestId: string,
+  firstName: string,
   userEmail: string,
   wifiEvent: WifiEvent
 ): Promise<void> {
@@ -484,6 +488,8 @@ async function scheduleEmailForEvent(
     return;
   }
 
+  const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
+
   for (let i = 0; i < emailConfig.messages.length; i++) {
     const msg = emailConfig.messages[i];
     if (!msg.subject || !msg.body) continue;
@@ -497,8 +503,23 @@ async function scheduleEmailForEvent(
       wifiGuestId,
       channel: 'email',
     };
+
+    // Same merge-tag vocabulary the Campaign Manager dispatcher resolves, so a
+    // body authored in the shared composer behaves identically on both
+    // surfaces. Without this the CMS-injected footer ships a literal
+    // "{{unsubscribeUrl}}" — a dead unsubscribe link on a marketing email.
+    const mergeCtx: Record<string, string> = {
+      firstName: firstName || '',
+      venueName: venueName || '',
+      ratingUrl: `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`,
+      unsubscribeUrl: buildUnsubscribeUrl({ g: wifiGuestId, v: venueId }),
+    };
+
+    const finalSubject = interpolate(String(msg.subject), mergeCtx);
     const shortCodes: string[] = [];
-    let finalBody = msg.body;
+    // Interpolate BEFORE the swaps: {{ratingUrl}} expands to the canonical rate
+    // URL, which is the exact literal swapVenueRatingUrl looks for.
+    let finalBody = interpolate(String(msg.body), mergeCtx);
     try {
       const rateSwap = await swapVenueRatingUrl(finalBody, ctx);
       finalBody = rateSwap.content;
@@ -510,7 +531,21 @@ async function scheduleEmailForEvent(
       console.error('[SHORTLINK SWAP ERROR - email]', err);
     }
 
-    const messageId = await sendEmail(userEmail, msg.subject, finalBody, delayMinutes);
+    // Open tracking, keyed by the Marketing doc we pre-allocated above. Same
+    // pixel the Campaign Manager uses; /t/o/:sendId resolves against both
+    // collections. Must come after the link swaps so the pixel URL is never
+    // itself rewritten into a short link.
+    finalBody = injectOpenPixel(finalBody, mRef.id);
+
+    // The 5th arg adds the RFC 8058 List-Unsubscribe headers, so Gmail/Apple
+    // show a native unsubscribe button. Empty string when unconfigured.
+    const messageId = await sendEmail(
+      userEmail,
+      finalSubject,
+      finalBody,
+      delayMinutes,
+      mergeCtx.unsubscribeUrl || undefined,
+    );
 
     if (messageId) {
       console.log('[EMAIL] Scheduled msg %d for wifi guest %s, id=%s, delay=%d min', i, wifiGuestId, messageId, delayMinutes);
@@ -521,7 +556,9 @@ async function scheduleEmailForEvent(
         wifiGuestId,
         messageId,
         to: userEmail,
-        subject: msg.subject,
+        // Record what was actually sent, not the template — analytics snippets
+        // and any support lookup should match the guest's inbox.
+        subject: finalSubject,
         body: finalBody,
         messageIndex: i,
         templateMessageId: msg.id || null,
@@ -533,6 +570,10 @@ async function scheduleEmailForEvent(
         clickCount: 0,
         firstClickedAt: null,
         lastClickedAt: null,
+        openCounted: false,
+        openedAt: null,
+        openCount: 0,
+        lastOpenedAt: null,
         firstVisitId: null,
         visitedAt: null,
         visitCount: 0,
@@ -1133,7 +1174,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   if (marketingOptIn && captivePortalAccessPointId) {
     scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[UNIFI SMS SCHEDULE ERROR]', err));
-    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent)
       .catch((err) => console.error('[UNIFI EMAIL SCHEDULE ERROR]', err));
     scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
       .catch((err) => console.error('[UNIFI WHATSAPP SCHEDULE ERROR]', err));

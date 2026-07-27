@@ -71,14 +71,45 @@ export async function recordMarketingOpen(messageId: string): Promise<void> {
   const doc = await findByProviderId('messageId', messageId);
   if (!doc) return;
 
-  const update: Record<string, unknown> = {
-    lastOpenedAt: FieldValue.serverTimestamp(),
-    openCount: FieldValue.increment(1),
-  };
-  if (!doc.data()?.openCounted) {
-    update.openCounted = true;
-    update.openedAt = FieldValue.serverTimestamp();
-  }
+  await applyMarketingOpen(doc.ref);
+}
 
-  await doc.ref.update(update);
+/**
+ * Open-pixel hit — `sendId` is the Marketing doc id embedded in the pixel URL
+ * by services/openPixel.ts. Mirrors campaignTracking.recordOpenBySendId.
+ *
+ * @returns whether a Marketing doc matched. `GET /t/o/:sendId` tries the
+ *          campaign collection first and falls through to here, so a miss on
+ *          both is simply an unknown id.
+ */
+export async function recordMarketingOpenBySendId(sendId: string): Promise<boolean> {
+  if (!sendId) return false;
+  return applyMarketingOpen(db.collection(MARKETING).doc(sendId));
+}
+
+/**
+ * Shared open write for both entry points. Transactional because the pixel can
+ * fire repeatedly and concurrently (mail clients prefetch, users reopen), and a
+ * read-then-update would race itself into a lost `openCounted`.
+ */
+async function applyMarketingOpen(
+  ref: FirebaseFirestore.DocumentReference,
+): Promise<boolean> {
+  let existed = false;
+  await db.runTransaction(async (tx) => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) return;
+    existed = true;
+
+    const update: Record<string, unknown> = {
+      lastOpenedAt: FieldValue.serverTimestamp(),
+      openCount: FieldValue.increment(1),
+    };
+    if (!doc.data()?.openCounted) {
+      update.openCounted = true;
+      update.openedAt = FieldValue.serverTimestamp();
+    }
+    tx.update(ref, update);
+  });
+  return existed;
 }
