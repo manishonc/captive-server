@@ -156,12 +156,6 @@ The AP appears under **Devices** in the controller with status "Connected". Note
 5. Under **Pre-Authorization Access** (Walled Garden), add:
    - `p.heidifi.ai` — your portal domain
    - `api.heidifi.ai` — your API domain (if different)
-6. Under **Post-Authorization Restrictions**: the defaults block all RFC1918 ranges
-   (`192.168.0.0/16` etc.). If the venue uses a **third-party router** as gateway/DNS,
-   this blocks authorized guests' DNS and causes a splash-screen loop — either delete
-   the restriction covering the venue LAN, or keep it and configure the router's DHCP
-   to hand out public DNS (`8.8.8.8`/`1.1.1.1`). See Troubleshooting → "Guest bounces
-   back to the splash screen".
 
 ### Session Duration
 In UniFi you can set guest session duration in the controller, but our system overrides it per AP (set in CMS → Session Duration field). The CMS value is passed as `minutes` to the authorize API call.
@@ -294,32 +288,7 @@ in the modal and enter credentials manually.
 - Run `set-inform http://<server-ip>:8080/inform` via SSH on the AP
 - Check controller logs: Coolify → unifi container → logs
 
-### Guest bounces back to the splash screen after submitting (authorize succeeds in logs)
-
-Symptom: server logs show `[UNIFI] Authorized guest <mac> for N min` (often followed by
-`[UNIFI] Reconnect …`), but the guest device reopens the splash page instead of getting
-internet.
-
-Cause (confirmed 2026-07-16): **Post-Authorization Restrictions blocking the guests' DNS
-server.** UniFi's hotspot defaults restrict authorized guests from `192.168.0.0/16`,
-`172.16.0.0/12`, and `10.0.0.0/8`. With a UniFi gateway that's fine (it auto-exempts
-itself), but on our deployments the venue's **third-party router** is the gateway AND the
-DHCP-provided DNS server (e.g. `192.168.2.1`). Once authorized, the AP blocks the guest's
-DNS lookups → every connection fails → the phone decides it is still captive and reopens
-the portal. Pre-auth works because the walled garden explicitly allows DNS — which is why
-the splash page loads fine and the authorize call succeeds.
-
-Fix: Controller → Settings → Hotspot → Authorization Access → **delete the
-`192.168.0.0/16` restriction** (and the others if the venue LAN uses those ranges).
-
-Preferred production setup: keep the restrictions (they stop guests from reaching the
-venue's LAN devices) and instead make the venue router's DHCP hand out **public DNS**
-(`8.8.8.8` / `1.1.1.1`) so authorized guests never need to talk to an RFC1918 address.
-
-Quick confirmation test: after submitting the splash form, browse to `http://1.1.1.1`
-(raw IP, no DNS). If that loads while normal sites don't, it's this issue.
-
-### Guest not getting internet after form submit (no authorize in logs)
+### Guest not getting internet after form submit
 - Check server logs for `[UNIFI AUTH]` entries
 - Confirm `controllerUrl` is reachable from the server container: `docker exec server curl -k https://unifi:8443`
 - Confirm credentials are correct by testing login manually
