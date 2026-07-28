@@ -11,7 +11,16 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 // redirect:false — /success is a real route now; without it the static layer
 // 301s the bare /success (a directory in public/) before the route can run.
-app.use(express.static(path.join(__dirname, 'public'), { index: false, redirect: false }));
+// maxAge — /js/config.js is 28 KB and used to be revalidated on every single
+// portal hit, which on a barely-open captive link is a large slice of the delay
+// before the page can be branded. An hour is short enough that a redeploy reaches
+// returning devices quickly; the tenant's config is never cached here, it rides
+// inline in the HTML below.
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false,
+  redirect: false,
+  maxAge: '1h',
+}));
 
 const PORTAL_HTML = path.join(__dirname, 'public', 'index.html');
 const TEMPLATES_DIR = path.join(__dirname, 'public', 'templates');
@@ -40,6 +49,84 @@ function fetchSplashConfig(apmac) {
     r.setTimeout(5000, () => { r.destroy(); resolve(null); });
     r.end();
   });
+}
+
+// ── Boot gate ──────────────────────────────────────────────────────────────
+// Every template ships #step1 visible and loads /js/config.js as the LAST tag in
+// <body>. So the browser paints the raw template first and only then runs the
+// script that brands it — on / the guest sees the template's placeholder copy
+// before the venue's own, and on /success (which renders the very same template,
+// with view:'connected' merged in) the guest sees the login form again for as
+// long as config.js takes to arrive. On a captive link that is about a second.
+//
+// Gate only the parts that are actually wrong until then — #step1 and #step2 hold
+// the copy, labels and logo that config.js rewrites — and float a spinner over
+// them. The template's own chrome (card, decorations) is static CSS that is always
+// correct, so it paints straight away and the page never flips colour mid-load.
+// config.js lifts the gate with <html class="hf-ready"> once branding and the
+// correct view are in place. Injected server-side so all 33 templates are covered
+// without editing any of them.
+const DEFAULT_PRIMARY = '#1c2b4a';
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+// These land inside a <style> block, so anything but a literal hex colour is an
+// injection vector. Tenant input is never trusted here — bad values fall back.
+// Normalised to 6 digits because the spinner track appends an alpha pair: '#abc33'
+// and '#rrggbbaa33' are both invalid, and an invalid colour drops the whole
+// `border` shorthand, which would leave the spinner with no ring at all.
+function safeColor(value, fallback) {
+  if (typeof value !== 'string' || !HEX_COLOR.test(value.trim())) return fallback;
+  let hex = value.trim().toLowerCase();
+  if (hex.length === 4) hex = '#' + hex.slice(1).split('').map((c) => c + c).join('');
+  return hex.slice(0, 7);
+}
+
+function injectBootGate(html, config) {
+  const fg = safeColor(config && config.primaryColor, DEFAULT_PRIMARY);
+
+  // Paint the venue's background from the very first frame instead of letting
+  // config.js swap it in later. Skipped for #ffffff, which the templates treat as
+  // "unset" so their own decorative background survives — see the inline script
+  // each template runs right after window.PORTAL_CONFIG.
+  const rawBg = safeColor(config && config.backgroundColor, '');
+  const bodyBg = (rawBg && rawBg !== '#ffffff')
+    ? `  html:not(.hf-ready) body { background: ${rawBg}; }\n`
+    : '';
+
+  const head = `
+<link rel="preload" as="script" href="/js/config.js">
+<style id="hf-boot-style">
+${bodyBg}  html:not(.hf-ready) #step1,
+  html:not(.hf-ready) #step2 { visibility: hidden; }
+  #hf-boot {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2147483647;
+    transition: opacity .18s ease-out;
+  }
+  #hf-boot i {
+    display: block; width: 34px; height: 34px;
+    border: 3px solid ${fg}33; border-top-color: ${fg}; border-radius: 50%;
+    animation: hf-spin .7s linear infinite;
+  }
+  @keyframes hf-spin { to { transform: rotate(360deg); } }
+  html.hf-ready #hf-boot { opacity: 0; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { #hf-boot i { animation-duration: 2.4s; } }
+</style>
+<script>
+  // Failsafe: if config.js never runs — 404, parse error, blocked by the AP — the
+  // guest must still get a usable page rather than an endless spinner. Worst case
+  // they see the unbranded template, which is exactly the old behaviour.
+  setTimeout(function () {
+    document.documentElement.classList.add('hf-ready');
+  }, 4000);
+</script>`;
+
+  // Anchors verified present in all 33 templates: every one has a </head> and a
+  // bare <body>. Both replaces are first-occurrence only, which is what we want.
+  return html
+    .replace('</head>', `${head}\n</head>`)
+    .replace('<body>', '<body>\n<div id="hf-boot" aria-hidden="true"><i></i></div>');
 }
 
 // UniFi external hotspot redirects to /guest/s/{site}/ (not /). Forward to / with params intact.
@@ -93,7 +180,7 @@ app.get('/', async (req, res) => {
       portalConfigJson: config ? JSON.stringify(config) : 'undefined',
       previewMode: preview === '1',
     });
-    res.send(html);
+    res.send(injectBootGate(html, config));
   } catch (err) {
     console.error('[PORTAL RENDER ERROR]', err);
     res.sendFile(PORTAL_HTML);
@@ -377,7 +464,7 @@ app.get('/success', async (req, res) => {
       portalConfigJson: JSON.stringify(config),
       previewMode: preview === '1',
     });
-    res.send(html);
+    res.send(injectBootGate(html, config));
   } catch (err) {
     console.error('[SUCCESS RENDER ERROR]', err);
     res.sendFile(STATIC_SUCCESS_HTML);
