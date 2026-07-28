@@ -300,12 +300,22 @@ function applyView(cfg) {
 var _connAutoSaveTimer = null;
 var _connRedirectTimers = [];
 
-// Apply immediately (synchronous, no flash)
-applyPortalConfig(CONFIG);
-
-// View switch: /success injects view:'connected', the CMS consent preview
-// injects view:'consent'; everything else shows the login form.
-applyView(CONFIG);
+// Apply branding, then switch view: /success injects view:'connected', the CMS
+// consent preview injects view:'consent'; everything else shows the login form.
+//
+// The portal server holds the page behind a boot overlay until we add .hf-ready,
+// so that nobody sees the raw template — placeholder copy on /, the login form on
+// /success — while this file is still in flight. `finally` is deliberate: if
+// renderConnectedView throws (see 6b69970, where it did exactly that, between
+// removing the old card and inserting the new one) the guest must still get a
+// page. They fall back to the unbranded template, which is the old behaviour,
+// rather than being stranded on the spinner.
+try {
+  applyPortalConfig(CONFIG);
+  applyView(CONFIG);
+} finally {
+  document.documentElement.classList.add('hf-ready');
+}
 
 // ── Connected view renderer ────────────────────────────────────────────────
 // Clones #step1 and rebuilds it as the "You're connected" card using only the
