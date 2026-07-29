@@ -125,8 +125,8 @@ See `docs/guest-verification.md`.
 > `resolveVerification()` disables verification and guests connect **unverified** — safe, but
 > silently not what the tenant asked for. The server logs this at boot.
 >
-> This failure mode has precedent: `UNSUBSCRIBE_SIGNING_SECRET` and `INTERNAL_API_SECRET` are
-> both documented here and both absent from the deployed environment.
+> These live in Coolify, not in a checked-in `.env` — confirm with
+> `coolify app env list <uuid> --context HeidiFi-Coolify` (values stay masked without `-s`).
 
 **Generating:** `openssl rand -hex 32` for each. `GUEST_VERIFICATION_SIGNING_SECRET` and
 `PORTAL_SHARED_SECRET` must be **identical** in the `server` and `portal` containers.

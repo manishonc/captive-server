@@ -26,10 +26,11 @@ const TOKEN_TTL_SECONDS = 15 * 60;
 const IAT_SKEW_SECONDS = 60;
 
 /**
- * Its own secret — deliberately NOT falling back to UNSUBSCRIBE_SIGNING_SECRET.
- * That variable is documented in .env.example and absent from the deployed
- * environment, so a fallback chain would silently HMAC with '' and every token
- * would be forgeable by anyone who can read this file.
+ * Its own secret — deliberately NOT chaining a fallback to any other signing
+ * secret. A fallback chain reaches an empty string when nothing in it is set,
+ * and an empty-key HMAC is forgeable by anyone who can read this file. Failing
+ * closed on a missing secret is the only safe behaviour, so the chain would buy
+ * nothing and cost everything.
  */
 function secret(): string {
   return process.env.GUEST_VERIFICATION_SIGNING_SECRET || '';
