@@ -183,7 +183,30 @@ async function submitConsent(marketing) {
 }
 
 // ── 5b. Verification step ─────────────────────────────────────────────────
-var _verifyState = { channel: null, resendTimer: null, sending: false };
+// The card is the only thing the guest can see between "I typed my code" and "I
+// am online", and on UniFi that gap is create-user + unifi-authorize + up to 10s
+// of waitForInternet. `phase` is the single source of truth and every DOM write
+// on the card goes through paintVerifyState, so no branch can leave a stale
+// label behind — which is exactly what used to happen: the success path fired
+// completeSubmission unawaited and the finally then reset the button to idle.
+var _verifyState = {
+  channel: null,
+  phase: 'idle',            // idle | sending | verifying | connecting
+  token: null,              // last minted token — a failed connect retries the connect, not the code
+  resendTimer: null,
+  resendUntil: 0,           // epoch ms; the resend button is a pure function of (phase, resendUntil)
+  subheadingText: '',       // idle copy to restore after a busy phase
+  connectTimers: [],
+  autoTimer: null,
+  lastRejectedCode: null,   // never auto-resubmit digits the server just refused
+};
+
+// Guards the only thing here that is not cosmetic. Two /create-user calls for one
+// guest means a duplicate session row, an inflated connectionCount and — because
+// the reconnect branch re-runs the dispatchers — a SECOND welcome message, which
+// is billable. Deliberately independent of the card so it holds even if the DOM
+// is broken.
+var _submitInFlight = false;
 
 var VERIFY_ERRORS = {
   invalid_code:             'That code is not right. Please check and try again.',
@@ -199,11 +222,21 @@ var VERIFY_ERRORS = {
   verification_unavailable: 'Verification is unavailable right now. Please ask staff for help.',
 };
 
-function showVerifyError(code, extra) {
-  var el = document.getElementById('verifyError');
-  if (!el) return;
+function verifyErrorText(code, extra) {
   var msg = VERIFY_ERRORS[code] || 'Something went wrong. Please try again.';
-  showErr(el, extra ? msg + ' ' + extra : msg);
+  return extra ? msg + ' ' + extra : msg;
+}
+
+// Every caller's intent is "stop, and hand the card back to the guest", so this
+// is a transition rather than just a paint.
+function showVerifyError(code, extra, opts) {
+  opts = opts || {};
+  setVerifyState('idle', {
+    error: verifyErrorText(code, extra),
+    clearCode: opts.clearCode,
+    focus: opts.focus,
+    label: opts.label,
+  });
 }
 
 function verifyDestinationPayload() {
@@ -214,25 +247,189 @@ function verifyDestinationPayload() {
   };
 }
 
-function startResendCountdown(seconds) {
+// ── Verify-card state machine ─────────────────────────────────────────────
+// Copy for the connecting wait. A spinner that says nothing for ~12s reads as
+// broken in a captive mini-browser, and "keep this page open" is the
+// operationally useful line — guests close the CNA sheet.
+var VERIFY_CONNECT_COPY = [
+  { at: 0,    text: 'Code confirmed — getting you online…' },
+  { at: 4000, text: 'Still connecting — this can take a few seconds.' },
+  { at: 8000, text: 'Almost there. Please keep this page open.' },
+];
+// fetch() has no timeout of its own, so without this a hung request would trap
+// the guest behind a card with every control disabled.
+var VERIFY_CONNECT_WATCHDOG_MS = 20000;
+
+function verifySpinner() {
+  var slow = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var i = document.createElement('span');
+  i.setAttribute('aria-hidden', 'true');
+  // hf-spin is defined by injectBootGate in <style id="hf-boot-style">, which is
+  // never removed — so the keyframe is live on all 33 templates and this needs
+  // no new CSS.
+  i.style.cssText = 'display:inline-block;width:13px;height:13px;margin-right:8px;'
+    + 'vertical-align:-2px;border:2px solid currentColor;border-right-color:transparent;'
+    + 'border-radius:50%;opacity:.85;animation:hf-spin ' + (slow ? '2.4s' : '.7s') + ' linear infinite';
+  return i;
+}
+
+function setVerifyBusyLabel(btn, label) {
+  btn.textContent = '';                  // also wipes any previous spinner
+  btn.appendChild(verifySpinner());
+  btn.appendChild(document.createTextNode(label));
+}
+
+// sendCode rewrites the subheading ("code sent to j•••@…"). Routing those writes
+// through here gives the connecting copy something correct to hand back.
+function setVerifySubheading(text) {
+  _verifyState.subheadingText = text;
+  var sub = document.getElementById('verifySubheading');
+  if (sub && _verifyState.phase !== 'connecting') sub.textContent = text;
+}
+
+function stopResendCountdown() {
+  clearInterval(_verifyState.resendTimer);
+  _verifyState.resendTimer = null;
+}
+
+// The resend button is a pure function of (phase, resendUntil). Without this the
+// old 1s interval would re-enable it mid-connect on its own.
+function paintResendButton() {
   var btn = document.getElementById('btnResend');
   if (!btn) return;
   var label = normalizeVerification(CONFIG.verificationPage).resendLabel;
-  var left = Math.max(0, seconds || 0);
-  clearInterval(_verifyState.resendTimer);
-  function tick() {
-    if (left <= 0) {
-      clearInterval(_verifyState.resendTimer);
-      btn.disabled = false;
-      btn.textContent = label;
-      return;
-    }
-    btn.disabled = true;
-    btn.textContent = label + ' (' + left + 's)';
-    left -= 1;
+  if (_verifyState.phase !== 'idle') { btn.disabled = true; return; }
+  var left = Math.ceil((_verifyState.resendUntil - Date.now()) / 1000);
+  if (left > 0) { btn.disabled = true; btn.textContent = label + ' (' + left + 's)'; return; }
+  btn.disabled = false;
+  btn.textContent = label;
+}
+
+function ensureResendTicking() {
+  if (_verifyState.resendTimer) return;
+  if (_verifyState.resendUntil <= Date.now()) return;
+  _verifyState.resendTimer = setInterval(function () {
+    paintResendButton();
+    if (_verifyState.resendUntil <= Date.now()) stopResendCountdown();
+  }, 1000);
+}
+
+function startResendCountdown(seconds) {
+  _verifyState.resendUntil = Date.now() + Math.max(0, seconds || 0) * 1000;
+  stopResendCountdown();
+  paintResendButton();
+  ensureResendTicking();
+}
+
+function clearConnectTimers() {
+  for (var t = 0; t < _verifyState.connectTimers.length; t++) {
+    clearTimeout(_verifyState.connectTimers[t]);
   }
-  tick();
-  _verifyState.resendTimer = setInterval(tick, 1000);
+  _verifyState.connectTimers = [];
+}
+
+// The phase is assigned BEFORE the paint and the paint is wrapped: a cosmetic
+// throw must never break a guard or stop a connect.
+function setVerifyState(next, opts) {
+  _verifyState.phase = next;
+  clearTimeout(_verifyState.autoTimer);
+  clearConnectTimers();
+  try { paintVerifyState(next, opts || {}); } catch (e) { /* cosmetics never block the grant */ }
+}
+
+function paintVerifyState(next, opts) {
+  var card = document.getElementById('stepVerify');
+  // No card (verification off, or renderVerifyStep returned null) or a hidden one
+  // (the consent step owns its own buttons) — nothing to say here.
+  if (!card || card.classList.contains('hidden')) return;
+
+  var btn    = document.getElementById('btnVerify');
+  var input  = document.getElementById('verifyCode');
+  var sub    = document.getElementById('verifySubheading');
+  var err    = document.getElementById('verifyError');
+  var change = document.getElementById('btnChangeDestination');
+  var radios = document.querySelectorAll('input[name="verifyChannel"]');
+  var busy   = next !== 'idle';
+
+  card.setAttribute('aria-busy', busy ? 'true' : 'false');
+
+  if (input) {
+    // readOnly, not disabled: no template styles input:disabled, so a disabled
+    // field would inherit UA greying that looks different on all 33.
+    input.readOnly = busy;
+    input.style.opacity = busy ? '.65' : '';
+    if (next === 'verifying' || next === 'connecting') input.blur();   // drops the iOS keyboard
+  }
+  if (err) {
+    if (opts.error) showErr(err, opts.error);
+    else err.style.display = 'none';
+  }
+  // Abandoning an in-flight send is harmless — the guest may have spotted a typo.
+  if (change) change.disabled = (next === 'verifying' || next === 'connecting');
+  for (var i = 0; i < radios.length; i++) radios[i].disabled = busy;
+  paintResendButton();
+
+  if (!btn) return;
+  if (next === 'sending')   { btn.disabled = true; setVerifyBusyLabel(btn, 'Sending code…'); return; }
+  if (next === 'verifying') { btn.disabled = true; setVerifyBusyLabel(btn, 'Verifying…');    return; }
+
+  if (next === 'connecting') {
+    btn.disabled = true;
+    setVerifyBusyLabel(btn, 'Connecting…');
+    if (sub) {
+      sub.textContent = VERIFY_CONNECT_COPY[0].text;
+      for (var s = 1; s < VERIFY_CONNECT_COPY.length; s++) {
+        (function (step) {
+          _verifyState.connectTimers.push(setTimeout(function () {
+            if (_verifyState.phase === 'connecting') sub.textContent = step.text;
+          }, step.at));
+        })(VERIFY_CONNECT_COPY[s]);
+      }
+    }
+    _verifyState.connectTimers.push(setTimeout(function () {
+      if (_verifyState.phase !== 'connecting') return;
+      var c = document.getElementById('btnChangeDestination');
+      if (c) c.disabled = false;
+      if (sub) sub.textContent = 'This is taking longer than usual.';
+    }, VERIFY_CONNECT_WATCHDOG_MS));
+    return;
+  }
+
+  // idle
+  btn.disabled = false;
+  btn.textContent = opts.label || btn.getAttribute('data-idle-label') || 'Verify';
+  if (sub && _verifyState.subheadingText) sub.textContent = _verifyState.subheadingText;
+  if (input && opts.clearCode) input.value = '';
+  if (input && opts.focus) { try { input.focus(); } catch (e) {} }
+  ensureResendTicking();
+}
+
+/**
+ * Auto-submit once the guest has 6 digits in the box.
+ *
+ * The WhatsApp authentication template ships a Copy-code button and iOS offers
+ * the SMS code above the keyboard, so paste/autofill is the expected input path
+ * — not typing followed by a deliberate tap. One `input` listener covers typing,
+ * paste and autofill.
+ */
+function maybeAutoSubmit(page) {
+  var input = document.getElementById('verifyCode');
+  if (!input) return;
+  var raw = input.value || '';
+  // A pasted "482913 is your … code" or "48 29 13" still needs cleaning.
+  var digits = raw.replace(/\D+/g, '').slice(0, 6);
+  if (digits !== raw) input.value = digits;
+  clearTimeout(_verifyState.autoTimer);
+  if (digits.length !== 6) return;
+  if (_verifyState.phase !== 'idle') return;
+  // Never auto-fire digits the server just refused — five attempts is not many,
+  // and a stubborn re-paste would burn them. A deliberate tap still retries.
+  if (digits === _verifyState.lastRejectedCode) return;
+  // Short delay so the 6th digit paints before the button becomes a spinner.
+  _verifyState.autoTimer = setTimeout(function () {
+    var live = document.getElementById('verifyCode');
+    if (_verifyState.phase === 'idle' && live && live.value === digits) checkCode(page);
+  }, 90);
 }
 
 function startVerification(page) {
@@ -244,13 +441,31 @@ function startVerification(page) {
   document.getElementById('step2').classList.add('hidden');
   card.classList.remove('hidden');
 
+  // Fresh entry — the guest may be arriving here a second time via "Use a
+  // different one", and a stale token or memo would misroute the next pass.
+  stopResendCountdown();
+  clearConnectTimers();
+  clearTimeout(_verifyState.autoTimer);
+  _verifyState.phase = 'idle';
+  _verifyState.token = null;
+  _verifyState.lastRejectedCode = null;
+  _verifyState.resendUntil = 0;
+  _verifyState.subheadingText = page.subheading;
+
   var picked = document.querySelector('input[name="verifyChannel"]:checked');
   _verifyState.channel = (picked && picked.value) || page.defaultChannel;
 
   document.getElementById('btnVerify').addEventListener('click', function () { checkCode(page); });
   document.getElementById('btnResend').addEventListener('click', function () { sendCode(); });
   document.getElementById('btnChangeDestination').addEventListener('click', function () {
-    clearInterval(_verifyState.resendTimer);
+    stopResendCountdown();
+    clearConnectTimers();
+    clearTimeout(_verifyState.autoTimer);
+    // The destination is about to change, so the token no longer matches what
+    // will be submitted — completeSubmission would null it out anyway.
+    _verifyState.token = null;
+    _verifyState.lastRejectedCode = null;
+    _verifyState.phase = 'idle';
     card.classList.add('hidden');
     document.getElementById('step1').classList.remove('hidden');
     // The guest re-enters via step 2, so the consent buttons must work again.
@@ -262,6 +477,7 @@ function startVerification(page) {
   document.getElementById('verifyCode').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); checkCode(page); }
   });
+  document.getElementById('verifyCode').addEventListener('input', function () { maybeAutoSubmit(page); });
   // Switching channel re-sends, so the live code always matches the chosen method.
   Array.prototype.forEach.call(document.querySelectorAll('input[name="verifyChannel"]'), function (radio) {
     radio.addEventListener('change', function () {
@@ -274,10 +490,10 @@ function startVerification(page) {
 }
 
 async function sendCode() {
-  if (_verifyState.sending) return;
-  _verifyState.sending = true;
-  var errEl = document.getElementById('verifyError');
-  if (errEl) errEl.style.display = 'none';
+  // Also blocks resend / channel-flip during verifying and connecting, both of
+  // which could otherwise start a second connect via the hand-offs below.
+  if (_verifyState.phase !== 'idle') return;
+  setVerifyState('sending');
 
   var body = Object.assign({
     channel: _verifyState.channel,
@@ -301,10 +517,12 @@ async function sendCode() {
     if (res.ok && data.verificationToken) { completeSubmission(data.verificationToken); return; }
 
     if (res.ok) {
-      var sub = document.getElementById('verifySubheading');
-      if (sub && data.destinationMasked) {
-        sub.textContent = 'Enter the 6-digit code we sent to ' + data.destinationMasked;
+      if (data.destinationMasked) {
+        setVerifySubheading('Enter the 6-digit code we sent to ' + data.destinationMasked);
       }
+      // A fresh code means the old rejection no longer applies.
+      _verifyState.lastRejectedCode = null;
+      setVerifyState('idle', { clearCode: true });
       startResendCountdown(data.resendInSeconds || 60);
       return;
     }
@@ -312,12 +530,10 @@ async function sendCode() {
     // A cooldown is NOT a failure — the guest reopened the captive browser and a
     // code is already in flight. Show the entry state with the countdown.
     if (data.code === 'resend_too_soon') {
-      var sub2 = document.getElementById('verifySubheading');
-      if (sub2) {
-        sub2.textContent = 'We already sent a code'
-          + (data.destinationMasked ? ' to ' + data.destinationMasked : '')
-          + ' — check your messages.';
-      }
+      setVerifySubheading('We already sent a code'
+        + (data.destinationMasked ? ' to ' + data.destinationMasked : '')
+        + ' — check your messages.');
+      setVerifyState('idle');
       startResendCountdown(data.retryAfterSeconds || 60);
       return;
     }
@@ -325,27 +541,32 @@ async function sendCode() {
     var alt = (Array.isArray(data.fallbackChannels) && data.fallbackChannels.length)
       ? 'You can also try: ' + data.fallbackChannels.join(', ') + '.'
       : '';
+    startResendCountdown(0);
     showVerifyError(data.code, alt);
-    startResendCountdown(0);
   } catch (e) {
-    showVerifyError(null);
     startResendCountdown(0);
+    showVerifyError(null);
   } finally {
-    _verifyState.sending = false;
+    // Only a path that neither handed off nor already transitioned lands here
+    // still 'sending' — e.g. a throw between the fetch and the state call.
+    if (_verifyState.phase === 'sending') setVerifyState('idle');
   }
 }
 
 async function checkCode(page) {
-  var btn = document.getElementById('btnVerify');
   var input = document.getElementById('verifyCode');
-  if (!btn || !input || btn.disabled) return;
-  var code = (input.value || '').trim();
-  if (!/^\d{4,8}$/.test(code)) { showVerifyError('invalid_code'); return; }
+  if (!input) return;
+  // The one double-submit gate, and it is synchronous — so an Enter key repeat
+  // or a fast double-tap cannot get a second request away.
+  if (_verifyState.phase !== 'idle') return;
+  // A connect that failed AFTER the code was accepted retries the CONNECT, not
+  // the code: the token is good for 15 minutes, the consumed-code grace only 120s.
+  if (_verifyState.token) { completeSubmission(_verifyState.token); return; }
 
-  btn.disabled = true;
-  btn.textContent = 'Verifying…';
-  var errEl = document.getElementById('verifyError');
-  if (errEl) errEl.style.display = 'none';
+  var code = (input.value || '').trim();
+  if (!/^\d{4,8}$/.test(code)) { showVerifyError('invalid_code', '', { focus: true }); return; }
+
+  setVerifyState('verifying');
 
   var body = Object.assign({
     channel: _verifyState.channel,
@@ -364,7 +585,9 @@ async function checkCode(page) {
 
     if (res.status === 409) { completeSubmission(null); return; }
     if (res.ok && data.verificationToken) {
-      clearInterval(_verifyState.resendTimer);
+      stopResendCountdown();
+      _verifyState.token = data.verificationToken;
+      // Sets 'connecting' synchronously, so the finally below stands down.
       completeSubmission(data.verificationToken);
       return;
     }
@@ -372,12 +595,22 @@ async function checkCode(page) {
     var left = (typeof data.attemptsLeft === 'number')
       ? data.attemptsLeft + ' attempt' + (data.attemptsLeft === 1 ? '' : 's') + ' left.'
       : '';
-    showVerifyError(data.code, left);
+    _verifyState.lastRejectedCode = code;
+    showVerifyError(data.code, left, {
+      // Clear only when the digits themselves are dead. A transport failure
+      // probably had the right code — don't make them retype it.
+      clearCode: data.code === 'invalid_code' || data.code === 'code_expired'
+              || data.code === 'too_many_attempts',
+      focus: data.code === 'invalid_code',
+    });
   } catch (e) {
     showVerifyError(null);
   } finally {
-    btn.disabled = false;
-    btn.textContent = page.verifyButtonText;
+    // Only a path that neither handed off nor painted an error lands here still
+    // 'verifying' — e.g. a throw between the fetch and the state call. Guarding
+    // on the phase rather than a handedOff flag also catches a throw AFTER the
+    // hand-off, which is what used to reset the button mid-connect.
+    if (_verifyState.phase === 'verifying') setVerifyState('idle');
   }
 }
 
@@ -385,6 +618,16 @@ async function checkCode(page) {
 async function completeSubmission(verificationToken) {
   var p = _pendingSubmission;
   if (!p) return;
+  // The guard that actually matters. A second /create-user takes the reconnect
+  // branch server-side, which re-runs the marketing dispatchers — the guest gets
+  // a second welcome message and it is billable.
+  if (_submitInFlight) return;
+  _submitInFlight = true;
+  // Runs synchronously before the first await, so every caller's finally sees
+  // 'connecting'. Placed HERE rather than in checkCode so it covers all four
+  // hand-off points: checkCode 200, checkCode 409, sendCode 409, and sendCode's
+  // remembered-device token. No-op when the card is absent or hidden.
+  setVerifyState('connecting');
 
   var err        = document.getElementById('step2Error');
   var btnAccept  = document.getElementById('btnAccept');
@@ -490,11 +733,16 @@ async function completeSubmission(verificationToken) {
     document.getElementById('portalForm').submit();
 
   } catch (e) {
-    // The verify step may be the one on screen, so report the failure there.
+    _submitInFlight = false;
+    // The verify step may be the one on screen, so hand THAT card back rather
+    // than only painting an error on it. The token is kept, so the retry re-runs
+    // just the connect and never re-hits /verify/check.
     var stepVerify = document.getElementById('stepVerify');
-    var verifyErr = document.getElementById('verifyError');
-    if (stepVerify && !stepVerify.classList.contains('hidden') && verifyErr) {
-      showErr(verifyErr, 'Something went wrong. Please try again.');
+    if (stepVerify && !stepVerify.classList.contains('hidden')) {
+      setVerifyState('idle', {
+        error: 'Something went wrong. Please try again.',
+        label: 'Try again',
+      });
     } else if (err) {
       showErr(err, 'Something went wrong. Please try again.');
     }
@@ -505,6 +753,19 @@ async function completeSubmission(verificationToken) {
     if (btnDecline) btnDecline.disabled = false;
   }
 }
+
+// Aruba POSTs away and UniFi navigates to /success; either way a Back tap can
+// restore this page from bfcache with the card frozen mid-connect and every
+// control disabled. Hand it back rather than strand them.
+//
+// Trade-off: this (and the 20s watchdog) can let a guest retry a /create-user
+// that actually succeeded before the page froze. That is strictly better than a
+// permanently dead card; the clean fix is an idempotency key on the server.
+window.addEventListener('pageshow', function (e) {
+  if (!e.persisted) return;
+  _submitInFlight = false;
+  if (_verifyState.phase === 'connecting') setVerifyState('idle', { label: 'Try again' });
+});
 
 // ── 6. Document modal (Privacy Policy + Terms of Service) ─────────────────
 var docCache = {};   // keyed by 'privacy' | 'terms'
