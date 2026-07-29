@@ -123,7 +123,14 @@ Two consequences worth knowing:
   mini-browsers drop responses constantly; a hard delete turns one dropped response into a dead end.
 
 Set a Firestore **TTL policy on `ttlAt`** (console or `gcloud firestore fields ttls update`) — this is
-not expressible in `firestore.indexes.json`.
+not expressible in `firestore.indexes.json`. Without it, spent code docs simply accumulate; nothing
+breaks.
+
+**No composite index is needed.** The remembered-device lookup filters
+`phoneE164 == …` + `captivePortalAccessPointId == …` with no `orderBy` or range, and Firestore serves
+equality-only queries by merging the single-field indexes it maintains automatically. The same shape
+already runs in production for reconnect detection (`email` + `captivePortalAccessPointId`) with no
+composite index deployed.
 
 ## The preview never sends
 
