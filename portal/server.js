@@ -294,6 +294,143 @@ function escapeHtml(value) {
 }
 
 /**
+ * The swarm.cgi login form plus the countdown UI, injected into the venue's own
+ * connected template for Android guests.
+ *
+ * Android's CNA closes the instant swarm.cgi authenticates, so /success is never
+ * reached — the connected page has to be shown BEFORE auth, on this response.
+ *
+ * The timer is armed before any DOM work and every cosmetic step is wrapped, so
+ * a rendering failure delays nobody: the guest still gets online at t+5s. Auth
+ * must never depend on the card looking right.
+ */
+function androidConnectTail({ switchUrl, email, buttonUrl, buttonHost, primaryColor }) {
+  return `
+<form id="hfArubaForm" method="POST" action="${escapeHtml(switchUrl)}" style="display:none">
+  <input type="hidden" name="cmd" value="authenticate">
+  <input type="hidden" name="user" value="${escapeHtml(email)}">
+  <input type="hidden" name="password" value="guest">
+  <input type="hidden" name="url" value="${escapeHtml(buttonUrl)}">
+</form>
+<script>
+(function () {
+  var form = document.getElementById('hfArubaForm');
+  var secs = 5, submitted = false, label = null, btn = null;
+
+  function go() {
+    if (submitted) return;
+    submitted = true;
+    clearInterval(timer);
+    try { if (btn) { btn.disabled = true; btn.textContent = 'Connecting\\u2026'; } } catch (e) {}
+    form.submit();
+  }
+  var timer = setInterval(function () {
+    secs -= 1;
+    try { if (label) label.textContent = 'Activating connection in ' + secs + 's\\u2026'; } catch (e) {}
+    if (secs <= 0) go();
+  }, 1000);
+
+  try {
+    // config.js has already built #stepConnected from the venue's config by the
+    // time this runs — it is the last script in the body.
+    var card = document.getElementById('stepConnected') || document.body;
+    var sampleBtn = document.querySelector('.btn-primary');
+
+    var hint = document.createElement('p');
+    hint.className = 'section-sub';
+    hint.textContent = 'Open your browser and visit:';
+
+    var box = document.createElement('div');
+    box.style.cssText = 'background:rgba(0,0,0,.05);border-radius:10px;padding:14px;margin:12px 0;text-align:center';
+    var host = document.createElement('span');
+    host.textContent = ${JSON.stringify(buttonHost)};
+    host.style.cssText = 'font-size:20px;font-weight:700;letter-spacing:.5px;color:${primaryColor}';
+    box.appendChild(host);
+
+    label = document.createElement('p');
+    label.className = 'section-sub';
+    label.style.cssText = 'font-size:12px;opacity:.7;margin:0 0 12px';
+    label.textContent = 'Activating connection in ' + secs + 's\\u2026';
+
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = sampleBtn ? sampleBtn.className : 'btn-primary';
+    btn.textContent = 'Connect Now';
+    btn.onclick = go;
+
+    card.appendChild(hint);
+    card.appendChild(box);
+    card.appendChild(label);
+    card.appendChild(btn);
+  } catch (e) { /* cosmetic only — the timer above still authenticates */ }
+})();
+</script>`;
+}
+
+/**
+ * Pre-verification fallback: the original self-contained card. Used when the
+ * venue's template cannot be rendered, so a template problem can never stop an
+ * Android guest getting online.
+ */
+function androidFallbackCard({ switchUrl, email, buttonUrl, buttonHost, primaryColor }) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>You're Connected!</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#667eea,#764ba2);padding:20px}
+    .card{background:#fff;border-radius:16px;padding:36px 28px;width:100%;max-width:360px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+    .icon{width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,#48bb78,#38a169);margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
+    h1{font-size:22px;color:#333;margin-bottom:8px}
+    .sub{font-size:14px;color:#888;margin-bottom:20px;line-height:1.5}
+    .url-box{background:#f0f4ff;border-radius:10px;padding:14px;margin-bottom:20px}
+    .url-box span{font-size:20px;font-weight:700;color:${primaryColor};letter-spacing:.5px}
+    .hint{font-size:12px;color:#aaa;margin-bottom:20px}
+    button{width:100%;padding:14px;background:${primaryColor};color:#fff;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+    </div>
+    <h1>You're Connected!</h1>
+    <p class="sub">You now have WiFi access.<br>Open your browser and visit:</p>
+    <div class="url-box"><span>${escapeHtml(buttonHost)}</span></div>
+    <p class="hint" id="hint">Activating connection in <strong id="n">5</strong>s&hellip;</p>
+    <button id="btn" onclick="connect()">Connect Now</button>
+  </div>
+
+  <form id="f" method="POST" action="${escapeHtml(switchUrl)}" style="display:none">
+    <input type="hidden" name="cmd" value="authenticate">
+    <input type="hidden" name="user" value="${escapeHtml(email)}">
+    <input type="hidden" name="password" value="guest">
+    <input type="hidden" name="url" value="${escapeHtml(buttonUrl)}">
+  </form>
+
+  <script>
+    function connect() {
+      clearInterval(t);
+      document.getElementById('btn').disabled = true;
+      document.getElementById('btn').textContent = 'Connecting…';
+      document.getElementById('f').submit();
+    }
+    var n = 5;
+    var t = setInterval(function() {
+      n--;
+      document.getElementById('n').textContent = n;
+      if (n <= 0) connect();
+    }, 1000);
+  </script>
+</body>
+</html>`;
+}
+
+/**
  * Local validation of a guest verification token.
  *
  * This is the Aruba grant path: /submit emits an auto-submitting form to
@@ -369,9 +506,11 @@ app.post('/submit', async (req, res) => {
   // backend is unreachable — auth must never block on config.
   let buttonUrl = 'https://heidifi.ai/';
   let primaryColor = '#667eea';
+  // Hoisted: the Android branch below renders the venue's own template from it.
+  let config = {};
   try {
     const result = await fetchSplashConfig(apmac);
-    const config = (result && result.config) || {};
+    config = (result && result.config) || {};
 
     // Verification gate for the Aruba path. `verificationPage` here is the
     // RESOLVED config (the backend already subtracted unusable channels), so
@@ -416,66 +555,42 @@ app.post('/submit', async (req, res) => {
   const successReturnUrl = `http://${portalDomain}/success`
     + `?apmac=${encodeURIComponent(apmac || '')}&mac=${encodeURIComponent(mac || '')}`;
 
+  const cardArgs = { switchUrl, email, buttonUrl, buttonHost, primaryColor };
+
   if (isAndroid) {
-    // Android closes the CNA the instant it detects internet (right when swarm.cgi
-    // authenticates), so any success page shown AFTER auth is never seen.
-    // Fix: show the destination info FIRST with a 5-second countdown, THEN submit
-    // to swarm.cgi. The user sees "open heidifi.ai" before the CNA closes.
-    res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>You're Connected!</title>
-  <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#667eea,#764ba2);padding:20px}
-    .card{background:#fff;border-radius:16px;padding:36px 28px;width:100%;max-width:360px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.15)}
-    .icon{width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,#48bb78,#38a169);margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
-    h1{font-size:22px;color:#333;margin-bottom:8px}
-    .sub{font-size:14px;color:#888;margin-bottom:20px;line-height:1.5}
-    .url-box{background:#f0f4ff;border-radius:10px;padding:14px;margin-bottom:20px}
-    .url-box span{font-size:20px;font-weight:700;color:${primaryColor};letter-spacing:.5px}
-    .hint{font-size:12px;color:#aaa;margin-bottom:20px}
-    button{width:100%;padding:14px;background:${primaryColor};color:#fff;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer}
-    button:disabled{opacity:.6;cursor:not-allowed}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">
-      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
-    </div>
-    <h1>You're Connected!</h1>
-    <p class="sub">You now have WiFi access.<br>Open your browser and visit:</p>
-    <div class="url-box"><span>${escapeHtml(buttonHost)}</span></div>
-    <p class="hint" id="hint">Activating connection in <strong id="n">5</strong>s&hellip;</p>
-    <button id="btn" onclick="connect()">Connect Now</button>
-  </div>
-
-  <form id="f" method="POST" action="${escapeHtml(switchUrl)}" style="display:none">
-    <input type="hidden" name="cmd" value="authenticate">
-    <input type="hidden" name="user" value="${escapeHtml(email)}">
-    <input type="hidden" name="password" value="guest">
-    <input type="hidden" name="url" value="${escapeHtml(buttonUrl)}">
-  </form>
-
-  <script>
-    function connect() {
-      clearInterval(t);
-      document.getElementById('btn').disabled = true;
-      document.getElementById('btn').textContent = 'Connecting\u2026';
-      document.getElementById('f').submit();
+    // Android closes the CNA the instant swarm.cgi authenticates, so /success is
+    // never reached. Render the venue's OWN connected template here instead, and
+    // inject the login form + countdown into it — Android then sees the same
+    // styled card every other device gets, rather than a generic one.
+    try {
+      // Pre-auth sanitisation. The guest has no internet yet, so the venue's
+      // destination button and any auto-redirect would navigate away from the
+      // very page that authenticates them. Custom fields stay: they post to the
+      // portal, which is inside the walled garden.
+      const preAuthConfig = {
+        ...config,
+        view: 'connected',
+        connectedPage: {
+          ...(config.connectedPage || {}),
+          showButton: false,
+          redirectEnabled: false,
+        },
+      };
+      const rawId = preAuthConfig.templateId || DEFAULT_TEMPLATE;
+      const templateId = VALID_TEMPLATES.includes(rawId) ? rawId : DEFAULT_TEMPLATE;
+      const html = await ejs.renderFile(path.join(TEMPLATES_DIR, `${templateId}.html`), {
+        portalConfig: preAuthConfig,
+        portalConfigJson: JSON.stringify(preAuthConfig),
+        previewMode: false,
+      });
+      const gated = injectBootGate(html, preAuthConfig);
+      // Injected last in the body so config.js has already built #stepConnected.
+      return res.send(gated.replace('</body>', `${androidConnectTail(cardArgs)}\n</body>`));
+    } catch (err) {
+      // A template problem must never stop a guest getting online.
+      console.error('[ANDROID CONNECT RENDER ERROR]', err);
+      return res.send(androidFallbackCard(cardArgs));
     }
-    var n = 5;
-    var t = setInterval(function() {
-      n--;
-      document.getElementById('n').textContent = n;
-      if (n <= 0) connect();
-    }, 1000);
-  </script>
-</body>
-</html>`);
   } else {
     // iOS / macOS / other: auto-submit immediately, then /success handles opening
     // the real browser via window.open (iOS) or a target=_blank button (macOS).

@@ -9,14 +9,6 @@
       ]
     },
     {
-      "collectionGroup": "CaptivePortal_Users",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "phoneE164", "order": "ASCENDING" },
-        { "fieldPath": "captivePortalAccessPointId", "order": "ASCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "CaptivePortal_Documents",
       "queryScope": "COLLECTION",
       "fields": [
