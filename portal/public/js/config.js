@@ -394,6 +394,8 @@ function renderVerifyStep(cfg, opts) {
   var sub = document.createElement('p');
   sub.className = 'section-sub';
   sub.id = 'verifySubheading';
+  // The connecting state advances this copy while the guest waits — announce it.
+  sub.setAttribute('aria-live', 'polite');
   sub.textContent = page.subheading;
   card.appendChild(sub);
 
@@ -438,6 +440,11 @@ function renderVerifyStep(cfg, opts) {
   codeInput.setAttribute('pattern', '[0-9]*');
   codeInput.setAttribute('autocomplete', 'one-time-code');
   codeInput.setAttribute('maxlength', '6');
+  codeInput.setAttribute('enterkeyhint', 'go');
+  codeInput.setAttribute('autocorrect', 'off');
+  codeInput.setAttribute('autocapitalize', 'off');
+  codeInput.setAttribute('spellcheck', 'false');
+  codeInput.setAttribute('aria-describedby', 'verifyError');
   codeInput.placeholder = '000000';
   codeGroup.appendChild(codeLabel);
   codeGroup.appendChild(codeInput);
@@ -446,6 +453,7 @@ function renderVerifyStep(cfg, opts) {
   var err = document.createElement('div');
   err.className = 'error-msg';
   err.id = 'verifyError';
+  err.setAttribute('role', 'alert');
   err.style.display = 'none';
   card.appendChild(err);
 
@@ -453,6 +461,9 @@ function renderVerifyStep(cfg, opts) {
   submit.type = 'button';
   submit.id = 'btnVerify';
   submit.className = btnClass;
+  // Lets the state painter restore the tenant's own label without threading the
+  // config through every call.
+  submit.setAttribute('data-idle-label', page.verifyButtonText);
   submit.textContent = page.verifyButtonText;
   card.appendChild(submit);
 
