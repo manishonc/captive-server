@@ -172,6 +172,36 @@ export interface ConsentPageConfig {
   declineButtonText: string;
 }
 
+export type VerificationChannel = 'email' | 'sms' | 'whatsapp';
+
+/**
+ * Guest contact verification (OTP). The runtime defaults and the resolver that
+ * subtracts unusable channels live in services/verificationConfig.ts — this is
+ * the shape only.
+ *
+ * `enabled` defaults to FALSE everywhere. Every venue predating this key reads
+ * through the defaults, so a true default would put an OTP wall in front of the
+ * whole estate's wifi on deploy.
+ */
+export interface VerificationPageConfig {
+  enabled: boolean;
+  channels: Record<VerificationChannel, { enabled: boolean }>;
+  /** Pre-selected channel; always one of the enabled set after resolution. */
+  defaultChannel: VerificationChannel;
+  /** When false, only defaultChannel is offered. */
+  allowGuestChoice: boolean;
+  /** 'any' = one contact point suffices. 'all' = every enabled target. */
+  requirement: 'any' | 'all';
+  heading: string;
+  subheading: string;
+  codeInputLabel: string;
+  sendButtonText: string;
+  verifyButtonText: string;
+  resendLabel: string;
+  /** Skip re-verification on the same device for N days. 0 = every visit. */
+  rememberDays: number;
+}
+
 export interface SplashScreenConfig {
   templateId: string;
   title: string;
@@ -190,6 +220,7 @@ export interface SplashScreenConfig {
   showTermsOfService: boolean;
   loginPage: LoginPageConfig;
   consentPage: ConsentPageConfig;
+  verificationPage: VerificationPageConfig;
   connectedPage: ConnectedPageConfig;
 }
 

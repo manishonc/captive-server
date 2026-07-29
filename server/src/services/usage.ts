@@ -67,3 +67,35 @@ export async function recordSends(tenantUserId: string, channel: Channel, count:
     console.error('[USAGE] recordSends failed:', err);
   }
 }
+
+/**
+ * Record verification-code sends, separately from marketing.
+ *
+ * These are deliberately NOT counted in `usage[channel].sent` and consume no
+ * credits, for two reasons: an OTP sits on the critical path to internet access
+ * so a spent quota must never block one, and folding them into the marketing
+ * counters would silently inflate a tenant's "emails sent this month".
+ *
+ * `getEntitlements` ignores these keys, so the `remaining` math is untouched.
+ * They exist so the real per-message cost stays visible for reporting/billing.
+ */
+export async function recordOtpSends(tenantUserId: string, channel: Channel, count: number): Promise<void> {
+  if (!tenantUserId || count <= 0) return;
+  const key = channel === 'email' ? 'otpEmail' : channel === 'sms' ? 'otpSms' : 'otpWhatsapp';
+  try {
+    await db
+      .collection(USAGE_COLLECTION)
+      .doc(usageDocId(tenantUserId))
+      .set(
+        {
+          tenantUserId,
+          month: currentUsageMonth(),
+          [key]: { sent: FieldValue.increment(count) },
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+  } catch (err) {
+    console.error('[USAGE] recordOtpSends failed:', err);
+  }
+}

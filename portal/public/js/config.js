@@ -276,14 +276,26 @@ function buildCustomFieldGroup(field, fieldGroupClass, opts) {
 }
 
 // Switch which step is visible based on CONFIG.view: 'connected' (GET /success),
-// 'consent' (CMS preview of step 2), or default → the login form. Re-runnable so
-// the CMS live preview can flip views without an iframe reload.
+// 'consent' (CMS preview of step 2), 'verify' (CMS preview of the OTP step), or
+// default → the login form. Re-runnable so the CMS live preview can flip views
+// without an iframe reload.
 function applyView(cfg) {
   if (cfg.view === 'connected') { renderConnectedView(cfg); return; }
   var previous = document.getElementById('stepConnected');
   if (previous) previous.parentNode.removeChild(previous);
   var step1 = document.getElementById('step1');
   var step2 = document.getElementById('step2');
+  var stepVerify = document.getElementById('stepVerify');
+  if (cfg.view === 'verify') {
+    // Preview only — renderVerifyStep is idempotent and rebuilds on every push
+    // so copy edits appear live. It sends nothing: PREVIEW_MODE short-circuits
+    // the network call, and the backend refuses preview requests regardless.
+    if (step1) step1.classList.add('hidden');
+    if (step2) step2.classList.add('hidden');
+    renderVerifyStep(cfg, { preview: true });
+    return;
+  }
+  if (stepVerify) stepVerify.classList.add('hidden');
   if (cfg.view === 'consent') {
     if (step1) step1.classList.add('hidden');
     if (step2) step2.classList.remove('hidden');
@@ -291,6 +303,189 @@ function applyView(cfg) {
     if (step1) step1.classList.remove('hidden');
     if (step2) step2.classList.add('hidden');
   }
+}
+
+// ── Verification step ──────────────────────────────────────────────────────
+// MIRROR SITE — the shape below must agree with the other five listed in the
+// header of cms/app/api/captive-portal/_lib/connected-page.js.
+var VERIFY_DEFAULTS = {
+  enabled: false,
+  channels: { email: { enabled: true }, sms: { enabled: false }, whatsapp: { enabled: false } },
+  defaultChannel: 'email',
+  allowGuestChoice: false,
+  requirement: 'any',
+  heading: 'Verify your details',
+  subheading: "We'll send you a code to confirm it's you.",
+  codeInputLabel: 'Verification code',
+  sendButtonText: 'Send code',
+  verifyButtonText: 'Verify',
+  resendLabel: 'Resend code',
+  rememberDays: 30,
+};
+
+var VERIFY_CHANNEL_LABELS = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
+
+// Same "trust nothing" rule as normalizeConnectedPage: this also runs on config
+// pushed via the preview postMessage, which is not origin-checked by default.
+function normalizeVerification(vp) {
+  vp = vp || {};
+  var raw = (vp.channels && typeof vp.channels === 'object') ? vp.channels : {};
+  var channels = {};
+  ['email', 'sms', 'whatsapp'].forEach(function (k) {
+    var c = raw[k];
+    channels[k] = {
+      enabled: (c && typeof c === 'object' && c.enabled !== undefined)
+        ? c.enabled === true
+        : VERIFY_DEFAULTS.channels[k].enabled,
+    };
+  });
+  var active = ['email', 'sms', 'whatsapp'].filter(function (k) { return channels[k].enabled; });
+  var def = active.indexOf(vp.defaultChannel) !== -1 ? vp.defaultChannel : (active[0] || 'email');
+  function str(v, fallback) {
+    return (typeof v === 'string' && v.trim()) ? v : fallback;
+  }
+  return {
+    // Never render a step with nothing to send from — that strands the guest.
+    enabled: vp.enabled === true && active.length > 0,
+    channels: channels,
+    activeChannels: active,
+    defaultChannel: def,
+    allowGuestChoice: vp.allowGuestChoice === true,
+    requirement: vp.requirement === 'all' ? 'all' : 'any',
+    heading: str(vp.heading, VERIFY_DEFAULTS.heading),
+    subheading: (vp.subheading === undefined || vp.subheading === null)
+      ? VERIFY_DEFAULTS.subheading : String(vp.subheading),
+    codeInputLabel: str(vp.codeInputLabel, VERIFY_DEFAULTS.codeInputLabel),
+    sendButtonText: str(vp.sendButtonText, VERIFY_DEFAULTS.sendButtonText),
+    verifyButtonText: str(vp.verifyButtonText, VERIFY_DEFAULTS.verifyButtonText),
+    resendLabel: str(vp.resendLabel, VERIFY_DEFAULTS.resendLabel),
+  };
+}
+
+/**
+ * Builds #stepVerify from the shared class vocabulary, exactly as
+ * renderConnectedView does — see the comment there for why a deterministic
+ * rebuild beats cloning #step1. This is also why no template markup changes:
+ * all 33 get the step for free.
+ */
+function renderVerifyStep(cfg, opts) {
+  opts = opts || {};
+  var step1 = document.getElementById('step1');
+  if (!step1) return null;
+  var page = normalizeVerification(cfg.verificationPage);
+
+  var previous = document.getElementById('stepVerify');
+  if (previous) previous.parentNode.removeChild(previous);
+
+  var card = document.createElement('div');
+  card.id = 'stepVerify';
+  card.className = (step1.className.replace(/\bhidden\b/g, ' ').replace(/\s+/g, ' ').trim()) || 'step';
+
+  var sampleGroup = document.querySelector('.field-group');
+  var fieldGroupClass = sampleGroup ? sampleGroup.className : 'field-group';
+  var sampleBtn = document.getElementById('btnNext') || document.querySelector('.btn-primary');
+  var btnClass = sampleBtn ? sampleBtn.className : 'btn-primary';
+
+  var heading = document.createElement('h1');
+  heading.className = 'section-heading';
+  heading.textContent = page.heading;
+  card.appendChild(heading);
+
+  var sub = document.createElement('p');
+  sub.className = 'section-sub';
+  sub.id = 'verifySubheading';
+  sub.textContent = page.subheading;
+  card.appendChild(sub);
+
+  // Channel picker, only when the tenant lets the guest choose between more
+  // than one. A single-channel venue gets no redundant radio group.
+  if (page.allowGuestChoice && page.activeChannels.length > 1) {
+    var chooser = document.createElement('div');
+    chooser.className = fieldGroupClass;
+    chooser.id = 'verifyChannelGroup';
+    var chooserLabel = document.createElement('label');
+    chooserLabel.className = 'field-label';
+    chooserLabel.textContent = 'Send my code by';
+    chooser.appendChild(chooserLabel);
+    page.activeChannels.forEach(function (channel) {
+      var wrap = document.createElement('label');
+      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;font-size:14px;cursor:pointer';
+      var radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'verifyChannel';
+      radio.value = channel;
+      radio.checked = channel === page.defaultChannel;
+      radio.setAttribute('data-verify-channel', channel);
+      wrap.appendChild(radio);
+      wrap.appendChild(document.createTextNode(VERIFY_CHANNEL_LABELS[channel] || channel));
+      chooser.appendChild(wrap);
+    });
+    card.appendChild(chooser);
+  }
+
+  var codeGroup = document.createElement('div');
+  codeGroup.className = fieldGroupClass;
+  var codeLabel = document.createElement('label');
+  codeLabel.className = 'field-label';
+  codeLabel.setAttribute('for', 'verifyCode');
+  codeLabel.textContent = page.codeInputLabel;
+  var codeInput = document.createElement('input');
+  // NOT type="number": codes are zero-padded, and number inputs strip leading
+  // zeros and render spinners. inputmode gives the numeric keypad anyway.
+  codeInput.type = 'text';
+  codeInput.id = 'verifyCode';
+  codeInput.setAttribute('inputmode', 'numeric');
+  codeInput.setAttribute('pattern', '[0-9]*');
+  codeInput.setAttribute('autocomplete', 'one-time-code');
+  codeInput.setAttribute('maxlength', '6');
+  codeInput.placeholder = '000000';
+  codeGroup.appendChild(codeLabel);
+  codeGroup.appendChild(codeInput);
+  card.appendChild(codeGroup);
+
+  var err = document.createElement('div');
+  err.className = 'error-msg';
+  err.id = 'verifyError';
+  err.style.display = 'none';
+  card.appendChild(err);
+
+  var submit = document.createElement('button');
+  submit.type = 'button';
+  submit.id = 'btnVerify';
+  submit.className = btnClass;
+  submit.textContent = page.verifyButtonText;
+  card.appendChild(submit);
+
+  var resend = document.createElement('button');
+  resend.type = 'button';
+  resend.id = 'btnResend';
+  resend.className = 'verify-link';
+  resend.style.cssText = 'display:block;margin:12px auto 0;background:none;border:0;'
+    + 'font-size:13px;text-decoration:underline;cursor:pointer;color:inherit;opacity:.75';
+  resend.textContent = page.resendLabel;
+  card.appendChild(resend);
+
+  var change = document.createElement('button');
+  change.type = 'button';
+  change.id = 'btnChangeDestination';
+  change.style.cssText = resend.style.cssText;
+  change.textContent = 'Use a different one';
+  card.appendChild(change);
+
+  if (opts.preview) {
+    var note = document.createElement('p');
+    note.style.cssText = 'margin:14px 0 0;font-size:12px;opacity:.6;text-align:center';
+    note.textContent = 'Preview only — no code is sent.';
+    card.appendChild(note);
+    // Hard-coded sample, never derived from real guest or tenant data.
+    sub.textContent = page.subheading + ' (e.g. j•••@example.com)';
+    submit.disabled = true;
+    resend.disabled = true;
+    change.disabled = true;
+  }
+
+  step1.parentNode.insertBefore(card, step1);
+  return card;
 }
 
 // Timer state for the connected view. Declared HERE, above the initial
@@ -662,7 +857,7 @@ if (window.PREVIEW_MODE) {
     // Only fields applyable without a reload; templateId is handled via iframe reload.
     ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo',
      'showPrivacyPolicy', 'showTermsOfService',
-     'loginPage', 'consentPage', 'connectedPage', 'view'].forEach(function (k) {
+     'loginPage', 'consentPage', 'verificationPage', 'connectedPage', 'view'].forEach(function (k) {
       if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
     });
     applyPortalConfig(CONFIG);

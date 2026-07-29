@@ -119,7 +119,12 @@ async function waitForInternet(timeoutMs) {
   return false;
 }
 
-// ── 5. Step 2 → Submit ────────────────────────────────────────────────────
+// ── 5. Step 2 → (verify) → Submit ─────────────────────────────────────────
+// Everything gathered at consent time, held while the guest verifies. Module
+// scope so the verify handlers can finish the original submit without re-reading
+// a form that is now hidden.
+var _pendingSubmission = null;
+
 async function submitConsent(marketing) {
   if (window.PREVIEW_MODE) {
     var previewQs = new URLSearchParams({ preview: '1' });
@@ -153,12 +158,256 @@ async function submitConsent(marketing) {
     marketing:     marketingConsent,
   })) + '; max-age=31536000; path=/; SameSite=Lax';
 
-  var firstName = document.getElementById('firstName').value.trim();
-  var lastName  = document.getElementById('lastName').value.trim();
-  var email     = document.getElementById('email').value.trim();
-  var phone     = document.getElementById('phone').value.trim();
-  var dialCode  = document.getElementById('selectedCode').textContent;
-  var splashResponses = collectSplashResponses();
+  _pendingSubmission = {
+    firstName: document.getElementById('firstName').value.trim(),
+    lastName:  document.getElementById('lastName').value.trim(),
+    email:     document.getElementById('email').value.trim(),
+    phone:     document.getElementById('phone').value.trim(),
+    dialCode:  document.getElementById('selectedCode').textContent,
+    splashResponses: collectSplashResponses(),
+    privacyPolicyConsent: privacyPolicyConsent,
+    termsConsent: termsConsent,
+    marketingConsent: marketingConsent,
+  };
+
+  // Verification sits AFTER consent, so a code is never sent to someone who then
+  // declines. A guest who declined MARKETING still verifies — this is about the
+  // contact details being real, not about marketing permission.
+  var verification = normalizeVerification(CONFIG.verificationPage);
+  if (verification.enabled) {
+    startVerification(verification);
+    return;
+  }
+
+  completeSubmission(null);
+}
+
+// ── 5b. Verification step ─────────────────────────────────────────────────
+var _verifyState = { channel: null, resendTimer: null, sending: false };
+
+var VERIFY_ERRORS = {
+  invalid_code:             'That code is not right. Please check and try again.',
+  code_expired:             'That code expired. Send a new one to continue.',
+  too_many_attempts:        'Too many attempts. Please wait a few minutes and try again.',
+  too_many_requests:        'Too many requests. Please wait a few minutes and try again.',
+  invalid_destination:      'That contact detail does not look right. Go back and check it.',
+  undeliverable:            'We could not reach you there.',
+  channel_unavailable:      'That method is unavailable right now.',
+  channel_not_enabled:      'That method is not available here.',
+  provider_error:           'We could not send your code. Please try again.',
+  ap_not_registered:        'This WiFi point is not set up. Please ask staff for help.',
+  verification_unavailable: 'Verification is unavailable right now. Please ask staff for help.',
+};
+
+function showVerifyError(code, extra) {
+  var el = document.getElementById('verifyError');
+  if (!el) return;
+  var msg = VERIFY_ERRORS[code] || 'Something went wrong. Please try again.';
+  showErr(el, extra ? msg + ' ' + extra : msg);
+}
+
+function verifyDestinationPayload() {
+  return {
+    email: _pendingSubmission.email,
+    phone: _pendingSubmission.phone,
+    phoneCountryCode: _pendingSubmission.dialCode,
+  };
+}
+
+function startResendCountdown(seconds) {
+  var btn = document.getElementById('btnResend');
+  if (!btn) return;
+  var label = normalizeVerification(CONFIG.verificationPage).resendLabel;
+  var left = Math.max(0, seconds || 0);
+  clearInterval(_verifyState.resendTimer);
+  function tick() {
+    if (left <= 0) {
+      clearInterval(_verifyState.resendTimer);
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = label + ' (' + left + 's)';
+    left -= 1;
+  }
+  tick();
+  _verifyState.resendTimer = setInterval(tick, 1000);
+}
+
+function startVerification(page) {
+  var card = renderVerifyStep(CONFIG, { preview: false });
+  // No card means no #step1 to build from — connect rather than strand.
+  if (!card) { completeSubmission(null); return; }
+
+  document.getElementById('step1').classList.add('hidden');
+  document.getElementById('step2').classList.add('hidden');
+  card.classList.remove('hidden');
+
+  var picked = document.querySelector('input[name="verifyChannel"]:checked');
+  _verifyState.channel = (picked && picked.value) || page.defaultChannel;
+
+  document.getElementById('btnVerify').addEventListener('click', function () { checkCode(page); });
+  document.getElementById('btnResend').addEventListener('click', function () { sendCode(); });
+  document.getElementById('btnChangeDestination').addEventListener('click', function () {
+    clearInterval(_verifyState.resendTimer);
+    card.classList.add('hidden');
+    document.getElementById('step1').classList.remove('hidden');
+    // The guest re-enters via step 2, so the consent buttons must work again.
+    var a = document.getElementById('btnAccept');
+    var d = document.getElementById('btnDecline');
+    if (a) { a.disabled = false; a.textContent = normalizeConsentPage(CONFIG).acceptButtonText; }
+    if (d) d.disabled = false;
+  });
+  document.getElementById('verifyCode').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); checkCode(page); }
+  });
+  // Switching channel re-sends, so the live code always matches the chosen method.
+  Array.prototype.forEach.call(document.querySelectorAll('input[name="verifyChannel"]'), function (radio) {
+    radio.addEventListener('change', function () {
+      _verifyState.channel = radio.value;
+      sendCode();
+    });
+  });
+
+  sendCode();
+}
+
+async function sendCode() {
+  if (_verifyState.sending) return;
+  _verifyState.sending = true;
+  var errEl = document.getElementById('verifyError');
+  if (errEl) errEl.style.display = 'none';
+
+  var body = Object.assign({
+    channel: _verifyState.channel,
+    apmac: apMac(),
+    mac: clientMac(),
+  }, verifyDestinationPayload());
+
+  try {
+    var res = await fetch('/api/verify/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await res.json().catch(function () { return {}; });
+
+    // Verification was turned off (or degraded) while the guest was mid-flow.
+    if (res.status === 409) { completeSubmission(null); return; }
+
+    // Remembered device, or the server waived verification: both hand back a
+    // token and nothing was sent.
+    if (res.ok && data.verificationToken) { completeSubmission(data.verificationToken); return; }
+
+    if (res.ok) {
+      var sub = document.getElementById('verifySubheading');
+      if (sub && data.destinationMasked) {
+        sub.textContent = 'Enter the 6-digit code we sent to ' + data.destinationMasked;
+      }
+      startResendCountdown(data.resendInSeconds || 60);
+      return;
+    }
+
+    // A cooldown is NOT a failure — the guest reopened the captive browser and a
+    // code is already in flight. Show the entry state with the countdown.
+    if (data.code === 'resend_too_soon') {
+      var sub2 = document.getElementById('verifySubheading');
+      if (sub2) {
+        sub2.textContent = 'We already sent a code'
+          + (data.destinationMasked ? ' to ' + data.destinationMasked : '')
+          + ' — check your messages.';
+      }
+      startResendCountdown(data.retryAfterSeconds || 60);
+      return;
+    }
+
+    var alt = (Array.isArray(data.fallbackChannels) && data.fallbackChannels.length)
+      ? 'You can also try: ' + data.fallbackChannels.join(', ') + '.'
+      : '';
+    showVerifyError(data.code, alt);
+    startResendCountdown(0);
+  } catch (e) {
+    showVerifyError(null);
+    startResendCountdown(0);
+  } finally {
+    _verifyState.sending = false;
+  }
+}
+
+async function checkCode(page) {
+  var btn = document.getElementById('btnVerify');
+  var input = document.getElementById('verifyCode');
+  if (!btn || !input || btn.disabled) return;
+  var code = (input.value || '').trim();
+  if (!/^\d{4,8}$/.test(code)) { showVerifyError('invalid_code'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  var errEl = document.getElementById('verifyError');
+  if (errEl) errEl.style.display = 'none';
+
+  var body = Object.assign({
+    channel: _verifyState.channel,
+    apmac: apMac(),
+    mac: clientMac(),
+    code: code,
+  }, verifyDestinationPayload());
+
+  try {
+    var res = await fetch('/api/verify/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await res.json().catch(function () { return {}; });
+
+    if (res.status === 409) { completeSubmission(null); return; }
+    if (res.ok && data.verificationToken) {
+      clearInterval(_verifyState.resendTimer);
+      completeSubmission(data.verificationToken);
+      return;
+    }
+
+    var left = (typeof data.attemptsLeft === 'number')
+      ? data.attemptsLeft + ' attempt' + (data.attemptsLeft === 1 ? '' : 's') + ' left.'
+      : '';
+    showVerifyError(data.code, left);
+  } catch (e) {
+    showVerifyError(null);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = page.verifyButtonText;
+  }
+}
+
+// ── 5c. Submit ────────────────────────────────────────────────────────────
+async function completeSubmission(verificationToken) {
+  var p = _pendingSubmission;
+  if (!p) return;
+
+  var err        = document.getElementById('step2Error');
+  var btnAccept  = document.getElementById('btnAccept');
+  var btnDecline = document.getElementById('btnDecline');
+
+  // The token is bound to the destination it verified. If the guest edited a
+  // field after verifying, drop it here rather than let the server reject the
+  // mismatch with a bare 403 — this way they get a clean re-verify.
+  var liveEmail = document.getElementById('email').value.trim();
+  var livePhone = document.getElementById('phone').value.trim();
+  if (verificationToken && (liveEmail !== p.email || livePhone !== p.phone)) {
+    verificationToken = null;
+  }
+
+  var firstName = p.firstName;
+  var lastName  = p.lastName;
+  var email     = p.email;
+  var phone     = p.phone;
+  var dialCode  = p.dialCode;
+  var splashResponses = p.splashResponses;
+  var privacyPolicyConsent = p.privacyPolicyConsent;
+  var termsConsent = p.termsConsent;
+  var marketingConsent = p.marketingConsent;
 
   try {
     var res = await fetch('/api/create-user', {
@@ -176,6 +425,7 @@ async function submitConsent(marketing) {
         termsConsent,
         marketingConsent,
         splashResponses,
+        verificationToken,
       }),
     });
     if (!res.ok) throw new Error('Server error');
@@ -195,6 +445,7 @@ async function submitConsent(marketing) {
           termsConsent,
           marketingConsent,
           splashResponses,
+          verificationToken,
         }),
       });
       var authData = await authRes.json().catch(function() { return {}; });
@@ -223,13 +474,35 @@ async function submitConsent(marketing) {
     document.getElementById('f_url').value              = param('url');
     document.getElementById('f_post').value             = param('post');
     document.getElementById('f_apmac').value            = apMac();
+    // No template ships this field, and /submit is the Aruba grant path that has
+    // to see the token — create it rather than edit 33 templates.
+    if (verificationToken) {
+      var tokenInput = document.getElementById('f_verificationToken');
+      if (!tokenInput) {
+        tokenInput = document.createElement('input');
+        tokenInput.type = 'hidden';
+        tokenInput.id = 'f_verificationToken';
+        tokenInput.name = 'verificationToken';
+        document.getElementById('portalForm').appendChild(tokenInput);
+      }
+      tokenInput.value = verificationToken;
+    }
     document.getElementById('portalForm').submit();
 
   } catch (e) {
-    showErr(err, 'Something went wrong. Please try again.');
-    btnAccept.disabled  = false;
-    btnDecline.disabled = false;
-    btnAccept.textContent = normalizeConsentPage(CONFIG).acceptButtonText;
+    // The verify step may be the one on screen, so report the failure there.
+    var stepVerify = document.getElementById('stepVerify');
+    var verifyErr = document.getElementById('verifyError');
+    if (stepVerify && !stepVerify.classList.contains('hidden') && verifyErr) {
+      showErr(verifyErr, 'Something went wrong. Please try again.');
+    } else if (err) {
+      showErr(err, 'Something went wrong. Please try again.');
+    }
+    if (btnAccept) {
+      btnAccept.disabled = false;
+      btnAccept.textContent = normalizeConsentPage(CONFIG).acceptButtonText;
+    }
+    if (btnDecline) btnDecline.disabled = false;
   }
 }
 

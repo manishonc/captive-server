@@ -109,6 +109,39 @@ Used to send WhatsApp template messages to guests after login.
 
 ---
 
+## Guest verification (OTP)
+
+Gates internet access on the guest confirming a code sent by email, SMS or WhatsApp.
+See `docs/guest-verification.md`.
+
+| Variable | Description |
+|---|---|
+| `GUEST_VERIFICATION_SIGNING_SECRET` | HMAC key for the proof-of-verification token. Required by the **server and the portal**. |
+| `GUEST_OTP_PEPPER` | Peppers codes hashed at rest. Required by the server. |
+| `PORTAL_SHARED_SECRET` | Lets the server trust the portal's `X-Forwarded-For`. Required by both containers. |
+| `GUEST_OTP_DAILY_CAP_PER_VENUE` | Per-venue daily send ceiling. Optional, default 500. |
+
+> **Provision these before any tenant switches verification on.** With the first two unset,
+> `resolveVerification()` disables verification and guests connect **unverified** — safe, but
+> silently not what the tenant asked for. The server logs this at boot.
+>
+> This failure mode has precedent: `UNSUBSCRIBE_SIGNING_SECRET` and `INTERNAL_API_SECRET` are
+> both documented here and both absent from the deployed environment.
+
+**Generating:** `openssl rand -hex 32` for each. `GUEST_VERIFICATION_SIGNING_SECRET` and
+`PORTAL_SHARED_SECRET` must be **identical** in the `server` and `portal` containers.
+
+**Rotation:** rotating `GUEST_OTP_PEPPER` invalidates codes in flight (≤10 min of impact).
+Rotating `GUEST_VERIFICATION_SIGNING_SECRET` invalidates verification tokens in flight (≤15 min),
+and must be done in both containers at once or the Aruba path rejects every token.
+
+**Without `PORTAL_SHARED_SECRET`** the per-IP OTP rate limits are skipped entirely rather than
+applied to a shared constant — every guest reaches the server via the portal container, so its IP
+is identical for the whole estate and limiting on it would throttle all venues together. The
+per-destination, per-AP and per-venue-daily limits still apply.
+
+---
+
 ## Server
 
 | Variable | Description |

@@ -12,6 +12,10 @@ import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { fireAutomationsForGuest } from '../services/campaigns';
+import { checkVerificationGate, verificationFields } from '../services/verificationGate';
+import { resolveVerification, VERIFICATION_PAGE_DEFAULTS } from '../services/verificationConfig';
+import { normalizeMac } from '../services/verificationToken';
+import { scopeKeyFor } from '../services/guestOtp';
 
 const router = Router();
 
@@ -104,6 +108,19 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     console.error('[APMAC LOOKUP ERROR]', err);
   }
 
+  // Verification gate. Runs before any write so an unverified guest leaves no
+  // trace. No-ops (ok:true) for every venue that does not require verification.
+  const gate = await checkVerificationGate({
+    venueId,
+    accessPointId: captivePortalAccessPointId,
+    body: req.body as unknown as Record<string, unknown>,
+    mac: normalizeMac(mac),
+  });
+  if (!gate.ok) {
+    console.warn('[VERIFY GATE] /create-user refused:', gate.reason, apmac);
+    return res.status(403).json({ success: false, code: 'verification_required', reason: gate.reason });
+  }
+
   // Reconnect detection
   let existingWifiGuestId: string | null = null;
   if (email && captivePortalAccessPointId) {
@@ -146,6 +163,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+      ...verificationFields(gate),
     };
 
     try {
@@ -161,7 +179,10 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     console.log('[RECONNECT]', wifiGuestId, email, captivePortalAccessPointId);
     // Merge any fresh splash answers via field paths so repeat visitors don't
     // wipe earlier responses to fields they skipped this time.
-    const reconnectUpdates: Record<string, unknown> = { connectionCount: FieldValue.increment(1) };
+    const reconnectUpdates: Record<string, unknown> = {
+      connectionCount: FieldValue.increment(1),
+      ...verificationFields(gate),
+    };
     for (const [id, response] of Object.entries(splashFormResponses)) {
       reconnectUpdates[`splashFormResponses.${id}`] = response;
     }
@@ -742,6 +763,7 @@ const SPLASH_DEFAULTS = {
   showTermsOfService: true,
   loginPage: LOGIN_PAGE_DEFAULTS,
   consentPage: CONSENT_PAGE_DEFAULTS,
+  verificationPage: VERIFICATION_PAGE_DEFAULTS,
   connectedPage: CONNECTED_PAGE_DEFAULTS,
 };
 
@@ -838,6 +860,21 @@ router.get('/splash-config', async (req: Request, res: Response) => {
     config.connectedPage = connectedPage;
     config.loginPage = mergeLoginPage(docData);
     config.consentPage = mergeConsentPage(docData);
+    // Serve the RESOLVED verification, not the stored one: a channel whose
+    // provider is unconfigured, or whose contact field the venue has hidden, is
+    // subtracted here so the portal never renders a step the guest cannot clear.
+    // Same resolver the grant gate uses, so the two cannot disagree.
+    const resolvedVerification = resolveVerification(docData, (config.loginPage as LoginPageConfig).fields);
+    config.verificationPage = resolvedVerification.effective;
+    // The portal validates verification tokens locally on the Aruba /submit path
+    // (no backend round trip on the critical path). It needs the venue identity
+    // to reject a token minted at a different venue — not secret, venueId is
+    // already public in CMS URLs.
+    config.scopeKey = scopeKeyFor({ venueId: ap.venueId || null, accessPointId: apSnap.docs[0].id });
+    if (resolvedVerification.degraded) {
+      config.verificationDegraded = resolvedVerification.degraded;
+      config.verificationChannelsUnavailable = resolvedVerification.channelsUnavailable;
+    }
     // strip Firestore-internal fields
     delete config.createdAt;
     delete config.updatedAt;
@@ -1085,6 +1122,20 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     return res.status(500).json({ success: false, message: 'Internal error' });
   }
 
+  // Verification gate — MUST run before unifiAuthorizeGuest. After that call the
+  // controller has already opened the firewall for this device, so refusing
+  // afterwards would deny nothing.
+  const gate = await checkVerificationGate({
+    venueId,
+    accessPointId: captivePortalAccessPointId,
+    body: req.body as unknown as Record<string, unknown>,
+    mac: normalizedClientMac,
+  });
+  if (!gate.ok) {
+    console.warn('[VERIFY GATE] /unifi/authorize refused:', gate.reason, normalizedApMac);
+    return res.status(403).json({ success: false, code: 'verification_required', reason: gate.reason });
+  }
+
   // Call UniFi controller to authorize the guest device
   try {
     const minutes = Math.round(sessionTimeoutSeconds / 60);
@@ -1134,6 +1185,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+      ...verificationFields(gate),
     };
 
     try {
@@ -1148,7 +1200,10 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   } else {
     wifiGuestId = existingWifiGuestId;
     console.log('[UNIFI] Reconnect', wifiGuestId, email, normalizedApMac);
-    const reconnectUpdates: Record<string, unknown> = { connectionCount: FieldValue.increment(1) };
+    const reconnectUpdates: Record<string, unknown> = {
+      connectionCount: FieldValue.increment(1),
+      ...verificationFields(gate),
+    };
     for (const [id, response] of Object.entries(splashFormResponses)) {
       reconnectUpdates[`splashFormResponses.${id}`] = response;
     }
