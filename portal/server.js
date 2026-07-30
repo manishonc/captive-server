@@ -34,9 +34,17 @@ const PREVIEWABLE_VIEWS = ['consent', 'verify'];
 const PORTAL_SHARED_SECRET = process.env.PORTAL_SHARED_SECRET || '';
 
 // Fetch splash config from backend (server-to-server, not CNA-side)
-function fetchSplashConfig(apmac) {
+// `draft` is a preview-only opaque id for a splash config the CMS has staged but
+// not published (see internal/splash-config in the CMS). The backend renders it
+// through the same defaults as a live config, and it works without an apmac so a
+// venue with no access point yet can still be designed.
+function fetchSplashConfig(apmac, draft) {
   return new Promise((resolve) => {
-    const reqPath = '/splash-config' + (apmac ? '?apmac=' + encodeURIComponent(apmac) : '');
+    const params = new URLSearchParams();
+    if (apmac) params.set('apmac', apmac);
+    if (draft) params.set('draft', draft);
+    const qs = params.toString();
+    const reqPath = '/splash-config' + (qs ? '?' + qs : '');
     const useHttps = SERVER_PORT === 443;
     const http = require(useHttps ? 'https' : 'http');
     const r = http.request({
@@ -151,7 +159,7 @@ app.get('/guest/s/:site', (req, res) => {
 // Pass ?preview=1 to render with the preview banner (dashboard use only).
 // Aruba never appends this param so real users are unaffected.
 app.get('/', async (req, res) => {
-  const { cmd, mac, ip, network, apmac, ap, id, site, post, url, preview, view, templateId: templateIdOverride } = req.query;
+  const { cmd, mac, ip, network, apmac, ap, id, site, post, url, preview, view, draft, templateId: templateIdOverride } = req.query;
   const resolvedApmac = apmac || ap;
   const resolvedMac = mac || id;
   if (cmd || ap) {
@@ -163,7 +171,10 @@ app.get('/', async (req, res) => {
   }
 
   try {
-    const result = await fetchSplashConfig(resolvedApmac);
+    // Preview-gated like ?view= and ?templateId=: a guest must never be able to
+    // render an unpublished config by editing the query string.
+    const draftId = preview === '1' && draft ? String(draft) : undefined;
+    const result = await fetchSplashConfig(resolvedApmac, draftId);
     const apRegistered = !resolvedApmac || !result || result.registered !== false;
 
     if (!apRegistered) {
@@ -617,10 +628,12 @@ app.post('/submit', async (req, res) => {
 // legacy static page whenever the backend or rendering is unavailable.
 const STATIC_SUCCESS_HTML = path.join(__dirname, 'public', 'success', 'index.html');
 app.get('/success', async (req, res) => {
-  const { apmac, ap, preview, templateId: templateIdOverride } = req.query;
+  const { apmac, ap, preview, draft, templateId: templateIdOverride } = req.query;
   const resolvedApmac = apmac || ap;
   try {
-    const result = await fetchSplashConfig(resolvedApmac);
+    // Preview-gated, same as on GET / — see the note on fetchSplashConfig.
+    const draftId = preview === '1' && draft ? String(draft) : undefined;
+    const result = await fetchSplashConfig(resolvedApmac, draftId);
     if (!result || result.registered === false) {
       return res.sendFile(STATIC_SUCCESS_HTML);
     }

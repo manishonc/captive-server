@@ -16,6 +16,17 @@ services:
       - OAUTH_CODE_TTL_SECONDS=${OAUTH_CODE_TTL_SECONDS:-120}
       - OAUTH_ACCESS_TOKEN_TTL_SECONDS=${OAUTH_ACCESS_TOKEN_TTL_SECONDS:-3600}
       - OAUTH_REFRESH_TOKEN_TTL_DAYS=${OAUTH_REFRESH_TOKEN_TTL_DAYS:-30}
+      # Inbound: lets the CMS mint short-lived tenant tokens for its in-app AI.
+      - MCP_INTERNAL_SECRET=${MCP_INTERNAL_SECRET:-}
+      # Outbound to captive-server (server/, port 4000) for campaign lifecycle actions.
+      - CAPTIVE_API_URL=${CAPTIVE_API_URL:-http://server:4000}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
+      # Outbound to the CMS, which owns the splash-config validator and the template
+      # and media libraries. CMS_INTERNAL_SECRET must be a DIFFERENT value from
+      # MCP_INTERNAL_SECRET above — they guard opposite directions, and sharing one
+      # would mean compromising either service grants writes through both.
+      - CMS_BASE_URL=${CMS_BASE_URL:-https://cms.heidifi.ai}
+      - CMS_INTERNAL_SECRET=${CMS_INTERNAL_SECRET:-}
       # Dev-only bypass (leave unset in production)
       - MCP_DEV_STATIC_TOKEN=${MCP_DEV_STATIC_TOKEN:-}
       - MCP_DEV_TENANT_ID=${MCP_DEV_TENANT_ID:-}

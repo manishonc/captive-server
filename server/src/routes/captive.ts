@@ -815,76 +815,135 @@ function mergeConsentPage(docData: Record<string, any>): ConsentPageConfig {
   return merged;
 }
 
+/**
+ * Widen a stored splash document to the config the portal renders.
+ *
+ * Shared by the saved-config path and the ?draft= preview path so a draft is
+ * rendered through exactly the same defaulting, clamping and verification
+ * resolution as the real thing — a preview that skipped any of it would be a
+ * preview of something the guest will never see.
+ */
+function buildEffectiveConfig(docData: Record<string, any>): Record<string, unknown> {
+  const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...docData };
+  // The top-level spread is shallow — a partial connectedPage doc would clobber
+  // the nested defaults, so merge that object explicitly.
+  const docConnected = (docData.connectedPage && typeof docData.connectedPage === 'object' && !Array.isArray(docData.connectedPage))
+    ? docData.connectedPage
+    : {};
+  const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
+  if (!Array.isArray(connectedPage.customFields)) connectedPage.customFields = [];
+  // Raw spread — a doc carrying a huge or negative delay would otherwise reach
+  // the portal verbatim and strand the guest. URL scheme checking stays with the
+  // two consumers (portal/server.js, portal/public/js/config.js), as for buttonUrl.
+  // Guard the type before Number(): Number(null)/Number('')/Number(false) are
+  // all 0, a valid delay meaning "redirect immediately", so an unset value
+  // would become the most aggressive setting instead of the default.
+  const rawDelay = connectedPage.redirectDelaySeconds;
+  const delay = (typeof rawDelay === 'number' || (typeof rawDelay === 'string' && rawDelay.trim() !== ''))
+    ? Number(rawDelay)
+    : NaN;
+  connectedPage.redirectDelaySeconds = Number.isFinite(delay)
+    ? Math.min(REDIRECT_DELAY_MAX, Math.max(0, Math.round(delay)))
+    : CONNECTED_PAGE_DEFAULTS.redirectDelaySeconds;
+  config.connectedPage = connectedPage;
+  config.loginPage = mergeLoginPage(docData);
+  config.consentPage = mergeConsentPage(docData);
+  // Serve the RESOLVED verification, not the stored one: a channel whose
+  // provider is unconfigured, or whose contact field the venue has hidden, is
+  // subtracted here so the portal never renders a step the guest cannot clear.
+  // Same resolver the grant gate uses, so the two cannot disagree.
+  const resolvedVerification = resolveVerification(docData, (config.loginPage as LoginPageConfig).fields);
+  config.verificationPage = resolvedVerification.effective;
+  if (resolvedVerification.degraded) {
+    config.verificationDegraded = resolvedVerification.degraded;
+    config.verificationChannelsUnavailable = resolvedVerification.channelsUnavailable;
+  }
+  // strip Firestore-internal fields
+  delete config.createdAt;
+  delete config.updatedAt;
+  delete config.updatedVia;
+  delete config.updatedBy;
+  delete config.lastChange;
+  return config;
+}
+
+/**
+ * A pending splash config the CMS staged for review, fetched by the opaque id the
+ * portal was given via ?draft=. Read-only and short-lived: this is how an agent
+ * shows a tenant a proposed design before anything goes live.
+ */
+async function loadDraftConfig(draftId: string): Promise<{ config: Record<string, any>; venueId: string | null } | null> {
+  const snap = await db.collection('CaptivePortal_SplashDrafts').doc(draftId).get();
+  if (!snap.exists) return null;
+  const d = snap.data() || {};
+  const expiresAt = d.expiresAt?.toDate?.() ?? (d.expiresAt ? new Date(d.expiresAt) : null);
+  if (!expiresAt || expiresAt.getTime() <= Date.now()) return null;
+  if (!d.config || typeof d.config !== 'object') return null;
+  return { config: d.config, venueId: d.venueId ?? null };
+}
+
 router.get('/splash-config', async (req: Request, res: Response) => {
-  const { apmac: apmacParam, ap } = req.query as { apmac?: string; ap?: string };
+  const { apmac: apmacParam, ap, draft: draftParam } = req.query as { apmac?: string; ap?: string; draft?: string };
   const apmac = (apmacParam || ap || '').toLowerCase().trim();
+  const draftId = (draftParam || '').trim();
+
+  // A draft carries its own config, so it renders with or without an access point.
+  // That is deliberate: a venue with no hardware yet still needs to be designable.
+  if (draftId) {
+    try {
+      const draft = await loadDraftConfig(draftId);
+      if (draft) {
+        const config = buildEffectiveConfig(draft.config);
+        config.scopeKey = scopeKeyFor({ venueId: draft.venueId, accessPointId: null });
+        config.isDraft = true;
+        return res.json({ success: true, config });
+      }
+      // Expired or unknown: fall through to the saved config rather than showing a
+      // blank screen, and say so, so the caller knows to re-stage the preview.
+      console.warn(`[SPLASH CONFIG] draft ${draftId} is missing or expired — serving the saved config`);
+      if (!apmac) return res.json({ success: true, config: SPLASH_DEFAULTS, draftExpired: true });
+      const fallback = await loadSavedSplashConfig(apmac);
+      return res.json({ ...fallback, draftExpired: true });
+    } catch (err) {
+      console.error('[SPLASH DRAFT ERROR]', err);
+      return res.json({ success: true, config: SPLASH_DEFAULTS, draftExpired: true });
+    }
+  }
 
   if (!apmac) return res.json({ success: true, config: SPLASH_DEFAULTS });
 
   try {
-    const apSnap = await db.collection('CaptivePortal_AccessPoints')
-      .where('mac', '==', apmac)
-      .limit(1)
-      .get();
-
-    if (apSnap.empty) return res.json({ success: true, registered: false });
-
-    const ap = apSnap.docs[0].data();
-    const configId = `venue_${ap.venueId}`;
-
-    const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
-    if (!configDoc.exists) return res.json({ success: true, config: SPLASH_DEFAULTS });
-
-    const docData = configDoc.data() || {};
-    const config: Record<string, unknown> = { ...SPLASH_DEFAULTS, ...docData };
-    // The top-level spread is shallow — a partial connectedPage doc would clobber
-    // the nested defaults, so merge that object explicitly.
-    const docConnected = (docData.connectedPage && typeof docData.connectedPage === 'object' && !Array.isArray(docData.connectedPage))
-      ? docData.connectedPage
-      : {};
-    const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
-    if (!Array.isArray(connectedPage.customFields)) connectedPage.customFields = [];
-    // Raw spread — a doc carrying a huge or negative delay would otherwise reach
-    // the portal verbatim and strand the guest. URL scheme checking stays with the
-    // two consumers (portal/server.js, portal/public/js/config.js), as for buttonUrl.
-    // Guard the type before Number(): Number(null)/Number('')/Number(false) are
-    // all 0, a valid delay meaning "redirect immediately", so an unset value
-    // would become the most aggressive setting instead of the default.
-    const rawDelay = connectedPage.redirectDelaySeconds;
-    const delay = (typeof rawDelay === 'number' || (typeof rawDelay === 'string' && rawDelay.trim() !== ''))
-      ? Number(rawDelay)
-      : NaN;
-    connectedPage.redirectDelaySeconds = Number.isFinite(delay)
-      ? Math.min(REDIRECT_DELAY_MAX, Math.max(0, Math.round(delay)))
-      : CONNECTED_PAGE_DEFAULTS.redirectDelaySeconds;
-    config.connectedPage = connectedPage;
-    config.loginPage = mergeLoginPage(docData);
-    config.consentPage = mergeConsentPage(docData);
-    // Serve the RESOLVED verification, not the stored one: a channel whose
-    // provider is unconfigured, or whose contact field the venue has hidden, is
-    // subtracted here so the portal never renders a step the guest cannot clear.
-    // Same resolver the grant gate uses, so the two cannot disagree.
-    const resolvedVerification = resolveVerification(docData, (config.loginPage as LoginPageConfig).fields);
-    config.verificationPage = resolvedVerification.effective;
-    // The portal validates verification tokens locally on the Aruba /submit path
-    // (no backend round trip on the critical path). It needs the venue identity
-    // to reject a token minted at a different venue — not secret, venueId is
-    // already public in CMS URLs.
-    config.scopeKey = scopeKeyFor({ venueId: ap.venueId || null, accessPointId: apSnap.docs[0].id });
-    if (resolvedVerification.degraded) {
-      config.verificationDegraded = resolvedVerification.degraded;
-      config.verificationChannelsUnavailable = resolvedVerification.channelsUnavailable;
-    }
-    // strip Firestore-internal fields
-    delete config.createdAt;
-    delete config.updatedAt;
-
-    res.json({ success: true, config });
+    return res.json(await loadSavedSplashConfig(apmac));
   } catch (err) {
     console.error('[SPLASH CONFIG ERROR]', err);
-    res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
+    return res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
   }
 });
+
+/** mac -> venue -> saved splash config, in the `/splash-config` response shape. */
+async function loadSavedSplashConfig(apmac: string): Promise<Record<string, unknown>> {
+  const apSnap = await db.collection('CaptivePortal_AccessPoints')
+    .where('mac', '==', apmac)
+    .limit(1)
+    .get();
+
+  if (apSnap.empty) return { success: true, registered: false };
+
+  const ap = apSnap.docs[0].data();
+  const configId = `venue_${ap.venueId}`;
+
+  const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
+  if (!configDoc.exists) return { success: true, config: SPLASH_DEFAULTS };
+
+  const config = buildEffectiveConfig(configDoc.data() || {});
+  // The portal validates verification tokens locally on the Aruba /submit path
+  // (no backend round trip on the critical path). It needs the venue identity
+  // to reject a token minted at a different venue — not secret, venueId is
+  // already public in CMS URLs.
+  config.scopeKey = scopeKeyFor({ venueId: ap.venueId || null, accessPointId: apSnap.docs[0].id });
+
+  return { success: true, config };
+}
 
 // ── Connected-page custom form submissions ─────────────────────────────────
 // Guests are anonymous here (no auth token), so abuse is bounded by a small
