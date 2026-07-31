@@ -67,7 +67,7 @@ export async function blocklistContact(email: string): Promise<void> {
   }
 }
 
-const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://cms.heidifi.ai';
+const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://portal.heidifi.ai';
 
 export async function sendApOfflineAlert(
   to: string,

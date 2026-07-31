@@ -208,7 +208,7 @@ MCP campaign write tools proxy lifecycle actions back to `server/`.
 | `MCP_INTERNAL_SECRET` | mcp | Guards `POST /internal/mint-token`. Must equal the CMS's `MCP_INTERNAL_SECRET`. Fails closed if unset. |
 | `CAPTIVE_API_URL` | mcp | Base URL of `server/` for proxied campaign actions (default `http://localhost:4000`). |
 | `INTERNAL_API_SECRET` | mcp | Same secret as `server/`'s — the MCP service calls `server/`'s `/internal/campaigns/*`. |
-| `CMS_BASE_URL` | mcp | Base URL of the CMS (e.g. `https://cms.heidifi.ai`). The splash tools call its `/api/captive-portal/internal/*` API. Unset ⇒ those tools return 503. |
+| `CMS_BASE_URL` | mcp | Base URL of the CMS (e.g. `https://portal.heidifi.ai`). The splash tools call its `/api/captive-portal/internal/*` API. Unset ⇒ those tools return 503. |
 | `CMS_INTERNAL_SECRET` | mcp + CMS | Guards the CMS's inbound `internal/splash-*` routes. Must match on both sides. **Generate a value distinct from `MCP_INTERNAL_SECRET`** — the two guard opposite directions, so sharing one means compromising either service grants writes through both. |
 
 Preview links are built by the CMS from its own `NEXT_PUBLIC_CAPTIVE_PORTAL_HOST`, so
