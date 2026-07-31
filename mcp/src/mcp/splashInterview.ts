@@ -22,7 +22,7 @@ export interface InterviewQuestion {
   key: string;
   /** What to ask the tenant, in plain language. */
   ask: string;
-  type: 'enum' | 'text' | 'longtext' | 'hex' | 'boolean' | 'number' | 'url' | 'list' | 'fields';
+  type: 'enum' | 'text' | 'longtext' | 'hex' | 'boolean' | 'number' | 'url' | 'list' | 'fields' | 'document';
   /** Where to get the valid values, when they are not fixed. */
   source?: string;
   options?: string[];
@@ -226,12 +226,28 @@ export const SPLASH_INTERVIEW: InterviewStep[] = [
   },
   {
     id: 'terms',
-    title: 'Terms and privacy links',
-    why: 'The footer links on the splash pages. The documents themselves are edited in the dashboard, not through these tools — this step only controls whether the links show.',
+    title: 'Terms and privacy',
+    why: 'The legal documents linked from the splash footer. Every venue inherits a platform default; a venue can publish its own text instead. The links only appear if the two toggles below are on.',
     previewPage: 'login',
     questions: [
       { key: 'showPrivacyPolicy', ask: 'Show a privacy policy link in the footer?', type: 'boolean' },
       { key: 'showTermsOfService', ask: 'Show a terms of service link?', type: 'boolean' },
+      {
+        key: 'document:privacy_policy',
+        ask: 'You are currently showing the standard HeidiFi privacy policy. Do you have your own you would like to use instead?',
+        type: 'document',
+        source: 'get_venue_documents',
+        dependsOn: 'showPrivacyPolicy',
+        note: 'Only ask if they raise it, or if get_venue_documents shows inForce "none". Never write this text yourself — take the tenant\'s wording verbatim. Publish with preview_venue_document then apply_venue_document; reset_venue_document puts the platform default back.',
+      },
+      {
+        key: 'document:terms_conditions',
+        ask: 'And the same for terms and conditions — the standard ones, or your own?',
+        type: 'document',
+        source: 'get_venue_documents',
+        dependsOn: 'showTermsOfService',
+        note: 'Same rule: their wording, not yours. Publishing appends a version, so a mistake is recoverable.',
+      },
     ],
   },
 ];
@@ -252,6 +268,8 @@ export const SPLASH_RULES: string[] = [
   'Never call apply_splash_config in the same turn you called preview_splash_config unless the tenant has already said yes to that exact change. apply requires the confirmToken from the preview, and refuses if the config drifted.',
   'Splash config is per VENUE, not per access point. Every access point at a venue shows the same splash screen, and a change is live for guests the moment it applies.',
   'A guest who declines marketing consent still gets online. Consent is not access — do not describe declining as being cut off.',
+  'Terms & Conditions and the Privacy Policy are NOT part of the splash config — they are separate documents with their own tools (get_venue_documents / preview_venue_document / apply_venue_document / reset_venue_document). A venue either publishes its own text or inherits the platform default; the splash config only controls whether the footer links appear.',
+  'Never author, translate or reword a privacy policy or terms document. It is the venue\'s legal text. Use exactly what the tenant supplies, and if they want the standard wording back, reset rather than pasting a copy of it.',
 ];
 
 /** How to run the interview, as opposed to what to ask. */

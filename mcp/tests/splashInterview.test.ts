@@ -52,6 +52,9 @@ const VALID_KEYS = new Set([
   'verificationPage.rememberDays', 'verificationPage.heading', 'verificationPage.subheading',
   'verificationPage.codeInputLabel', 'verificationPage.sendButtonText',
   'verificationPage.verifyButtonText', 'verificationPage.resendLabel',
+  // Terms & Privacy — not splash-config fields; these are the separate
+  // CaptivePortal_Documents overrides, addressed by their own tools.
+  'document:privacy_policy', 'document:terms_conditions',
   // connectedPage
   'connectedPage.title', 'connectedPage.subtitle',
   'connectedPage.showTitle', 'connectedPage.showSubtitle', 'connectedPage.showLogo',
@@ -236,6 +239,8 @@ test('the rules cover every invariant that silently corrupts a config', () => {
     ['consent can be skipped entirely', /showmarketingoptin/],
     ['no apply without confirmation', /confirmtoken|apply_splash_config/],
     ['config is per venue, not per access point', /per venue/],
+    ['terms/privacy live outside the splash config', /separate documents|get_venue_documents/],
+    ['never author legal text', /never author|never draft/],
   ];
   for (const [what, pattern] of required) {
     assert(pattern.test(text), `SPLASH_RULES is missing: ${what}`);

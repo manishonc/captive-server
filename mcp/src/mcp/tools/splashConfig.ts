@@ -24,6 +24,9 @@ import { interviewPayload } from '../splashInterview';
 
 const SPLASH_CONFIG_PATH = '/api/captive-portal/internal/splash-config';
 const SPLASH_ASSETS_PATH = '/api/captive-portal/internal/splash-assets';
+const SPLASH_DOCUMENTS_PATH = '/api/captive-portal/internal/splash-documents';
+
+const DOCUMENT_TYPES = ['privacy_policy', 'terms_conditions'] as const;
 
 type Raw = Record<string, unknown>;
 
@@ -294,6 +297,131 @@ export function registerSplashConfigTools(server: McpServer): void {
         ...result.data,
         nextStep: `Show the user what would change at the target venue, then call apply_splash_config(venueId: "${args.toVenueId}", config, confirmToken) once they agree. Note the logo is copied as-is — it stays valid because the CDN media library is shared across the tenant's venues.`,
       });
+    },
+  );
+
+  // ── Terms & Privacy ──────────────────────────────────────────────────────
+  // These are NOT part of the splash config document — they are venue-scoped
+  // overrides in a separate collection, which is why they have their own tools.
+  // A venue either publishes its own text or inherits the platform default.
+
+  addTool<{ venueId: string }>(
+    server,
+    'get_venue_documents',
+    'Read the venue\'s Terms & Conditions and Privacy Policy — the documents linked from the splash screen footer. For each one you get the venue\'s own version if it has published one, the platform default, and `inForce` telling you which the guests are actually being shown ("override", "platform_default" or "none"). Note the footer links only appear when showPrivacyPolicy / showTermsOfService are on in the splash config.',
+    { venueId: z.string().describe('The venue id (from list_venues).') },
+    async (args, extra) => {
+      const gate = await withVenue(tenantFrom(extra), args.venueId);
+      if (!gate.ok) return errorResult(gate.error);
+
+      const result = await cms(SPLASH_DOCUMENTS_PATH, {
+        tenantUserId: gate.tenantUserId,
+        venueId: args.venueId,
+        action: 'read',
+      });
+      if (!result.ok) return errorResult(result.error);
+      return jsonResult(result.data);
+    },
+  );
+
+  addTool<{ venueId: string; type: string; content: string; title?: string }>(
+    server,
+    'preview_venue_document',
+    'DRY RUN for replacing a venue\'s Terms & Conditions or Privacy Policy. Writes NOTHING. Returns a summary of how the text would change and a confirmToken. This is the venue\'s LEGAL TEXT shown to guests — do not draft, translate or "improve" it yourself. Use the wording the tenant gives you, read the change back to them, and get an explicit yes before applying. If they want to go back to the platform default, use reset_venue_document rather than publishing a copy of it.',
+    {
+      venueId: z.string().describe('The venue id (from list_venues).'),
+      type: z.enum(DOCUMENT_TYPES).describe('Which document to replace.'),
+      content: z.string().describe('The full document text, supplied by the tenant. Max 100000 characters.'),
+      title: z.string().optional().describe('Optional heading; defaults to "Privacy Policy" / "Terms & Conditions".'),
+    },
+    async (args, extra) => {
+      const gate = await withVenue(tenantFrom(extra), args.venueId);
+      if (!gate.ok) return errorResult(gate.error);
+
+      const result = await cms(SPLASH_DOCUMENTS_PATH, {
+        tenantUserId: gate.tenantUserId,
+        venueId: args.venueId,
+        action: 'validate',
+        type: args.type,
+        content: args.content,
+        title: args.title,
+      });
+      if (!result.ok) return errorResult(result.error);
+
+      return jsonResult({
+        ...result.data,
+        nextStep: 'Summarise the change for the tenant in plain language. Once they explicitly agree, call apply_venue_document with the same text and this confirmToken.',
+      });
+    },
+  );
+
+  addTool<{ venueId: string; type: string; content: string; title?: string; confirmToken: string }>(
+    server,
+    'apply_venue_document',
+    'Publish a venue\'s Terms & Conditions or Privacy Policy. LIVE IMMEDIATELY for guests. Requires the confirmToken from preview_venue_document for this exact text. Publishing creates a new version — the previous text is kept in history, so a mistake is recoverable. Only call this after the tenant has approved the wording.',
+    {
+      venueId: z.string().describe('The venue id (from list_venues).'),
+      type: z.enum(DOCUMENT_TYPES).describe('Which document to publish.'),
+      content: z.string().describe('The same text that was passed to preview_venue_document.'),
+      title: z.string().optional().describe('The same title that was passed to preview_venue_document.'),
+      confirmToken: z.string().describe('The confirmToken returned by preview_venue_document.'),
+    },
+    async (args, extra) => {
+      const gate = await withVenue(tenantFrom(extra), args.venueId);
+      if (!gate.ok) return errorResult(gate.error);
+
+      const result = await cms(SPLASH_DOCUMENTS_PATH, {
+        tenantUserId: gate.tenantUserId,
+        venueId: args.venueId,
+        action: 'apply',
+        type: args.type,
+        content: args.content,
+        title: args.title,
+        confirmToken: args.confirmToken,
+      });
+
+      if (!result.ok) {
+        const fresh = typeof result.data.confirmToken === 'string' ? result.data.confirmToken : null;
+        return errorResult(
+          fresh
+            ? `${result.error}\n\nThe correct confirmToken for the text you sent is "${fresh}" — but re-run preview_venue_document and confirm with the tenant rather than just retrying.`
+            : result.error,
+        );
+      }
+      return jsonResult(result.data);
+    },
+  );
+
+  addTool<{ venueId: string; type: string; confirmToken?: string }>(
+    server,
+    'reset_venue_document',
+    'Drop a venue\'s own Terms & Conditions or Privacy Policy so guests see the platform default again. Requires a confirmToken — call once without it to get the token and to show the tenant what they are giving up, then again with it. The venue\'s text is archived rather than deleted, so publishing again restores it.',
+    {
+      venueId: z.string().describe('The venue id (from list_venues).'),
+      type: z.enum(DOCUMENT_TYPES).describe('Which document to reset.'),
+      confirmToken: z.string().optional().describe('Omit on the first call to receive the token; pass it back to confirm.'),
+    },
+    async (args, extra) => {
+      const gate = await withVenue(tenantFrom(extra), args.venueId);
+      if (!gate.ok) return errorResult(gate.error);
+
+      const result = await cms(SPLASH_DOCUMENTS_PATH, {
+        tenantUserId: gate.tenantUserId,
+        venueId: args.venueId,
+        action: 'reset',
+        type: args.type,
+        confirmToken: args.confirmToken,
+      });
+
+      if (!result.ok) {
+        const fresh = typeof result.data.confirmToken === 'string' ? result.data.confirmToken : null;
+        return errorResult(
+          fresh
+            ? `${result.error}\n\nconfirmToken for this reset: "${fresh}". Show the tenant their current text first — it will stop being shown to guests.`
+            : result.error,
+        );
+      }
+      return jsonResult(result.data);
     },
   );
 }
