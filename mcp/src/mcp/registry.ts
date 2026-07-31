@@ -6,6 +6,7 @@ import { registerCampaignTools } from './tools/campaigns';
 import { registerAnalyticsTools } from './tools/analytics';
 import { registerVenueConfigTools } from './tools/venueConfig';
 import { registerCampaignWriteTools } from './tools/campaignWrites';
+import { registerSplashConfigTools } from './tools/splashConfig';
 import { registerTemplateTools } from './tools/templates';
 import { registerBrandingTools } from './tools/branding';
 import { registerAudienceTools } from './tools/audience';
@@ -34,6 +35,10 @@ import { registerUsageTools } from './tools/usage';
  *   audience:      preview_audience (per-channel opted-in counts)
  *   branding:      get_branding
  *   plan/usage:    get_usage
+ *   splash:        start_splash_setup, list_splash_templates, list_venue_logos,
+ *                  preview_splash_config, apply_splash_config, copy_splash_config
+ *                  (writes proxy to the CMS internal API, which owns the validator;
+ *                   apply is gated on a confirmToken from the preview)
  */
 export function buildMcpServer(): McpServer {
   const server = new McpServer({
@@ -49,6 +54,7 @@ export function buildMcpServer(): McpServer {
   registerAnalyticsTools(server);
   registerVenueConfigTools(server);
   registerCampaignWriteTools(server);
+  registerSplashConfigTools(server);
   registerTemplateTools(server);
   registerBrandingTools(server);
   registerAudienceTools(server);

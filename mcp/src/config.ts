@@ -41,6 +41,14 @@ export const config = {
   // lifecycle actions; guarded by ITS internal secret.
   serverApiUrl: (process.env.CAPTIVE_API_URL || 'http://localhost:4000').replace(/\/$/, ''),
   serverInternalSecret: process.env.INTERNAL_API_SECRET || '',
+
+  // The CMS (Vercel), which owns the splash-config validator and the template /
+  // media libraries. Guarded by its own secret — deliberately NOT the same value as
+  // MCP_INTERNAL_SECRET above, which guards the opposite direction.
+  // Preview links come back from the CMS already built, so the portal host is
+  // deliberately NOT duplicated here — one service knows it.
+  cmsBaseUrl: (process.env.CMS_BASE_URL || '').replace(/\/$/, ''),
+  cmsInternalSecret: process.env.CMS_INTERNAL_SECRET || '',
 };
 
 /** The `.well-known/oauth-protected-resource` document URL, advertised on 401s. */

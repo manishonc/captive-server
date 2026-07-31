@@ -208,10 +208,36 @@ MCP campaign write tools proxy lifecycle actions back to `server/`.
 | `MCP_INTERNAL_SECRET` | mcp | Guards `POST /internal/mint-token`. Must equal the CMS's `MCP_INTERNAL_SECRET`. Fails closed if unset. |
 | `CAPTIVE_API_URL` | mcp | Base URL of `server/` for proxied campaign actions (default `http://localhost:4000`). |
 | `INTERNAL_API_SECRET` | mcp | Same secret as `server/`'s — the MCP service calls `server/`'s `/internal/campaigns/*`. |
+| `CMS_BASE_URL` | mcp | Base URL of the CMS (e.g. `https://cms.heidifi.ai`). The splash tools call its `/api/captive-portal/internal/*` API. Unset ⇒ those tools return 503. |
+| `CMS_INTERNAL_SECRET` | mcp + CMS | Guards the CMS's inbound `internal/splash-*` routes. Must match on both sides. **Generate a value distinct from `MCP_INTERNAL_SECRET`** — the two guard opposite directions, so sharing one means compromising either service grants writes through both. |
+
+Preview links are built by the CMS from its own `NEXT_PUBLIC_CAPTIVE_PORTAL_HOST`, so
+the portal host is not configured on the MCP service.
 
 > CMS-side vars (set in the **CMS** deployment): `AI_GATEWAY_API_KEY` (Vercel AI
 > Gateway), `MCP_BASE_URL` (this MCP service's public URL), `MCP_INTERNAL_SECRET`
-> (= above), and optional `AI_CHAT_MODEL` / `AI_DESIGN_MODEL` overrides.
+> (= above), `CMS_INTERNAL_SECRET` (= above), and optional `AI_CHAT_MODEL` /
+> `AI_DESIGN_MODEL` overrides.
+
+### Splash configuration over MCP
+
+The splash tools (`start_splash_setup`, `preview_splash_config`,
+`apply_splash_config`, …) do **not** write Firestore from the MCP service. They call
+the CMS, which is the sole writer of `CaptivePortal_SplashScreenConfig` and owns the
+validator — the verification↔login field coupling, the byte-identical consent
+defaults, the silent-drop custom-field rules. Duplicating those rules here would
+have made a seventh copy of a shape already mirrored six times.
+
+`preview_splash_config` stages the proposed config in
+`CaptivePortal_SplashDrafts/{id}` (30-minute TTL) and hands back
+`…/?preview=1&draft=<id>`. `GET /splash-config?draft=<id>` renders it through the
+same defaults as a live config; the portal only honours the parameter when
+`preview=1`, so a guest can never render an unpublished config.
+
+**Deploy order: CMS → `server/` + `portal/` → `mcp/`.** The MCP client fails closed
+with a 503, so shipping it last means no broken window. Set `CMS_BASE_URL` and
+`CMS_INTERNAL_SECRET` in the Coolify env for `mcp`, and `CMS_INTERNAL_SECRET` in
+Vercel, **before** deploying `mcp`.
 
 ---
 

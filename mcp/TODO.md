@@ -10,15 +10,15 @@ Two data paths, both proven in this codebase:
 
 ---
 
-## Tier 2 — Campaign & messaging actions (write, via `/internal/*`)
+## Tier 2 — Campaign & messaging actions (write, via `/internal/*`) — DONE
 
 Requires giving the MCP server the `INTERNAL_API_SECRET` env var and forwarding `tenantUserId`.
 
-- [ ] `send_campaign` → `POST /internal/campaigns/send`
-- [ ] `pause_campaign` → `POST /internal/campaigns/pause`
-- [ ] `resume_campaign` → `POST /internal/campaigns/resume`
-- [ ] `cancel_campaign` → `POST /internal/campaigns/cancel`
-- [ ] `send_test_message` → `POST /internal/test-send` (email / sms / whatsapp)
+- [x] `send_campaign` → `POST /internal/campaigns/send`
+- [x] `pause_campaign` → `POST /internal/campaigns/pause`
+- [x] `resume_campaign` → `POST /internal/campaigns/resume`
+- [x] `cancel_campaign` → `POST /internal/campaigns/cancel`
+- [x] `test_send_campaign` → `POST /internal/test-send` (email / sms / whatsapp)
 
 ⚠️ These genuinely send messages to real guests. Gate behind a distinct OAuth scope
 (`campaigns:write`, `messaging:send`) and make the "this will send" effect explicit in each
@@ -32,12 +32,28 @@ tool description.
 
 ## Tier 4 — Needs new backend plumbing (no captive-server endpoint today; CMS-only)
 
-- [ ] `create_campaign` / `update_campaign`
+- [x] `create_campaign` / `update_campaign` — guarded direct Firestore writes, with the CMS
+      validator hand-ported into `src/validation/campaigns.ts`.
 - [ ] `update_venue_marketing_config`
-- [ ] `update_splash_config`
+- [x] **Splash configuration** — `start_splash_setup`, `list_splash_templates`, `list_venue_logos`,
+      `preview_splash_config`, `apply_splash_config`, `copy_splash_config`, plus a widened
+      `get_splash_config` (it used to return 7 of ~16 fields).
 
-Each needs a new captive-server endpoint (or a guarded direct Firestore write) before an MCP tool
-can exist.
+      Took the third option rather than either of the two above: these tools call **the CMS**
+      (`src/cmsClient.ts` → `/api/captive-portal/internal/splash-*`). The splash validator is ~350
+      lines of coercion rules whose shape is already mirrored in six places and whose consent
+      defaults must stay byte-identical to the portal templates, so a hand-port here would have been
+      the seventh copy and the riskiest one. Calling the CMS also gets the template registry with
+      real descriptions and the tenant's CDN media library, neither of which exists on this side.
+
+      Two things worth knowing before touching it:
+      - `preview_splash_config` writes nothing and returns a diff, the warnings for everything the
+        validator silently coerced, a `?draft=` preview link, and a `confirmToken`.
+        `apply_splash_config` refuses any config whose token does not match — that is what stops an
+        agent overwriting a live splash screen the tenant never saw.
+      - The guided question script lives in `src/mcp/splashInterview.ts` and ships **in the tool
+        result**, because these tools are MCP-only (no ChatGPT app, no Claude plugin) and so have no
+        client-side skill bundle to carry it.
 
 ---
 
