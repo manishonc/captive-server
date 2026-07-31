@@ -25,7 +25,7 @@ services:
       # and media libraries. CMS_INTERNAL_SECRET must be a DIFFERENT value from
       # MCP_INTERNAL_SECRET above — they guard opposite directions, and sharing one
       # would mean compromising either service grants writes through both.
-      - CMS_BASE_URL=${CMS_BASE_URL:-https://cms.heidifi.ai}
+      - CMS_BASE_URL=${CMS_BASE_URL:-https://portal.heidifi.ai}
       - CMS_INTERNAL_SECRET=${CMS_INTERNAL_SECRET:-}
       # Dev-only bypass (leave unset in production)
       - MCP_DEV_STATIC_TOKEN=${MCP_DEV_STATIC_TOKEN:-}

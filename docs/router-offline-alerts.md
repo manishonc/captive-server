@@ -30,7 +30,7 @@ Open Coolify → **captive-server (api.heidifi.ai)** → **Environment Variables
 | Variable | Value | Notes |
 |----------|-------|-------|
 | `AP_HEARTBEAT_SECRET` | `<random-string>` | Generate with `openssl rand -hex 32`. Copy it — you'll need it for the heartbeat script. |
-| `CMS_DASHBOARD_URL` | `https://cms.heidifi.ai` | Linked in alert emails. Already correct for production. |
+| `CMS_DASHBOARD_URL` | `https://portal.heidifi.ai` | Linked in alert emails as the "View Dashboard" button. The CMS is served from `portal.heidifi.ai`; `cms.heidifi.ai` does not resolve to it, so a stale value here ships a dead link to every tenant. |
 | `BREVO_API_KEY` | *(already set)* | Shared with marketing emails — no change needed if already set. |
 | `BREVO_SENDER_EMAIL` | *(already set)* | Same. |
 
