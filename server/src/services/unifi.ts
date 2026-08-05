@@ -114,7 +114,8 @@ function extractCookies(setCookieHeaders: string[]): { unifises?: string; csrfTo
   return { unifises, csrfToken };
 }
 
-async function login(config: UnifiConfig): Promise<Session> {
+/** POST the credentials at the controller and build a Session. Touches no cache. */
+async function performLogin(config: UnifiConfig): Promise<Session> {
   const loginPath = config.controllerType === 'udm' ? '/api/auth/login' : '/api/login';
   const body = JSON.stringify({ username: config.username, password: config.password });
 
@@ -135,14 +136,33 @@ async function login(config: UnifiConfig): Promise<Session> {
   const { unifises, csrfToken } = extractCookies(res.setCookie);
   if (!unifises) throw new Error('UniFi login: no unifises cookie in response');
 
-  const session: Session = {
+  return {
     cookie: `unifises=${unifises}${csrfToken ? `; unificesrftoken=${csrfToken}` : ''}`,
     csrfToken,
     expiresAt: Date.now() + SESSION_TTL_MS,
   };
+}
+
+async function login(config: UnifiConfig): Promise<Session> {
+  const session = await performLogin(config);
   sessions.set(config.controllerUrl, session);
   console.log('[UNIFI] Logged in to', config.controllerUrl);
   return session;
+}
+
+/**
+ * Probe one credential set against the controller. Throws with the controller's
+ * own message when the credentials are rejected.
+ *
+ * Deliberately bypasses the session cache in BOTH directions. The cache is keyed on
+ * `controllerUrl` alone, and `UNIFI_CONTROLLER_URL` points every AP at the same
+ * controller — so a session opened with one AP's credentials is reused by every
+ * other AP, which is exactly what hides stale credentials during normal operation.
+ * Reading the cache here would report a bad AP as healthy; writing to it would let a
+ * diagnostic run paper over the very failure it was called to find.
+ */
+export async function verifyCredentials(config: UnifiConfig): Promise<void> {
+  await performLogin(config);
 }
 
 async function getSession(config: UnifiConfig): Promise<Session> {
