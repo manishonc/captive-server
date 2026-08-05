@@ -18,6 +18,7 @@ import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/wha
 import { createShortLink, VISITOR_BASE_URL } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
 import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics } from '../services/unifiWlan';
+import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
 import {
   sendBroadcast,
   pauseCampaign,
@@ -250,6 +251,28 @@ router.get('/unifi/diagnostics', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[INTERNAL UNIFI diagnostics]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'diagnostics failed' });
+  }
+});
+
+/**
+ * ⚠️ TEMPORARY — per-AP credential sweep. Reports which access points still hold
+ * controller credentials the controller accepts. Read-only: it opens logins and
+ * discards them, never writing to Firestore or the controller. Passwords are never
+ * returned, only `passwordSet`. Remove with services/unifiCredentialCheck.ts.
+ */
+router.get('/unifi/credential-check', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  try {
+    const report = await checkApCredentials();
+    console.log(
+      '[INTERNAL UNIFI credential-check]',
+      `${report.failed} failed / ${report.notConfigured} unconfigured / ${report.total} APs`,
+      `(${report.credentialSetsProbed} credential sets probed)`,
+    );
+    return res.json({ ok: true, ...report });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI credential-check]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'credential-check failed' });
   }
 });
 
