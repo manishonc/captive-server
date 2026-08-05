@@ -23,6 +23,23 @@ import { scheduleSms, toE164 } from './twilio';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from './whatsapp';
 import { getEntitlements, quotasEnforced, type Channel as MessagingChannel } from './entitlements';
 import { recordSends } from './usage';
+import {
+  creditsEnforcementMode,
+  getCreditConfig,
+  creditsForMessage,
+  providerCostForMessage,
+  smsSegments,
+  reserveCredits,
+  reserveInTransaction,
+  releaseReservation,
+  settleCampaignRun,
+  getWalletSnapshot,
+  maybeNotifyLowBalance,
+  debitOne,
+  InsufficientCreditsError,
+  type CreditConfig,
+  type SettleBreakdown,
+} from './credits';
 import { injectPoweredBy } from './poweredBy';
 import { injectOpenPixel } from './openPixel';
 import { interpolate } from './mergeTags';
@@ -72,6 +89,14 @@ interface CampaignTrigger {
   wifiEvent?: 'onConnect' | 'onReconnect' | 'onDisconnect';
 }
 
+/** Wallet hold made at claim time; cleared by settle (spec §5.3). */
+interface CreditReservation {
+  runId: string;
+  reserved: number;
+  rateCardVersion: number;
+  reservedAt: string;
+}
+
 interface CampaignDoc {
   id: string;
   tenantUserId: string;
@@ -82,6 +107,8 @@ interface CampaignDoc {
   messages?: CampaignMessage[];
   schedule?: { mode?: 'now' | 'scheduled'; sendAt?: string };
   trigger?: CampaignTrigger;
+  creditReservation?: CreditReservation | null;
+  heldCount?: number;
 }
 
 interface AudienceMember {
@@ -227,6 +254,85 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
   // Hard cap: the per-iteration check above is best-effort across concurrent
   // chunk queries, so enforce the ceiling once collection completes.
   return out.length > MAX_AUDIENCE ? out.slice(0, MAX_AUDIENCE) : out;
+}
+
+// ── Credit costing (spec §5.3) ───────────────────────────────────────────────
+
+/**
+ * Credits one (message × recipient) unit consumes. SMS is costed on the
+ * pre-interpolation body + the CTIA opt-out suffix — the same text the
+ * estimate, the in-run counter and the composer preview all see, so
+ * reserve/settle never disagree with each other.
+ */
+function unitCredits(config: CreditConfig, msg: CampaignMessage): number {
+  if (msg.channel === 'sms') {
+    return creditsForMessage(config, 'sms', ensureSmsOptOutSuffix(String(msg.content ?? '')));
+  }
+  return creditsForMessage(config, msg.channel);
+}
+
+function unitProviderCost(config: CreditConfig, msg: CampaignMessage): number {
+  if (msg.channel === 'sms') {
+    return providerCostForMessage(config, 'sms', ensureSmsOptOutSuffix(String(msg.content ?? '')));
+  }
+  return providerCostForMessage(config, msg.channel);
+}
+
+function unitSegments(msg: CampaignMessage): number | null {
+  if (msg.channel !== 'sms') return null;
+  return smsSegments(ensureSmsOptOutSuffix(String(msg.content ?? '')));
+}
+
+/** Can this member possibly receive this message? Mirrors dispatchOne's gates. */
+function memberEligible(msg: CampaignMessage, member: AudienceMember): boolean {
+  if (member.optOuts?.[msg.channel] === true) return false;
+  if (msg.channel === 'email') return Boolean(member.email);
+  return Boolean(member.phone);
+}
+
+function newRunId(): string {
+  return `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
+}
+
+interface CampaignEstimate {
+  audienceCount: number;
+  unitsPerChannel: Record<Channel, number>;
+  creditsPerChannel: Record<Channel, number>;
+  smsSegmentsPerMessage: number | null;
+  creditsNeeded: number;
+  config: CreditConfig;
+}
+
+/** Audience × message credit estimate — the number reserve() will hold. */
+async function estimateCampaign(campaign: CampaignDoc): Promise<CampaignEstimate> {
+  const config = await getCreditConfig();
+  const audience = await materializeAudience(campaign);
+  const messages = (campaign.messages || []).filter((m) => campaign.channels.includes(m.channel));
+
+  const unitsPerChannel: Record<Channel, number> = { email: 0, sms: 0, whatsapp: 0 };
+  const creditsPerChannel: Record<Channel, number> = { email: 0, sms: 0, whatsapp: 0 };
+  let creditsNeeded = 0;
+  let smsSegs: number | null = null;
+
+  for (const msg of messages) {
+    const cost = unitCredits(config, msg);
+    if (msg.channel === 'sms' && smsSegs === null) smsSegs = unitSegments(msg);
+    for (const member of audience) {
+      if (!memberEligible(msg, member)) continue;
+      unitsPerChannel[msg.channel] += 1;
+      creditsPerChannel[msg.channel] += cost;
+      creditsNeeded += cost;
+    }
+  }
+
+  return {
+    audienceCount: audience.length,
+    unitsPerChannel,
+    creditsPerChannel,
+    smsSegmentsPerMessage: smsSegs,
+    creditsNeeded,
+    config,
+  };
 }
 
 /** Run an array of async thunks with bounded concurrency. */
@@ -402,7 +508,7 @@ async function recordAndDispatch(
   member: AudienceMember,
   venueNameCache: Map<string, string>,
   extra: Record<string, unknown> = {},
-): Promise<{ ok: boolean }> {
+): Promise<{ ok: boolean; sendId: string }> {
   const sendRef = db.collection(CAMPAIGN_SENDS).doc();
   let outcome: DispatchOutcome;
   try {
@@ -436,7 +542,7 @@ async function recordAndDispatch(
   if (outcome.rendered?.content !== undefined) record.content = outcome.rendered.content;
 
   await sendRef.set(record);
-  return { ok: outcome.ok };
+  return { ok: outcome.ok, sendId: sendRef.id };
 }
 
 /**
@@ -458,6 +564,7 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
   let sent = 0;
   let failed = 0;
   let skippedQuota = 0;
+  let heldCredits = 0;
 
   // Quota accounting for this run. `remaining` snapshots plan+credits before
   // the run; per-channel counters track this run's accepted sends. Hard
@@ -473,34 +580,89 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
     return remaining !== null && sentPerChannel[channel] >= remaining;
   };
 
+  // Credit accounting (spec §5.3.3): the reservation made at claim time is the
+  // budget; an in-run counter checked before each dispatch replaces per-send
+  // wallet writes (which would serialize on one doc at 10k-unit audiences).
+  // In 'warn' mode nothing was reserved — the counter still runs so the
+  // would-be outcome is logged, but no unit is ever held.
+  const creditMode = creditsEnforcementMode();
+  const creditConfig = creditMode !== 'off' ? await getCreditConfig().catch(() => null) : null;
+  const reservation = creditMode === 'enforce' ? campaign.creditReservation ?? null : null;
+  const warnWallet =
+    creditMode === 'warn' && creditConfig
+      ? await getWalletSnapshot(campaign.tenantUserId).catch(() => null)
+      : null;
+  let creditsUsed = 0;
+  const creditBreakdown: SettleBreakdown = { perChannel: {}, providerCostMinorSnapshot: 0 };
+
+  const countCredits = (msg: CampaignMessage): void => {
+    if (!creditConfig) return;
+    const cost = unitCredits(creditConfig, msg);
+    const bucket = (creditBreakdown.perChannel[msg.channel] ??= { messages: 0, credits: 0 });
+    bucket.messages += 1;
+    bucket.credits += cost;
+    if (msg.channel === 'sms') bucket.segments = (bucket.segments ?? 0) + (unitSegments(msg) ?? 1);
+    creditBreakdown.providerCostMinorSnapshot += unitProviderCost(creditConfig, msg);
+  };
+
   // One unit of work per (message, guest).
   const work: Array<{ msg: CampaignMessage; member: AudienceMember; messageIndex: number }> = [];
   messages.forEach((msg, messageIndex) => {
     for (const member of audience) work.push({ msg, member, messageIndex });
   });
 
+  const writeSkippedRecord = async (
+    msg: CampaignMessage,
+    member: AudienceMember,
+    messageIndex: number,
+    deliveryStatus: 'skipped_quota' | 'held_insufficient_credits',
+  ): Promise<void> => {
+    await db.collection(CAMPAIGN_SENDS).add({
+      campaignId: campaign.id,
+      tenantUserId: campaign.tenantUserId,
+      wifiGuestId: member.guestId,
+      channel: msg.channel,
+      messageIndex,
+      to: msg.channel === 'email' ? member.email : member.phone,
+      deliveryStatus,
+      statusUpdatedAt: FieldValue.serverTimestamp(),
+      scheduledAt: FieldValue.serverTimestamp(),
+    }).catch(() => {});
+  };
+
+  let heldCount = 0;
+
   await pMap(work, DISPATCH_CONCURRENCY, async ({ msg, member, messageIndex }) => {
     if (channelBlocked(msg.channel as MessagingChannel)) {
       skippedQuota += 1;
-      await db.collection(CAMPAIGN_SENDS).add({
-        campaignId: campaign.id,
-        tenantUserId: campaign.tenantUserId,
-        wifiGuestId: member.guestId,
-        channel: msg.channel,
-        messageIndex,
-        to: msg.channel === 'email' ? member.email : member.phone,
-        deliveryStatus: 'skipped_quota',
-        statusUpdatedAt: FieldValue.serverTimestamp(),
-        scheduledAt: FieldValue.serverTimestamp(),
-      }).catch(() => {});
+      await writeSkippedRecord(msg, member, messageIndex, 'skipped_quota');
       return;
     }
+
+    // Hard stop when the reservation is exhausted (spec §5.3.4): the unit is
+    // recorded as held, retryable via /internal/campaigns/retry-held after a
+    // top-up. Check-and-claim happens synchronously (no await in between), so
+    // concurrent workers can't overshoot the budget.
+    let unitCost = 0;
+    if (reservation && creditConfig && memberEligible(msg, member)) {
+      unitCost = unitCredits(creditConfig, msg);
+      if (creditsUsed + unitCost > reservation.reserved) {
+        heldCount += 1;
+        heldCredits += unitCost;
+        await writeSkippedRecord(msg, member, messageIndex, 'held_insufficient_credits');
+        return;
+      }
+      creditsUsed += unitCost; // optimistic claim; refunded below on failure
+    }
+
     const r = await recordAndDispatch(campaign, msg, messageIndex, member, venueNameCache);
     if (r.ok) {
       sent += 1;
       sentPerChannel[msg.channel as MessagingChannel] += 1;
+      countCredits(msg);
     } else {
       failed += 1;
+      if (unitCost > 0) creditsUsed -= unitCost; // provider rejected — not charged
     }
   });
 
@@ -511,14 +673,55 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
       .map((channel) => recordSends(campaign.tenantUserId, channel, sentPerChannel[channel])),
   );
 
+  // Settle the credit run (spec §5.3.5): one transaction debits what was
+  // actually used and frees the unused remainder of the reservation.
+  if (reservation) {
+    try {
+      await settleCampaignRun({
+        tenantUserId: campaign.tenantUserId,
+        campaignId: campaign.id,
+        runId: reservation.runId,
+        reservedCredits: reservation.reserved,
+        usedCredits: creditsUsed,
+        rateCardVersion: reservation.rateCardVersion,
+        breakdown: creditBreakdown,
+      });
+      await maybeNotifyLowBalance(campaign.tenantUserId);
+    } catch (err) {
+      // Leave creditReservation on the doc — the sweeper releases it later.
+      console.error(`[CAMPAIGN] settle failed for ${campaign.id} (sweeper will release):`, err);
+    }
+  }
+
   const update: Record<string, unknown> = {
     status: 'sent',
     'stats.sent': FieldValue.increment(sent),
     sentAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   };
+  if (reservation) {
+    update.creditReservation = FieldValue.delete();
+    update.creditsUsed = FieldValue.increment(creditsUsed);
+  }
+  if (heldCount > 0) {
+    update.heldCount = FieldValue.increment(heldCount);
+    update.creditsWarning =
+      `${heldCount} message(s) held: not enough credits (needed ~${heldCredits} more). ` +
+      `Top up your credit wallet and retry the held messages.`;
+  } else if (creditMode === 'warn' && creditConfig && warnWallet) {
+    // Warn-only rollout: report what enforcement WOULD have done.
+    const wouldUse = Object.values(creditBreakdown.perChannel).reduce((sum, b) => sum + (b?.credits ?? 0), 0);
+    if (wouldUse > warnWallet.spendable) {
+      update.creditsWarning =
+        `This campaign used ~${wouldUse} credits but your spendable balance is ${Math.max(0, warnWallet.spendable)}. ` +
+        `Once credit enforcement is on, part of it would be held — consider topping up.`;
+      console.warn(
+        `[CAMPAIGN][credits-warn] ${campaign.id}: would use ${wouldUse}, spendable ${warnWallet.spendable}`,
+      );
+    }
+  }
   if (skippedQuota > 0) {
-    update.quotaWarning = `${skippedQuota} message(s) skipped: monthly quota reached. Buy addon credits or raise the plan quota.`;
+    update.quotaWarning = `${skippedQuota} message(s) skipped: monthly quota reached. Top up credits or raise the plan quota.`;
   } else if (entitlements) {
     // Soft warning when this run pushed a channel past its allowance.
     const over = (Object.keys(sentPerChannel) as MessagingChannel[]).filter((channel) => {
@@ -526,13 +729,14 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
       return remaining !== null && sentPerChannel[channel] > remaining;
     });
     if (over.length > 0) {
-      update.quotaWarning = `Sent past the monthly quota on: ${over.join(', ')}. Enforcement is off, but consider addon credits.`;
+      update.quotaWarning = `Sent past the monthly quota on: ${over.join(', ')}. Enforcement is off, but consider topping up credits.`;
     }
   }
   await ref.update(update);
 
   console.log(
-    `[CAMPAIGN] ${campaign.id} dispatched: ${sent} sent, ${failed} failed, ${skippedQuota} skipped_quota (audience ${audience.length})`,
+    `[CAMPAIGN] ${campaign.id} dispatched: ${sent} sent, ${failed} failed, ${skippedQuota} skipped_quota, ` +
+      `${heldCount} held (audience ${audience.length}${reservation ? `, credits ${creditsUsed}/${reservation.reserved}` : ''})`,
   );
   return { sent, failed };
 }
@@ -546,12 +750,38 @@ async function loadCampaign(campaignId: string): Promise<CampaignDoc | null> {
 /**
  * Atomically claim a campaign for sending: only a draft/scheduled broadcast owned
  * by `tenantUserId` may transition to "sending". Returns the campaign or a reason.
+ *
+ * With ENFORCE_CREDITS=true the SAME transaction also reserves the estimated
+ * credits (spec §5.3.2) — the status flip and the wallet hold are one atomic
+ * unit, so a claimed campaign always has its budget and an unclaimed one
+ * never holds credits. Insufficient balance fails the claim with a shortfall
+ * payload (same shape family as the `cannot_send_from_*` errors).
  */
 async function claimForSending(
   campaignId: string,
   tenantUserId: string,
-): Promise<{ ok: true; campaign: CampaignDoc } | { ok: false; reason: string }> {
+): Promise<
+  | { ok: true; campaign: CampaignDoc }
+  | { ok: false; reason: string; needed?: number; spendable?: number }
+> {
   const ref = db.collection(CAMPAIGNS).doc(campaignId);
+
+  // Estimate outside the transaction (audience materialization is heavy);
+  // the counter inside dispatch trues everything up at settle time.
+  let plannedReservation: CreditReservation | null = null;
+  if (creditsEnforcementMode() === 'enforce') {
+    const campaign = await loadCampaign(campaignId);
+    if (campaign && campaign.tenantUserId === tenantUserId && campaign.type === 'broadcast') {
+      const estimate = await estimateCampaign(campaign);
+      plannedReservation = {
+        runId: newRunId(),
+        reserved: estimate.creditsNeeded,
+        rateCardVersion: estimate.config.rateCardVersion,
+        reservedAt: new Date().toISOString(),
+      };
+    }
+  }
+
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return { ok: false as const, reason: 'not_found' };
@@ -561,6 +791,34 @@ async function claimForSending(
     if (!['draft', 'scheduled'].includes(data.status)) {
       return { ok: false as const, reason: `cannot_send_from_${data.status}` };
     }
+
+    if (plannedReservation) {
+      const reserved = await reserveInTransaction(tx, {
+        tenantUserId,
+        campaignId,
+        runId: plannedReservation.runId,
+        credits: plannedReservation.reserved,
+        rateCardVersion: plannedReservation.rateCardVersion,
+      });
+      if (!reserved.ok) {
+        return {
+          ok: false as const,
+          reason: 'insufficient_credits',
+          needed: reserved.needed,
+          spendable: reserved.spendable,
+        };
+      }
+      tx.update(ref, {
+        status: 'sending',
+        creditReservation: plannedReservation,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return {
+        ok: true as const,
+        campaign: { ...data, id: snap.id, status: 'sending', creditReservation: plannedReservation },
+      };
+    }
+
     tx.update(ref, { status: 'sending', updatedAt: FieldValue.serverTimestamp() });
     return { ok: true as const, campaign: { ...data, id: snap.id, status: 'sending' } };
   });
@@ -574,7 +832,14 @@ async function claimForSending(
 export async function sendBroadcast(
   campaignId: string,
   tenantUserId: string,
-): Promise<{ ok: boolean; status?: string; scheduledFor?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  status?: string;
+  scheduledFor?: string;
+  error?: string;
+  needed?: number;
+  spendable?: number;
+}> {
   const campaign = await loadCampaign(campaignId);
   if (!campaign) return { ok: false, error: 'not_found' };
   if (campaign.tenantUserId !== tenantUserId) return { ok: false, error: 'forbidden' };
@@ -593,7 +858,7 @@ export async function sendBroadcast(
   }
 
   const claim = await claimForSending(campaignId, tenantUserId);
-  if (!claim.ok) return { ok: false, error: claim.reason };
+  if (!claim.ok) return { ok: false, error: claim.reason, needed: claim.needed, spendable: claim.spendable };
 
   // Fire-and-forget: don't block the HTTP response on a large dispatch.
   dispatchCampaign(claim.campaign).catch(async (err) => {
@@ -608,6 +873,49 @@ export async function sendBroadcast(
   return { ok: true, status: 'sending' };
 }
 
+/** How old a reservation must be before the sweeper releases it. */
+const RESERVATION_SWEEP_HOURS = 6;
+
+/**
+ * Reservation-leak sweeper (spec §9): a dispatch crash between reserve and
+ * settle leaves `creditReservation` on the campaign and held credits on the
+ * wallet. Any reservation older than RESERVATION_SWEEP_HOURS is released —
+ * a healthy dispatch settles within minutes, so age alone marks the leak.
+ * releaseReservation shares the settle's ledger doc id, so racing a
+ * late-but-alive settle is safe (whichever runs second no-ops).
+ */
+export async function sweepStaleReservations(): Promise<void> {
+  const cutoffIso = new Date(Date.now() - RESERVATION_SWEEP_HOURS * 60 * 60 * 1000).toISOString();
+  const snap = await db
+    .collection(CAMPAIGNS)
+    .where('creditReservation.reservedAt', '<', cutoffIso)
+    .get();
+
+  for (const doc of snap.docs) {
+    const data = doc.data() as CampaignDoc;
+    const reservation = data.creditReservation;
+    if (!reservation?.runId) continue;
+    try {
+      await releaseReservation({
+        tenantUserId: data.tenantUserId,
+        campaignId: doc.id,
+        runId: reservation.runId,
+        credits: reservation.reserved,
+        note: `Stale reservation swept (status ${data.status}, reserved ${reservation.reservedAt})`,
+      });
+      await doc.ref.update({
+        creditReservation: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      console.warn(
+        `[CAMPAIGN SWEEPER] released stale reservation of ${reservation.reserved} credits on ${doc.id} (status ${data.status})`,
+      );
+    } catch (err) {
+      console.error(`[CAMPAIGN SWEEPER] failed to release reservation on ${doc.id}:`, err);
+    }
+  }
+}
+
 /** Run any scheduled broadcasts whose send time has arrived. Called by the cron. */
 export async function runDueScheduledCampaigns(): Promise<void> {
   const snap = await db.collection(CAMPAIGNS).where('status', '==', 'scheduled').get();
@@ -617,12 +925,280 @@ export async function runDueScheduledCampaigns(): Promise<void> {
     const sendAt = data.schedule?.sendAt;
     if (!sendAt || new Date(sendAt).getTime() > now) continue;
     const claim = await claimForSending(doc.id, data.tenantUserId);
-    if (!claim.ok) continue;
+    if (!claim.ok) {
+      // A scheduled campaign short on credits stays parked; surface why so the
+      // tenant sees it on the dashboard, and retry on the next tick (a top-up
+      // unblocks it without further action).
+      if (claim.reason === 'insufficient_credits') {
+        await doc.ref
+          .update({
+            creditsWarning:
+              `Scheduled send is waiting for credits: needs ${claim.needed ?? '?'} but only ` +
+              `${claim.spendable ?? 0} are spendable. Top up to let it go out.`,
+            updatedAt: FieldValue.serverTimestamp(),
+          })
+          .catch(() => {});
+        await maybeNotifyLowBalance(data.tenantUserId).catch(() => {});
+      }
+      continue;
+    }
     dispatchCampaign(claim.campaign).catch(async (err) => {
       console.error(`[CAMPAIGN] scheduled dispatch failed for ${doc.id}:`, err);
       await doc.ref.update({ status: 'scheduled', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
     });
   }
+}
+
+/**
+ * Launch-preview estimate (spec §5.3.1): materialize the audience and price it
+ * against the current rate card, next to the tenant's spendable balance. The
+ * CMS Review step renders "This campaign needs ~1,240 credits; you have 4,230."
+ */
+export async function estimateCampaignCredits(
+  campaignId: string,
+  tenantUserId: string,
+): Promise<
+  | {
+      ok: true;
+      audienceCount: number;
+      unitsPerChannel: Record<Channel, number>;
+      creditsPerChannel: Record<Channel, number>;
+      smsSegmentsPerMessage: number | null;
+      creditsNeeded: number;
+      spendable: number;
+      sufficient: boolean;
+      shortfall: number;
+      rateCardVersion: number;
+      enforcementMode: string;
+    }
+  | { ok: false; error: string }
+> {
+  const campaign = await loadCampaign(campaignId);
+  if (!campaign) return { ok: false, error: 'not_found' };
+  if (campaign.tenantUserId !== tenantUserId) return { ok: false, error: 'forbidden' };
+
+  const [estimate, wallet] = await Promise.all([
+    estimateCampaign(campaign),
+    getWalletSnapshot(tenantUserId).catch(() => null),
+  ]);
+  const spendable = wallet?.spendable ?? 0;
+
+  return {
+    ok: true,
+    audienceCount: estimate.audienceCount,
+    unitsPerChannel: estimate.unitsPerChannel,
+    creditsPerChannel: estimate.creditsPerChannel,
+    smsSegmentsPerMessage: estimate.smsSegmentsPerMessage,
+    creditsNeeded: estimate.creditsNeeded,
+    spendable,
+    sufficient: spendable >= estimate.creditsNeeded,
+    shortfall: Math.max(0, estimate.creditsNeeded - spendable),
+    rateCardVersion: estimate.config.rateCardVersion,
+    enforcementMode: creditsEnforcementMode(),
+  };
+}
+
+/**
+ * Re-dispatch a campaign's held sends after a top-up (spec §5.3.4). There is
+ * no generic mid-send pause in this engine — held units are the resume
+ * mechanism: re-estimate them, re-reserve, dispatch only those, settle.
+ * Consent is re-checked per guest at send time (spec §9).
+ */
+export async function retryHeldSends(
+  campaignId: string,
+  tenantUserId: string,
+): Promise<
+  | { ok: true; retried: number; sent: number; failed: number; stillHeld: number }
+  | { ok: false; error: string; needed?: number; spendable?: number }
+> {
+  const campaign = await loadCampaign(campaignId);
+  if (!campaign) return { ok: false, error: 'not_found' };
+  if (campaign.tenantUserId !== tenantUserId) return { ok: false, error: 'forbidden' };
+  if (campaign.type !== 'broadcast') return { ok: false, error: 'not_broadcast' };
+  if (campaign.status !== 'sent') return { ok: false, error: `cannot_retry_from_${campaign.status}` };
+
+  const heldSnap = await db
+    .collection(CAMPAIGN_SENDS)
+    .where('campaignId', '==', campaignId)
+    .where('deliveryStatus', '==', 'held_insufficient_credits')
+    .get();
+  if (heldSnap.empty) return { ok: false, error: 'no_held_sends' };
+
+  const messages = campaign.messages || [];
+  const config = await getCreditConfig();
+  const mode = creditsEnforcementMode();
+
+  // Rebuild audience members from the live guest docs — consent re-checked NOW.
+  const guestIds = Array.from(new Set(heldSnap.docs.map((d) => String(d.data().wifiGuestId || '')))).filter(Boolean);
+  const guestDocs = new Map<string, FirebaseFirestore.DocumentData>();
+  await Promise.all(
+    chunk(guestIds, FIRESTORE_IN_LIMIT).map(async (ids) => {
+      const refs = ids.map((id) => db.collection(USERS).doc(id));
+      const snaps = await db.getAll(...refs);
+      snaps.forEach((s) => {
+        if (s.exists) guestDocs.set(s.id, s.data() as FirebaseFirestore.DocumentData);
+      });
+    }),
+  );
+
+  interface RetryUnit {
+    recordRef: FirebaseFirestore.DocumentReference;
+    msg: CampaignMessage;
+    messageIndex: number;
+    member: AudienceMember;
+    cost: number;
+  }
+  const units: RetryUnit[] = [];
+  let droppedOptOut = 0;
+
+  const apVenue = await resolveTenantApVenueMap(tenantUserId);
+  for (const recordDoc of heldSnap.docs) {
+    const record = recordDoc.data();
+    const messageIndex = Number(record.messageIndex ?? -1);
+    const msg = messages[messageIndex];
+    if (!msg || !campaign.channels.includes(msg.channel)) continue;
+    const guest = guestDocs.get(String(record.wifiGuestId));
+    if (!guest || !isOptedInFor(guest, msg.channel)) {
+      // Guest opted out (or vanished) since the original run — never retry.
+      droppedOptOut += 1;
+      await recordDoc.ref
+        .update({
+          deliveryStatus: 'failed',
+          failureReason: 'opted_out_channel',
+          statusUpdatedAt: FieldValue.serverTimestamp(),
+        })
+        .catch(() => {});
+      continue;
+    }
+    const accessPointId = (guest.captivePortalAccessPointId as string) || null;
+    units.push({
+      recordRef: recordDoc.ref,
+      msg,
+      messageIndex,
+      member: {
+        guestId: recordDoc.data().wifiGuestId,
+        firstName: (guest.firstName as string) || '',
+        lastName: (guest.lastName as string) || '',
+        email: typeof guest.email === 'string' && guest.email.includes('@') ? guest.email : null,
+        phone: typeof guest.phone === 'string' && guest.phone.trim() ? guest.phone : null,
+        phoneCountryCode: (guest.phoneCountryCode as string) || '',
+        accessPointId,
+        venueId: accessPointId ? (apVenue.get(accessPointId) ?? null) : null,
+        optOuts: {
+          email: guest.unsubscribed === true,
+          sms: guest.smsOptOut === true,
+          whatsapp: guest.whatsappOptOut === true,
+        },
+      },
+      cost: unitCredits(config, msg),
+    });
+  }
+
+  if (units.length === 0) {
+    return { ok: true, retried: 0, sent: 0, failed: droppedOptOut, stillHeld: 0 };
+  }
+
+  // Re-reserve for the held units only.
+  const runId = newRunId();
+  const creditsNeeded = units.reduce((sum, u) => sum + u.cost, 0);
+  let reserved = 0;
+  if (mode === 'enforce') {
+    try {
+      await reserveCredits({
+        tenantUserId,
+        campaignId,
+        runId,
+        credits: creditsNeeded,
+        rateCardVersion: config.rateCardVersion,
+      });
+      reserved = creditsNeeded;
+    } catch (err) {
+      if (err instanceof InsufficientCreditsError) {
+        return { ok: false, error: 'insufficient_credits', needed: err.needed, spendable: err.spendable };
+      }
+      throw err;
+    }
+  }
+
+  const venueNameCache = new Map<string, string>();
+  let sent = 0;
+  let failed = 0;
+  let creditsUsed = 0;
+  const sentPerChannel: Record<MessagingChannel, number> = { email: 0, sms: 0, whatsapp: 0 };
+  const breakdown: SettleBreakdown = { perChannel: {}, providerCostMinorSnapshot: 0 };
+
+  await pMap(units, DISPATCH_CONCURRENCY, async (unit) => {
+    let outcome: DispatchOutcome;
+    try {
+      outcome = await dispatchOne(campaign, unit.msg, unit.member, venueNameCache, unit.recordRef.id);
+    } catch (err) {
+      outcome = { ok: false, status: 'failed', reason: err instanceof Error ? err.message : 'dispatch_error' };
+    }
+
+    const patch: Record<string, unknown> = {
+      deliveryStatus: outcome.status,
+      retriedAt: FieldValue.serverTimestamp(),
+      statusUpdatedAt: FieldValue.serverTimestamp(),
+    };
+    if (outcome.providerField && outcome.providerId) patch[outcome.providerField] = outcome.providerId;
+    if (outcome.reason) patch.failureReason = outcome.reason;
+    if (outcome.shortCodes && outcome.shortCodes.length) patch.shortCodes = outcome.shortCodes;
+    if (outcome.rendered?.subject !== undefined) patch.subject = outcome.rendered.subject;
+    if (outcome.rendered?.body !== undefined) patch.body = outcome.rendered.body;
+    if (outcome.rendered?.content !== undefined) patch.content = outcome.rendered.content;
+    await unit.recordRef.update(patch).catch(() => {});
+
+    if (outcome.ok) {
+      sent += 1;
+      sentPerChannel[unit.msg.channel as MessagingChannel] += 1;
+      creditsUsed += unit.cost;
+      const bucket = (breakdown.perChannel[unit.msg.channel] ??= { messages: 0, credits: 0 });
+      bucket.messages += 1;
+      bucket.credits += unit.cost;
+      if (unit.msg.channel === 'sms') bucket.segments = (bucket.segments ?? 0) + (unitSegments(unit.msg) ?? 1);
+      breakdown.providerCostMinorSnapshot += unitProviderCost(config, unit.msg);
+    } else {
+      failed += 1;
+    }
+  });
+
+  await Promise.all(
+    (Object.keys(sentPerChannel) as MessagingChannel[])
+      .filter((channel) => sentPerChannel[channel] > 0)
+      .map((channel) => recordSends(tenantUserId, channel, sentPerChannel[channel])),
+  );
+
+  if (mode === 'enforce') {
+    try {
+      await settleCampaignRun({
+        tenantUserId,
+        campaignId,
+        runId,
+        reservedCredits: reserved,
+        usedCredits: creditsUsed,
+        rateCardVersion: config.rateCardVersion,
+        breakdown,
+      });
+      await maybeNotifyLowBalance(tenantUserId);
+    } catch (err) {
+      console.error(`[CAMPAIGN] retry settle failed for ${campaignId} (sweeper will release):`, err);
+    }
+  }
+
+  // All held records were either retried or converted to failed above.
+  const ref = db.collection(CAMPAIGNS).doc(campaignId);
+  await ref.update({
+    'stats.sent': FieldValue.increment(sent),
+    heldCount: 0,
+    creditsWarning: FieldValue.delete(),
+    ...(mode === 'enforce' ? { creditsUsed: FieldValue.increment(creditsUsed) } : {}),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  console.log(
+    `[CAMPAIGN] ${campaignId} retry-held: ${sent} sent, ${failed + droppedOptOut} failed (credits ${creditsUsed}/${reserved})`,
+  );
+  return { ok: true, retried: units.length, sent, failed: failed + droppedOptOut, stillHeld: 0 };
 }
 
 /** Pause a not-yet-sent (scheduled) broadcast so the cron skips it. */
@@ -700,6 +1276,20 @@ export async function fireAutomationsForGuest(
   };
   const venueNameCache = new Map<string, string>();
 
+  // Credit gate for automations (spec §5.3.6): no reservation at this volume —
+  // check spendable up front, debit per accepted message. The snapshot is one
+  // read per firing; drift between concurrent firings is the bounded overspend
+  // the spec accepts, and it settles on the next read.
+  const creditMode = creditsEnforcementMode();
+  const creditConfig = creditMode !== 'off' ? await getCreditConfig().catch(() => null) : null;
+  let autoSpendable = Infinity;
+  if (creditMode === 'enforce' && creditConfig) {
+    autoSpendable = await getWalletSnapshot(tenantUserId)
+      .then((w) => (w.suspended ? 0 : w.spendable))
+      .catch(() => Infinity); // wallet read failure fails open (spec: fail-open)
+  }
+  let debited = false;
+
   for (const doc of snap.docs) {
     const campaign = { id: doc.id, ...(doc.data() as Omit<CampaignDoc, 'id'>) };
     if (campaign.status !== 'active' || campaign.type !== 'automation') continue;
@@ -728,6 +1318,30 @@ export async function fireAutomationsForGuest(
         const remaining = entitlements.remaining[channel];
         if (remaining !== null && remaining <= 0) continue; // skipped_quota
       }
+
+      const msgCost = creditConfig ? unitCredits(creditConfig, messages[i]) : 0;
+      if (creditMode === 'enforce' && creditConfig && autoSpendable < msgCost) {
+        // Out of credits: record the held message + alert (24h-deduped).
+        await db
+          .collection(CAMPAIGN_SENDS)
+          .add({
+            campaignId: campaign.id,
+            tenantUserId: campaign.tenantUserId,
+            wifiGuestId: member.guestId,
+            channel,
+            messageIndex: i,
+            to: channel === 'email' ? member.email : member.phone,
+            deliveryStatus: 'held_insufficient_credits',
+            wifiEvent,
+            source: 'automation',
+            statusUpdatedAt: FieldValue.serverTimestamp(),
+            scheduledAt: FieldValue.serverTimestamp(),
+          })
+          .catch(() => {});
+        await maybeNotifyLowBalance(campaign.tenantUserId).catch(() => {});
+        continue;
+      }
+
       const r = await recordAndDispatch(campaign, messages[i], i, member, venueNameCache, {
         wifiEvent,
         source: 'automation',
@@ -735,6 +1349,20 @@ export async function fireAutomationsForGuest(
       if (r.ok) {
         sent += 1;
         sentPerChannel[channel] += 1;
+        if (creditMode === 'enforce' && creditConfig && msgCost > 0) {
+          autoSpendable -= msgCost;
+          debited = true;
+          await debitOne({
+            tenantUserId: campaign.tenantUserId,
+            sendId: r.sendId,
+            credits: msgCost,
+            channel: channel as MessagingChannel,
+            segments: unitSegments(messages[i]) ?? undefined,
+            campaignId: campaign.id,
+            rateCardVersion: creditConfig.rateCardVersion,
+            providerCostMinorSnapshot: unitProviderCost(creditConfig, messages[i]),
+          }).catch((err) => console.error('[CAMPAIGN AUTOMATION credits]', err));
+        }
       }
     }
     if (sent > 0) {
@@ -748,4 +1376,6 @@ export async function fireAutomationsForGuest(
       );
     }
   }
+
+  if (debited) await maybeNotifyLowBalance(tenantUserId).catch(() => {});
 }

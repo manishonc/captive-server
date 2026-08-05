@@ -23,9 +23,41 @@ import {
   pauseCampaign,
   resumeCampaign,
   cancelCampaign,
+  estimateCampaignCredits,
+  retryHeldSends,
 } from '../services/campaigns';
+import { getCreditConfig } from '../services/credits';
+import { db } from '../firebase';
+import { FieldValue } from 'firebase-admin/firestore';
 
 const router = Router();
+
+/**
+ * Daily test-send cap (spec §5.3.8): test sends are free, so a per-tenant
+ * per-UTC-day counter prevents abuse of the no-analytics path. Fails open on
+ * counter errors — a broken counter must not break the preview feature.
+ * Returns true when the send is allowed.
+ */
+async function checkTestSendCap(tenantUserId: string): Promise<{ allowed: boolean; limit: number }> {
+  const config = await getCreditConfig();
+  const limit = Number(config.testSendDailyLimit) || 0;
+  if (limit <= 0) return { allowed: true, limit: 0 }; // 0 = uncapped
+  const day = new Date().toISOString().slice(0, 10);
+  const ref = db.collection('CaptivePortal_TestSendCounters').doc(`${tenantUserId}_${day}`);
+  try {
+    const allowed = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const count = Number(snap.data()?.count ?? 0);
+      if (count >= limit) return false;
+      tx.set(ref, { tenantUserId, day, count: FieldValue.increment(1), updatedAt: new Date() }, { merge: true });
+      return true;
+    });
+    return { allowed, limit };
+  } catch (err) {
+    console.error('[INTERNAL test-send cap]', err);
+    return { allowed: true, limit };
+  }
+}
 
 /** Shared `x-internal-secret` guard. Writes 401 and returns false when unauthorized. */
 function requireInternalSecret(req: Request, res: Response): boolean {
@@ -39,6 +71,7 @@ function requireInternalSecret(req: Request, res: Response): boolean {
 
 interface TestSendBody {
   venueId?: string;
+  tenantUserId?: string;
   channel?: 'email' | 'sms' | 'whatsapp';
   recipient?: string;
   message?: {
@@ -61,7 +94,7 @@ function normalizePhone(recipient: string): string | null {
 router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Response) => {
   if (!requireInternalSecret(req, res)) return;
 
-  const { venueId, channel, recipient, message } = req.body;
+  const { venueId, tenantUserId, channel, recipient, message } = req.body;
 
   if (!channel || !['email', 'sms', 'whatsapp'].includes(channel)) {
     return res.status(400).json({ ok: false, error: 'Invalid or missing channel' });
@@ -71,6 +104,19 @@ router.post('/test-send', async (req: Request<{}, {}, TestSendBody>, res: Respon
   }
   if (!message || typeof message !== 'object') {
     return res.status(400).json({ ok: false, error: 'Missing message' });
+  }
+
+  // Daily cap on free test sends (spec §5.3.8). Only enforceable when the CMS
+  // forwards the tenant; older callers without it stay uncapped.
+  if (tenantUserId && typeof tenantUserId === 'string') {
+    const cap = await checkTestSendCap(tenantUserId);
+    if (!cap.allowed) {
+      return res.status(429).json({
+        ok: false,
+        error: `Daily test-send limit reached (${cap.limit}/day). Try again tomorrow.`,
+        code: 'test_send_limit',
+      });
+    }
   }
 
   try {
@@ -232,11 +278,55 @@ router.post('/campaigns/send', async (req: Request<{}, {}, CampaignActionBody>, 
   }
   try {
     const result = await sendBroadcast(String(campaignId), String(tenantUserId));
-    if (!result.ok) return res.status(campaignErrorStatus(result.error)).json({ ok: false, error: result.error });
+    if (!result.ok) {
+      const status = result.error === 'insufficient_credits' ? 402 : campaignErrorStatus(result.error);
+      return res.status(status).json({
+        ok: false,
+        error: result.error,
+        ...(result.needed !== undefined ? { needed: result.needed, spendable: result.spendable } : {}),
+      });
+    }
     return res.json({ ok: true, status: result.status, scheduledFor: result.scheduledFor });
   } catch (err) {
     console.error('[INTERNAL campaigns/send]', err);
     return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'send failed' });
+  }
+});
+
+// Launch-preview credit estimate for the CMS Review step (spec §5.3.1).
+router.post('/campaigns/estimate', async (req: Request<{}, {}, CampaignActionBody>, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { campaignId, tenantUserId } = req.body || {};
+  if (!campaignId || !tenantUserId) {
+    return res.status(400).json({ ok: false, error: 'campaignId and tenantUserId are required' });
+  }
+  try {
+    const result = await estimateCampaignCredits(String(campaignId), String(tenantUserId));
+    if (!result.ok) return res.status(campaignErrorStatus(result.error)).json({ ok: false, error: result.error });
+    return res.json(result);
+  } catch (err) {
+    console.error('[INTERNAL campaigns/estimate]', err);
+    return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'estimate failed' });
+  }
+});
+
+// Re-dispatch held sends after a top-up (spec §5.3.4).
+router.post('/campaigns/retry-held', async (req: Request<{}, {}, CampaignActionBody>, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { campaignId, tenantUserId } = req.body || {};
+  if (!campaignId || !tenantUserId) {
+    return res.status(400).json({ ok: false, error: 'campaignId and tenantUserId are required' });
+  }
+  try {
+    const result = await retryHeldSends(String(campaignId), String(tenantUserId));
+    if (!result.ok) {
+      const status = result.error === 'insufficient_credits' ? 402 : campaignErrorStatus(result.error);
+      return res.status(status).json({ ...result, ok: false });
+    }
+    return res.json(result);
+  } catch (err) {
+    console.error('[INTERNAL campaigns/retry-held]', err);
+    return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'retry-held failed' });
   }
 });
 

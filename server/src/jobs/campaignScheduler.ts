@@ -8,11 +8,16 @@
  */
 
 import cron from 'node-cron';
-import { runDueScheduledCampaigns } from '../services/campaigns';
+import { runDueScheduledCampaigns, sweepStaleReservations } from '../services/campaigns';
 
 export function startCampaignScheduler(): void {
   cron.schedule('* * * * *', () => {
     runDueScheduledCampaigns().catch((err) => console.error('[CAMPAIGN SCHEDULER ERROR]', err));
+  });
+  // Credit reservation-leak sweeper (spec §9): hourly is plenty — it only
+  // matters after a dispatch crashed between reserve and settle.
+  cron.schedule('17 * * * *', () => {
+    sweepStaleReservations().catch((err) => console.error('[CAMPAIGN SWEEPER ERROR]', err));
   });
   console.log('[CAMPAIGN SCHEDULER] Started — checking every minute for due broadcasts');
 }

@@ -4,7 +4,9 @@
  * Mirrors cms/app/api/captive-portal/_lib/entitlements.js (keep resolution
  * rules identical): active subscription -> plan quotas/flags (defaults keep
  * pre-billing tenants working: unlimited, aiEnabled:true, hidePoweredBy:false)
- * -> current UTC-month usage -> purchased credits -> remaining.
+ * -> current UTC-month usage -> purchased credits -> remaining. The unified
+ * credit wallet (CaptivePortal_CreditWallets) is exposed read-only; send-time
+ * enforcement arrives with ENFORCE_CREDITS (cms docs/credit-system-spec.md §5.3).
  *
  * A 5-minute in-memory cache keeps the per-send overhead negligible; the
  * dispatch loop's own counters handle intra-run accounting.
@@ -14,6 +16,7 @@ import { db } from '../firebase';
 
 export const USAGE_COLLECTION = 'CaptivePortal_TenantUsage';
 export const CREDITS_COLLECTION = 'CaptivePortal_TenantCredits';
+export const WALLETS_COLLECTION = 'CaptivePortal_CreditWallets';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_SUBSCRIPTION_STATUSES = ['active', 'trialing'];
@@ -33,6 +36,15 @@ const DEFAULT_QUOTAS: Record<string, number | null> = {
 };
 const DEFAULT_FLAGS = { aiEnabled: true, hidePoweredBy: false };
 
+export interface CreditWalletSnapshot {
+  balance: number;
+  subscriptionBalance: number;
+  purchasedBalance: number;
+  reserved: number;
+  spendable: number;
+  suspended: boolean;
+}
+
 export interface Entitlements {
   planId: string | null;
   quotas: Record<string, number | null>;
@@ -42,6 +54,10 @@ export interface Entitlements {
   /** null = unlimited; otherwise quota-remaining + credits. */
   remaining: Record<Channel, number | null>;
   month: string;
+  /** Unified credit wallet — read-only exposure; enforcement is ENFORCE_CREDITS (Phase 3). */
+  wallet: CreditWalletSnapshot;
+  includedCreditsPerMonth: number | null;
+  creditRollover: boolean;
 }
 
 interface CacheEntry {
@@ -98,12 +114,14 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
   const flags = { ...DEFAULT_FLAGS, ...((plan?.flags as Raw) ?? {}) } as Entitlements['flags'];
 
   const month = currentUsageMonth();
-  const [usageSnap, creditsSnap] = await Promise.all([
+  const [usageSnap, creditsSnap, walletSnap] = await Promise.all([
     db.collection(USAGE_COLLECTION).doc(usageDocId(tenantUserId)).get(),
     db.collection(CREDITS_COLLECTION).doc(tenantUserId).get(),
+    db.collection(WALLETS_COLLECTION).doc(tenantUserId).get(),
   ]);
   const usageData = (usageSnap.exists ? usageSnap.data() : {}) as Raw;
   const creditsData = (creditsSnap.exists ? creditsSnap.data() : {}) as Raw;
+  const walletData = (walletSnap.exists ? walletSnap.data() : {}) as Raw;
 
   const usage = {} as Record<Channel, number>;
   const credits = {} as Record<Channel, number>;
@@ -118,6 +136,18 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
         : Math.max(0, Number(quota) - usage[channel]) + credits[channel];
   }
 
+  const balance = Number(walletData.balance ?? 0);
+  const reserved = Number(walletData.reserved ?? 0);
+  const wallet: CreditWalletSnapshot = {
+    balance,
+    subscriptionBalance: Number(walletData.subscriptionBalance ?? 0),
+    purchasedBalance: Number(walletData.purchasedBalance ?? 0),
+    reserved,
+    spendable: balance - reserved,
+    suspended: walletData.suspended === true,
+  };
+
+  const includedRaw = Number(plan?.includedCreditsPerMonth);
   const value: Entitlements = {
     planId: (subscription?.planId as string) ?? null,
     quotas,
@@ -126,6 +156,9 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
     credits,
     remaining,
     month,
+    wallet,
+    includedCreditsPerMonth: Number.isInteger(includedRaw) ? includedRaw : null,
+    creditRollover: plan?.creditRollover === true,
   };
   cache.set(tenantUserId, { value, expiresAt: Date.now() + CACHE_TTL_MS });
   return value;
