@@ -567,7 +567,7 @@ export async function maybeNotifyLowBalance(tenantUserId: string): Promise<void>
         'HeidiFi: your messaging credits are running low',
         `<p>Your credit balance is down to <strong>${Math.max(0, spendable)} credits</strong> — roughly ` +
           `${emailsLeft} emails, ${smsLeft} one-segment SMS or ${waLeft} WhatsApp messages.</p>` +
-          `<p>Top up in your HeidiFi dashboard under <strong>My Plan → Credit wallet</strong> to keep campaigns running.</p>`,
+          `<p>Top up in your HeidiFi dashboard under <strong>Billing &amp; Credits</strong> to keep campaigns running.</p>`,
         0,
       ).catch(() => {});
     }
