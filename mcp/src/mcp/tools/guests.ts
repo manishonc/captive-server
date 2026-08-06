@@ -14,6 +14,7 @@ import {
   tenantFrom,
   tsToIso,
 } from '../shared';
+import { callCmsInternal, cmsErrorMessage } from '../../cmsClient';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -144,7 +145,26 @@ export function registerGuestTools(server: McpServer): void {
         return errorResult('Guest not found or not owned by this account.');
       }
 
+      // Engagement rollup from the CMS, which owns the aggregation rules — this is
+      // the same code path that builds the dashboard's expandable guest row, so the
+      // two can't disagree. Cheap because the CMS inverts the query to read only
+      // this guest's records. Best-effort: a guest's profile is still worth
+      // returning if the CMS is unreachable.
+      let engagement: unknown = null;
+      const summary = await callCmsInternal('/api/captive-portal/internal/analytics-drilldown', {
+        tenantUserId,
+        mode: 'guest-summary',
+        guestId: args.guestId,
+        venueId: apVenueId,
+      });
+      if (summary.status >= 200 && summary.status < 300) {
+        engagement = (summary.data.stats as unknown) ?? null;
+      } else {
+        console.warn('[get_guest] engagement lookup failed:', cmsErrorMessage(summary));
+      }
+
       return jsonResult({
+        engagement,
         guest: {
           id: snap.id,
           firstName: (d.firstName as string) ?? null,

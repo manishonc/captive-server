@@ -4,6 +4,7 @@ import { registerAccessPointTools } from './tools/accessPoints';
 import { registerGuestTools } from './tools/guests';
 import { registerCampaignTools } from './tools/campaigns';
 import { registerAnalyticsTools } from './tools/analytics';
+import { registerGuestEngagementTools } from './tools/guestEngagement';
 import { registerVenueConfigTools } from './tools/venueConfig';
 import { registerCampaignWriteTools } from './tools/campaignWrites';
 import { registerSplashConfigTools } from './tools/splashConfig';
@@ -24,6 +25,10 @@ import { registerUsageTools } from './tools/usage';
  *   guests:        list_guests, get_guest, search_guests
  *   campaigns:     list_campaigns, get_campaign
  *   analytics:     get_capture_stats, get_campaign_stats
+ *   engagement:    get_guest_engagement + list_guests_who_clicked/_opened/
+ *                  _visited/_rated, list_guests_messaged — the individual guests
+ *                  behind any venue-automation analytics number (proxies the CMS
+ *                  internal drill-down, which owns the aggregation rules)
  *   config:        get_venue_marketing_config, get_splash_config
  *
  * Tier 2 write/utility tools (the campaign capability layer for the CMS AI
@@ -52,6 +57,7 @@ export function buildMcpServer(): McpServer {
   registerGuestTools(server);
   registerCampaignTools(server);
   registerAnalyticsTools(server);
+  registerGuestEngagementTools(server);
   registerVenueConfigTools(server);
   registerCampaignWriteTools(server);
   registerSplashConfigTools(server);
