@@ -170,6 +170,10 @@ export function registerAnalyticsTools(server: McpServer): void {
           bounceRate: rate(funnel.bounced, funnel.sent),
         },
         byChannel: [...byChannel.entries()].map(([channel, c]) => ({ channel, ...c })),
+        // The clicker identities are already computed above; returning them costs
+        // nothing and saves a follow-up call. Capped so a large campaign doesn't
+        // blow up the tool result — `funnel.clicked` remains the true count.
+        clickedGuestIds: [...clickedGuests].slice(0, 200),
       });
     },
   );
