@@ -19,6 +19,20 @@ import { callCmsInternal, cmsErrorMessage } from '../../cmsClient';
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 
+/**
+ * The guest's splash language, or 'unknown'.
+ *
+ * Unknown covers both "captured before the venue offered a language choice" and
+ * a code we no longer support — either way the guest is unreachable by a
+ * language-targeted send, which is what the bucket has to mean.
+ */
+function guestLanguage(d: Record<string, unknown>): string {
+  const raw = d.language;
+  if (typeof raw !== 'string') return 'unknown';
+  const base = raw.trim().toLowerCase().split(/[-_]/)[0];
+  return ['en', 'de', 'it', 'fr'].includes(base) ? base : 'unknown';
+}
+
 /** Lean guest projection for list/search results (excludes raw device + consent blobs). */
 function leanGuest(g: GuestDoc, apMap: Map<string, TenantAccessPoint>) {
   const d = g.data;
@@ -31,6 +45,8 @@ function leanGuest(g: GuestDoc, apMap: Map<string, TenantAccessPoint>) {
     phone: (d.phone as string) ?? null,
     phoneCountryCode: (d.phoneCountryCode as string) ?? null,
     marketingOptIn: Boolean(d.marketingOptIn),
+    // 'unknown' rather than null: it is a targetable audience, not missing data.
+    language: guestLanguage(d),
     connectionCount: (d.connectionCount as number) ?? null,
     accessPointId: (d.captivePortalAccessPointId as string) ?? null,
     accessPointName: ap?.name ?? null,
@@ -59,11 +75,12 @@ export function registerGuestTools(server: McpServer): void {
     signedUpAfter?: string;
     signedUpBefore?: string;
     includeArchived?: boolean;
+    language?: string;
     limit?: number;
   }>(
     server,
     'list_guests',
-    'List WiFi guests (captured leads) for the authenticated tenant. By default returns guests across all of the tenant\'s venues; narrow with venueId or accessPointId. Optional filters: marketingOptIn, signedUpAfter/signedUpBefore (ISO dates), includeArchived. Newest first.',
+    'List WiFi guests (captured leads) for the authenticated tenant. By default returns guests across all of the tenant\'s venues; narrow with venueId or accessPointId. Optional filters: marketingOptIn, signedUpAfter/signedUpBefore (ISO dates), language, includeArchived. Newest first.',
     {
       venueId: z.string().optional().describe('Limit to guests captured at this venue (from list_venues).'),
       accessPointId: z.string().optional().describe('Limit to guests captured at this access point.'),
@@ -71,6 +88,10 @@ export function registerGuestTools(server: McpServer): void {
       signedUpAfter: z.string().optional().describe('ISO timestamp — only guests who signed up on/after this.'),
       signedUpBefore: z.string().optional().describe('ISO timestamp — only guests who signed up on/before this.'),
       includeArchived: z.boolean().optional().describe('Include archived guests (default false).'),
+      language: z
+        .enum(['en', 'de', 'it', 'fr', 'unknown'])
+        .optional()
+        .describe('Only guests who chose this language on the splash screen. "unknown" = no language recorded.'),
       limit: z.number().int().positive().max(MAX_LIMIT).optional().describe(`Max guests to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).`),
     },
     async (args, extra) => {
@@ -100,6 +121,7 @@ export function registerGuestTools(server: McpServer): void {
       if (args.marketingOptIn !== undefined) {
         guests = guests.filter((g) => Boolean(g.data.marketingOptIn) === args.marketingOptIn);
       }
+      if (args.language) guests = guests.filter((g) => guestLanguage(g.data) === args.language);
       if (args.signedUpAfter) guests = guests.filter((g) => (guestTime(g.data) ?? '') >= args.signedUpAfter!);
       if (args.signedUpBefore) guests = guests.filter((g) => (guestTime(g.data) ?? '') <= args.signedUpBefore!);
 
@@ -119,7 +141,7 @@ export function registerGuestTools(server: McpServer): void {
   addTool<{ guestId: string }>(
     server,
     'get_guest',
-    'Get a single WiFi guest by id, including consent records (privacy policy, terms, marketing) and reconnect count. Only returns guests captured at an access point owned by the authenticated tenant.',
+    'Get a single WiFi guest by id, including the splash language they chose, consent records (privacy policy, terms, marketing) and reconnect count. Only returns guests captured at an access point owned by the authenticated tenant.',
     { guestId: z.string().describe('The guest id (from list_guests / search_guests).') },
     async (args, extra) => {
       const tenantUserId = tenantFrom(extra);
@@ -173,6 +195,7 @@ export function registerGuestTools(server: McpServer): void {
           phone: (d.phone as string) ?? null,
           phoneCountryCode: (d.phoneCountryCode as string) ?? null,
           marketingOptIn: Boolean(d.marketingOptIn),
+          language: guestLanguage(d),
           connectionCount: (d.connectionCount as number) ?? null,
           accessPointId: apId || null,
           accessPointName: (apData.name as string) ?? null,

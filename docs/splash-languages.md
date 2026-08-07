@@ -2,7 +2,7 @@
 
 Guests can read the splash screen in English, German, Italian or French and
 switch between them. The language they end up on is stored with them and reused
-for the OTP and (once the authoring UI lands) for automations and campaigns.
+for the verification code, venue automations and campaigns.
 
 Off by default: a venue that does nothing renders exactly as it did before.
 
@@ -76,6 +76,41 @@ least two languages on a test venue first.
   real guest on that device (preview never writes `localStorage`)
 - a language removed from the venue after a guest picked it: the guest falls back
   to the default, and their stored `language` is left alone for targeting
+
+## Marketing in the guest's language
+
+Two separate systems, same model in both: the **base** message is the venue's
+default-language copy, and `translations.<code>` overrides only the fields it
+defines. A guest whose language has no variant gets the base — which is why a
+partly-translated automation or campaign is safe to leave running.
+
+|  | Venue automations | Campaign Manager |
+|---|---|---|
+| Storage | `CaptivePortal_EntityMarketing/venue_<id>` | `CaptivePortal_Campaigns` |
+| Edit | Marketing tab → language pills on each message | Campaign editor → language tabs on each message |
+| Target one language | not applicable (fires per guest) | `segment.language` (incl. `unknown`) |
+| MCP | read-only (`get_venue_marketing_config`) | `create_campaign` / `update_campaign` |
+
+A variant carries **content only**. `id`, `channel` and `delayMinutes` are
+rejected: one message must stay one message across languages, or
+`_lib/message-versions.js` treats a language edit as a different message and
+per-message analytics stop being attributable. (`translations` is deliberately
+not an identity field, so editing a translation correctly mints a new *version*
+of the same message.)
+
+Two rules that are easy to get wrong:
+
+- **Every language needs its own unsubscribe link.** The CMS injects one into
+  each translated email body; the MCP port rejects a body without one. Different
+  mechanism, same guarantee — checking only the base body would let a translated
+  email ship without one.
+- **WhatsApp variants can only change the locale**, and only to one Meta has
+  already approved for that same template. Meta owns the body; an unapproved
+  locale is error 132001.
+
+`segment.language` is for when the content genuinely differs per language. If it
+is the same message in four languages, write one campaign with four variants —
+that keeps the stats in one place.
 
 ## Notes
 

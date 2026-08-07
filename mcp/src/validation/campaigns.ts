@@ -33,6 +33,16 @@ const TRIGGER_KINDS = ['wifiEvent', 'dateRelative'];
 const DATE_ANCHORS = ['firstSignIn', 'lastSession'];
 const ENTITY_TYPES = ['listing', 'restaurant'];
 const ENGAGEMENT_FILTERS = ['any', 'opened', 'clicked'];
+/**
+ * Guest languages. Mirrors SUPPORTED_LANGUAGES in
+ * cms/app/api/captive-portal/_lib/languages.js and
+ * server/src/services/guestLanguage.ts.
+ */
+const SUPPORTED_LANGUAGES = ['en', 'de', 'it', 'fr'];
+/** Segment values: a language, or the bucket for guests with none recorded. */
+const SEGMENT_LANGUAGES = [...SUPPORTED_LANGUAGES, 'unknown'];
+/** Content keys a per-language message variant may carry. */
+const VARIANT_KEYS = ['subject', 'body', 'content', 'languageCode', 'designJson'];
 const SCHEDULE_MODES = ['now', 'scheduled'];
 
 const MAX_NAME_LENGTH = 150;
@@ -188,6 +198,65 @@ function validateMessage(
     entry.content = String(raw.content ?? '').slice(0, MAX_SMS_CONTENT_LENGTH);
   }
 
+  // Per-language content overrides. The base message is the campaign's
+  // default-language copy, so a guest whose language has no variant receives it
+  // — the fallback resolved at send time by resolveVariant in
+  // server/src/services/guestLanguage.ts.
+  //
+  // Structural keys are rejected rather than stripped: an agent that thought it
+  // could give one language a different delay needs to be told it cannot, not
+  // have the field silently vanish.
+  if (raw.translations !== undefined && raw.translations !== null) {
+    if (typeof raw.translations !== 'object' || Array.isArray(raw.translations)) {
+      return err('translations must be an object', `messages[${index}].translations`, 'invalid_translations');
+    }
+    const translations: Raw = {};
+    for (const [code, value] of Object.entries(raw.translations as Raw)) {
+      const path = `messages[${index}].translations.${code}`;
+      if (!SUPPORTED_LANGUAGES.includes(code)) {
+        return err(
+          `Unsupported language "${code}" (${SUPPORTED_LANGUAGES.join(', ')})`,
+          path,
+          'unsupported_language',
+        );
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return err('Each translation must be an object', path, 'invalid_translation');
+      }
+      const variant: Raw = {};
+      for (const [key, val] of Object.entries(value as Raw)) {
+        if (!VARIANT_KEYS.includes(key)) {
+          return err(
+            `A translation cannot change ${key} — it applies to the message, not to one language`,
+            `${path}.${key}`,
+            'structural_field_in_translation',
+          );
+        }
+        if (key === 'subject') variant.subject = String(val ?? '').slice(0, MAX_SUBJECT_LENGTH);
+        else if (key === 'body') {
+          variant.body = String(val ?? '').slice(0, MAX_EMAIL_BODY_LENGTH);
+          // Every language needs its own working unsubscribe link. Checking only
+          // the base body would let a translated email ship without one, which
+          // is the compliance hole the base check exists to close.
+          if (channel === 'email' && entry.bodyFormat !== 'blocks'
+              && !hasUnsubscribe(variant.body as string)) {
+            return err(
+              `The ${code} email body must contain an unsubscribe link — include an anchor with href {{unsubscribeUrl}}`,
+              `${path}.body`,
+              'missing_unsubscribe',
+            );
+          }
+        }
+        else if (key === 'content') variant.content = String(val ?? '').slice(0, MAX_SMS_CONTENT_LENGTH);
+        else if (key === 'languageCode') {
+          variant.languageCode = String(val ?? '').trim().slice(0, MAX_WHATSAPP_LANGUAGE_CODE_LENGTH);
+        } else variant[key] = val;
+      }
+      if (Object.keys(variant).length) translations[code] = variant;
+    }
+    if (Object.keys(translations).length) entry.translations = translations;
+  }
+
   return { message: entry };
 }
 
@@ -261,6 +330,20 @@ function validateSegment(rawSegment: unknown): { segment: Raw } | ValidationErro
       return err('Invalid segment.engagement', 'segment.engagement', 'invalid_engagement');
     }
     segment.engagement = raw.engagement;
+  }
+
+  // Optional language targeting. Absent means every language, so adding this
+  // can never shrink an existing campaign's audience. 'unknown' selects exactly
+  // the guests captured before the splash screen offered a choice.
+  if (raw.language !== undefined && raw.language !== null && raw.language !== '') {
+    if (!SEGMENT_LANGUAGES.includes(raw.language as string)) {
+      return err(
+        `Invalid segment.language (${SEGMENT_LANGUAGES.join(', ')})`,
+        'segment.language',
+        'invalid_language',
+      );
+    }
+    segment.language = raw.language;
   }
 
   return { segment };

@@ -61,6 +61,9 @@ const VALID_KEYS = new Set([
   'connectedPage.buttonText', 'connectedPage.buttonUrl', 'connectedPage.showButton',
   'connectedPage.autoSubmit', 'connectedPage.customFields',
   'connectedPage.redirectEnabled', 'connectedPage.redirectUrl', 'connectedPage.redirectDelaySeconds',
+  // languages
+  'languages.enabled', 'languages.available', 'languages.default', 'languages.fallback',
+  'languages.autoDetect', 'languages.translations',
 ]);
 
 const BUILT_IN_LOGIN_FIELDS = ['firstName', 'lastName', 'email', 'phone'];
@@ -68,9 +71,9 @@ const VERIFICATION_CHANNELS = ['email', 'sms', 'whatsapp'];
 
 console.log('\nstructure');
 
-test('the six steps are present, in the guest journey order', () => {
+test('the seven steps are present, in the guest journey order', () => {
   const ids = SPLASH_INTERVIEW.map((s) => s.id);
-  const expected = ['design', 'login', 'consent', 'verification', 'connected', 'terms'];
+  const expected = ['design', 'login', 'consent', 'verification', 'connected', 'terms', 'languages'];
   assert(
     JSON.stringify(ids) === JSON.stringify(expected),
     `expected ${expected.join(' -> ')}, got ${ids.join(' -> ')}`,
@@ -257,7 +260,7 @@ test('the asking style tells the model to interview, not interrogate', () => {
 
 test('the payload a client receives is complete and ordered', () => {
   const payload = interviewPayload();
-  assert(payload.steps.length === 6, 'all six steps should ship');
+  assert(payload.steps.length === 7, 'all seven steps should ship');
   assert(payload.rules.length >= 10, 'the rules should ship');
   assert(payload.askingStyle.length >= 5, 'the style guidance should ship');
   assert(payload.workflow.length >= 5, 'the workflow should spell out preview-then-apply');

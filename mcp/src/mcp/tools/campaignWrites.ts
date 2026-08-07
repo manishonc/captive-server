@@ -69,6 +69,25 @@ const messageShape = z
     templateName: z.string().optional().describe('Approved Meta template name (WhatsApp).'),
     languageCode: z.string().optional().describe('WhatsApp template language, e.g. en_US.'),
     variables: z.array(z.unknown()).optional(),
+    translations: z
+      .record(
+        z.object({
+          subject: z.string().optional(),
+          body: z.string().optional(),
+          content: z.string().optional(),
+          languageCode: z.string().optional(),
+          designJson: z.unknown().optional(),
+        }).passthrough(),
+      )
+      .optional()
+      .describe(
+        'Per-language versions of THIS message, keyed by language code (en, de, it, fr). '
+        + 'The fields above are the default-language copy — a guest whose language has no entry '
+        + 'here receives them, so a partly-translated campaign is safe to send. Content only: '
+        + 'delayMinutes, channel and id are shared and rejected here. For WhatsApp the only '
+        + 'translatable field is languageCode, and it must be a locale Meta has already approved '
+        + 'for that template.',
+      ),
   })
   .passthrough();
 
@@ -78,6 +97,15 @@ const segmentShape = z
     signedUpAfter: z.string().optional(),
     signedUpBefore: z.string().optional(),
     engagement: z.enum(['any', 'opened', 'clicked']).optional(),
+    language: z
+      .enum(['en', 'de', 'it', 'fr', 'unknown'])
+      .optional()
+      .describe(
+        'Send only to guests who chose this language on the splash screen. '
+        + '"unknown" targets guests captured before the venue offered a choice. '
+        + 'Omit to reach every language — prefer per-message `translations` over separate '
+        + 'campaigns unless the content genuinely differs per language.',
+      ),
   })
   .passthrough();
 

@@ -22,7 +22,9 @@ import { registerUsageTools } from './tools/usage';
  * Tier 1 read tools (all tenant-scoped via the OAuth token's tenantUserId):
  *   venues:        list_venues, get_venue
  *   access points: list_access_points (venue-scoped), get_access_point
- *   guests:        list_guests, get_guest, search_guests
+ *   guests:        list_guests (filterable by guest language), get_guest,
+ *                  search_guests — all carry the splash language the guest
+ *                  chose, or 'unknown' when none was recorded
  *   campaigns:     list_campaigns, get_campaign
  *   analytics:     get_capture_stats, get_campaign_stats
  *   engagement:    get_guest_engagement + list_guests_who_clicked/_opened/
@@ -37,13 +39,20 @@ import { registerUsageTools } from './tools/usage';
  *                  pause/resume/cancel_campaign, activate/deactivate_campaign,
  *                  archive/restore_campaign, test_send_campaign
  *   templates:     list_templates, get_template, create_template
- *   audience:      preview_audience (per-channel opted-in counts)
+ *   audience:      preview_audience (per-channel opted-in counts + a per-language
+ *                  breakdown, so the spread is visible before targeting one)
  *   branding:      get_branding
  *   plan/usage:    get_usage
  *   splash:        start_splash_setup, list_splash_templates, list_venue_logos,
  *                  preview_splash_config, apply_splash_config, copy_splash_config
  *                  (writes proxy to the CMS internal API, which owns the validator;
  *                   apply is gated on a confirmToken from the preview)
+ *   languages:     no dedicated tool — a venue's guest languages and the
+ *                  per-language splash copy live in the `languages` block of the
+ *                  splash config, so they go through the same preview/apply pair.
+ *                  Campaign copy is translated per message via `translations`;
+ *                  `segment.language` targets one language when the content
+ *                  genuinely differs rather than just being translated.
  */
 export function buildMcpServer(): McpServer {
   const server = new McpServer({
