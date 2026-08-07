@@ -1,5 +1,19 @@
 // ── 0. Portal branding config (injected server-side; fallback for direct loads) ──
-var CONNECTED_DEFAULTS = {
+//
+// i18n note: the *_DEFAULTS_EN objects below hold the English copy verbatim and
+// are never rewritten — they are what a venue sees when it has customised
+// nothing, and CONSENT_DEFAULTS_EN in particular must stay byte-identical to the
+// templates' .consent-box markup. The live CONNECTED_DEFAULTS/LOGIN_DEFAULTS/
+// CONSENT_DEFAULTS/VERIFY_DEFAULTS bindings start as those objects and are
+// swapped for catalog-translated copies by refreshLocalizedDefaults() whenever
+// the guest's language is not English. Keeping English out of the catalog path
+// means a missing i18n.js degrades to exactly today's behaviour.
+function t(key) {
+  if (!window.HF_I18N) return key;
+  return window.HF_I18N.t.apply(window.HF_I18N, arguments);
+}
+
+var CONNECTED_DEFAULTS_EN = {
   title: "You're Connected!",
   subtitle: 'You now have internet access.',
   showTitle: true,
@@ -15,7 +29,7 @@ var CONNECTED_DEFAULTS = {
   redirectDelaySeconds: 3,
 };
 
-var LOGIN_DEFAULTS = {
+var LOGIN_DEFAULTS_EN = {
   fields: {
     firstName: { enabled: true, label: '', required: true },
     lastName:  { enabled: true, label: '', required: true },
@@ -29,7 +43,7 @@ var LOGIN_DEFAULTS = {
 
 // Must stay byte-identical to the copy baked into the templates' .consent-box
 // so default-config venues don't flash mismatched text when JS re-applies it.
-var CONSENT_DEFAULTS = {
+var CONSENT_DEFAULTS_EN = {
   heading: 'We care about your privacy',
   subheading: 'Stay in touch with us and find out more about the best offers',
   bodyParagraphs: [
@@ -40,7 +54,19 @@ var CONSENT_DEFAULTS = {
   declineButtonText: "I don't want to stay in touch.",
 };
 
-var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFIG : {
+// Live, language-resolved bindings. Start as the English source objects and are
+// swapped wholesale by refreshLocalizedDefaults() when the guest picks another
+// language — every normalize* function reads these, so nothing downstream needs
+// to know a language exists.
+var CONNECTED_DEFAULTS = CONNECTED_DEFAULTS_EN;
+var LOGIN_DEFAULTS = LOGIN_DEFAULTS_EN;
+var CONSENT_DEFAULTS = CONSENT_DEFAULTS_EN;
+
+// RAW_CONFIG is what the server sent, untouched. CONFIG is RAW_CONFIG with the
+// active language's translation overlay merged in. Keeping the raw copy is what
+// makes switching languages reversible: re-resolving always starts from the
+// server's text rather than from text a previous switch already overwrote.
+var RAW_CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFIG : {
   title: 'Connect to WiFi',
   subtitle: 'Enter your details to get online',
   logoUrl: '',
@@ -52,10 +78,330 @@ var CONFIG = (typeof window.PORTAL_CONFIG !== 'undefined') ? window.PORTAL_CONFI
   showMarketingOptIn: true,
   showPrivacyPolicy: true,
   showTermsOfService: true,
-  loginPage: LOGIN_DEFAULTS,
-  consentPage: CONSENT_DEFAULTS,
-  connectedPage: CONNECTED_DEFAULTS,
+  loginPage: LOGIN_DEFAULTS_EN,
+  consentPage: CONSENT_DEFAULTS_EN,
+  connectedPage: CONNECTED_DEFAULTS_EN,
 };
+var CONFIG = RAW_CONFIG;
+
+// ── Language configuration ─────────────────────────────────────────────────
+// MIRROR SITE — the `languages` shape must agree with the other six listed in
+// the header of cms/app/api/captive-portal/_lib/connected-page.js, plus the
+// validator in cms/app/api/captive-portal/_lib/splash-languages.js.
+var LANGUAGES_DEFAULTS = {
+  enabled: false,
+  default: 'en',
+  fallback: 'en',
+  autoDetect: true,
+  available: ['en'],
+  translations: {},
+};
+
+var LANG_STORAGE_KEY = 'hf_lang';
+
+// Same "trust nothing" rule as normalizeConnectedPage: this also runs on config
+// pushed via the preview postMessage, which is not origin-checked by default.
+function normalizeLanguages(cfg) {
+  var raw = (cfg && cfg.languages && typeof cfg.languages === 'object' && !Array.isArray(cfg.languages))
+    ? cfg.languages
+    : {};
+  var supported = (window.HF_I18N && window.HF_I18N.SUPPORTED) || ['en'];
+
+  function known(code) {
+    return typeof code === 'string' && supported.indexOf(code) !== -1;
+  }
+
+  var def = known(raw.default) ? raw.default : LANGUAGES_DEFAULTS.default;
+
+  var available = (Array.isArray(raw.available) ? raw.available : [])
+    .filter(known)
+    .filter(function (code, i, list) { return list.indexOf(code) === i; });
+  // The default must always be offerable, or the selector could exclude the very
+  // language the base config is written in.
+  if (available.indexOf(def) === -1) available.unshift(def);
+
+  var fallback = (known(raw.fallback) && available.indexOf(raw.fallback) !== -1)
+    ? raw.fallback
+    : def;
+
+  var translations = {};
+  var rawTranslations = (raw.translations && typeof raw.translations === 'object' && !Array.isArray(raw.translations))
+    ? raw.translations
+    : {};
+  Object.keys(rawTranslations).forEach(function (code) {
+    // Translations for languages that are not currently offered are kept rather
+    // than dropped — an admin who temporarily unticks a language must not lose
+    // the copy they authored for it. The selector still only shows `available`.
+    if (!known(code) || code === def) return;
+    var value = rawTranslations[code];
+    if (value && typeof value === 'object' && !Array.isArray(value)) translations[code] = value;
+  });
+
+  return {
+    // A selector with one option is noise — the venue gets its default language
+    // and nothing to press.
+    enabled: raw.enabled === true && available.length > 1,
+    default: def,
+    fallback: fallback,
+    autoDetect: raw.autoDetect !== false,
+    available: available,
+    translations: translations,
+  };
+}
+
+// Merge only the keys a translation is allowed to carry. Structure (which fields
+// exist, which channels are on, colours, template) is shared across languages —
+// an overlay may restyle words, never behaviour.
+function mergeTranslationLayer(target, layer) {
+  if (!layer || typeof layer !== 'object') return target;
+
+  function text(value) {
+    return (typeof value === 'string' && value.trim()) ? value : null;
+  }
+  function assignText(dest, src, keys) {
+    keys.forEach(function (key) {
+      var v = text(src[key]);
+      if (v !== null) dest[key] = v;
+    });
+  }
+
+  var out = Object.assign({}, target);
+  assignText(out, layer, ['title', 'subtitle']);
+
+  if (layer.loginPage && typeof layer.loginPage === 'object') {
+    var lp = Object.assign({}, out.loginPage);
+    assignText(lp, layer.loginPage, ['buttonText']);
+    if (layer.loginPage.fields && typeof layer.loginPage.fields === 'object') {
+      var fields = Object.assign({}, lp.fields);
+      Object.keys(layer.loginPage.fields).forEach(function (id) {
+        if (!fields[id]) return;
+        var src = layer.loginPage.fields[id] || {};
+        var merged = Object.assign({}, fields[id]);
+        assignText(merged, src, ['label', 'placeholder']);
+        fields[id] = merged;
+      });
+      lp.fields = fields;
+    }
+    // Custom fields are keyed BY ID in the overlay, never by position: reordering
+    // the base fields must not reassign somebody else's translation.
+    if (layer.loginPage.customFields && typeof layer.loginPage.customFields === 'object'
+        && Array.isArray(lp.customFields)) {
+      var loginOverlay = layer.loginPage.customFields;
+      lp.customFields = lp.customFields.map(function (field) {
+        var src = field && field.id ? loginOverlay[field.id] : null;
+        if (!src || typeof src !== 'object') return field;
+        var merged = Object.assign({}, field);
+        assignText(merged, src, ['label', 'placeholder']);
+        return merged;
+      });
+    }
+    out.loginPage = lp;
+  }
+
+  if (layer.consentPage && typeof layer.consentPage === 'object') {
+    var cp = Object.assign({}, out.consentPage);
+    assignText(cp, layer.consentPage, ['heading', 'subheading', 'acceptButtonText', 'declineButtonText']);
+    // All-or-nothing: this array becomes the guest's ConsentRecord, so a
+    // half-translated set (one German paragraph, one English) must never render.
+    var paragraphs = Array.isArray(layer.consentPage.bodyParagraphs)
+      ? layer.consentPage.bodyParagraphs.filter(function (p) { return typeof p === 'string' && p.trim(); })
+      : [];
+    if (paragraphs.length) cp.bodyParagraphs = paragraphs;
+    out.consentPage = cp;
+  }
+
+  if (layer.verificationPage && typeof layer.verificationPage === 'object') {
+    var vp = Object.assign({}, out.verificationPage);
+    // Copy fields ONLY — never `enabled`, `channels`, `requirement` or
+    // `rememberDays`. Which channels work is a property of the venue's
+    // integrations, not of the language the guest reads.
+    assignText(vp, layer.verificationPage, [
+      'heading', 'subheading', 'codeInputLabel',
+      'sendButtonText', 'verifyButtonText', 'resendLabel',
+    ]);
+    out.verificationPage = vp;
+  }
+
+  if (layer.connectedPage && typeof layer.connectedPage === 'object') {
+    var conn = Object.assign({}, out.connectedPage);
+    assignText(conn, layer.connectedPage, ['title', 'subtitle', 'buttonText']);
+    if (layer.connectedPage.customFields && typeof layer.connectedPage.customFields === 'object'
+        && Array.isArray(conn.customFields)) {
+      var connOverlay = layer.connectedPage.customFields;
+      conn.customFields = conn.customFields.map(function (field) {
+        var src = field && field.id ? connOverlay[field.id] : null;
+        if (!src || typeof src !== 'object') return field;
+        var merged = Object.assign({}, field);
+        assignText(merged, src, ['label', 'placeholder']);
+        return merged;
+      });
+    }
+    out.connectedPage = conn;
+  }
+
+  return out;
+}
+
+// Resolution order per field: selected language → fallback language → base
+// config (which IS the default language). Applying the fallback layer first and
+// the selected layer second gives that precedence for free.
+function resolveLangConfig(raw, lang) {
+  var langs = normalizeLanguages(raw);
+  if (lang === langs.default) return raw;
+  var out = raw;
+  if (langs.fallback !== langs.default && langs.translations[langs.fallback]) {
+    out = mergeTranslationLayer(out, langs.translations[langs.fallback]);
+  }
+  if (langs.translations[lang]) out = mergeTranslationLayer(out, langs.translations[lang]);
+  return out;
+}
+
+// Swap the built-in default copy for the active language. Venue-authored text is
+// untouched by this — it only changes what an UNCUSTOMISED field falls back to,
+// so a German guest at a venue that never edited the consent heading reads a
+// German heading instead of an English one.
+function refreshLocalizedDefaults(lang) {
+  if (lang === 'en' || !window.HF_I18N) {
+    CONNECTED_DEFAULTS = CONNECTED_DEFAULTS_EN;
+    LOGIN_DEFAULTS = LOGIN_DEFAULTS_EN;
+    CONSENT_DEFAULTS = CONSENT_DEFAULTS_EN;
+    return;
+  }
+  CONNECTED_DEFAULTS = Object.assign({}, CONNECTED_DEFAULTS_EN, {
+    title: t('connected.title'),
+    subtitle: t('connected.subtitle'),
+    buttonText: t('connected.buttonText'),
+  });
+  LOGIN_DEFAULTS = Object.assign({}, LOGIN_DEFAULTS_EN, {
+    buttonText: t('login.buttonText'),
+  });
+  CONSENT_DEFAULTS = Object.assign({}, CONSENT_DEFAULTS_EN, {
+    heading: t('consent.heading'),
+    subheading: t('consent.subheading'),
+    bodyParagraphs: [t('consent.bodyParagraph.0'), t('consent.bodyParagraph.1')],
+    acceptButtonText: t('consent.acceptButtonText'),
+    declineButtonText: t('consent.declineButtonText'),
+  });
+  // Declared below this function but hoisted; only ever read at call time.
+  VERIFY_DEFAULTS = Object.assign({}, VERIFY_DEFAULTS_EN, {
+    heading: t('verify.heading'),
+    subheading: t('verify.subheading'),
+    codeInputLabel: t('verify.codeInputLabel'),
+    sendButtonText: t('verify.sendButtonText'),
+    verifyButtonText: t('verify.verifyButtonText'),
+    resendLabel: t('verify.resendLabel'),
+  });
+}
+
+function readStoredLang() {
+  try { return window.localStorage.getItem(LANG_STORAGE_KEY); } catch (e) { return null; }
+}
+
+function storeLang(code) {
+  // Never persist from the CMS editor iframe: the preview shares an origin with
+  // the live portal, so writing here would flip the language for the next real
+  // guest on that device.
+  if (window.PREVIEW_MODE) return;
+  try { window.localStorage.setItem(LANG_STORAGE_KEY, code); } catch (e) { /* private mode */ }
+}
+
+function queryLang() {
+  try { return new URLSearchParams(window.location.search).get('lang'); } catch (e) { return null; }
+}
+
+// Priority: an explicit server-side pick (the Aruba /submit re-render carries the
+// language the guest chose before the POST) → the guest's own last choice →
+// ?lang= → the browser's preference → the venue default.
+function pickInitialLanguage(raw) {
+  var langs = normalizeLanguages(raw);
+  function usable(code) {
+    return typeof code === 'string' && langs.available.indexOf(code.trim().toLowerCase()) !== -1;
+  }
+  if (usable(raw && raw.lang)) return raw.lang.trim().toLowerCase();
+  var stored = readStoredLang();
+  if (usable(stored)) return stored.trim().toLowerCase();
+  var fromQuery = queryLang();
+  if (usable(fromQuery)) return fromQuery.trim().toLowerCase();
+  if (langs.autoDetect && window.HF_I18N) {
+    var prefs = (navigator.languages && navigator.languages.length)
+      ? navigator.languages
+      : [navigator.language || ''];
+    for (var i = 0; i < prefs.length; i++) {
+      // 'de-CH' → 'de': a Swiss-German browser should get German, not the default.
+      var base = window.HF_I18N.normalize(prefs[i]);
+      if (langs.available.indexOf(base) !== -1) return base;
+    }
+  }
+  return langs.default;
+}
+
+var ACTIVE_LANG = 'en';
+
+// Switch language and repaint. Both apply functions are idempotent by design
+// (they rebuild #splashFields, #stepVerify and #stepConnected from scratch and
+// restore labels from dataset.orig), which is exactly what makes a mid-flow
+// switch safe — the guest can be on the consent step and stay there.
+function setLanguage(code, opts) {
+  opts = opts || {};
+  var langs = normalizeLanguages(RAW_CONFIG);
+  var next = (typeof code === 'string') ? code.trim().toLowerCase() : '';
+  if (langs.available.indexOf(next) === -1) next = langs.default;
+
+  ACTIVE_LANG = next;
+  if (window.HF_I18N) window.HF_I18N.setLang(next);
+  refreshLocalizedDefaults(next);
+  document.documentElement.setAttribute('lang', next);
+  if (opts.persist !== false) storeLang(next);
+
+  CONFIG = resolveLangConfig(RAW_CONFIG, next);
+  // Preserve the view the page is currently showing — switching language on the
+  // connected card must not send the guest back to the login form.
+  if (RAW_CONFIG.view !== undefined) CONFIG.view = RAW_CONFIG.view;
+  if (opts.repaint === false) return next;
+
+  applyPortalConfig(CONFIG);
+  applyView(CONFIG);
+  return next;
+}
+
+// Guest-facing switcher. Rebuilt on every apply (same contract as #splashFields)
+// so the live preview can toggle the whole feature on and off.
+function applyLanguageSelector(cfg) {
+  var existing = document.getElementById('hfLangSwitch');
+  if (existing) existing.parentNode.removeChild(existing);
+
+  var langs = normalizeLanguages(RAW_CONFIG);
+  if (!langs.enabled) return;
+
+  var bar = document.createElement('div');
+  bar.id = 'hfLangSwitch';
+  bar.setAttribute('role', 'group');
+  bar.setAttribute('aria-label', t('lang.label'));
+  bar.style.cssText = 'position:fixed;top:10px;right:10px;z-index:2147483000;'
+    + 'display:flex;gap:2px;padding:3px;border-radius:999px;'
+    + 'background:rgba(255,255,255,.82);backdrop-filter:blur(6px);'
+    + 'box-shadow:0 1px 4px rgba(0,0,0,.18);font-size:12px;line-height:1';
+
+  langs.available.forEach(function (code) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'hf-lang-option';
+    btn.setAttribute('data-lang', code);
+    var isActive = code === ACTIVE_LANG;
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    btn.title = window.HF_I18N ? window.HF_I18N.nativeName(code) : code;
+    btn.textContent = code.toUpperCase();
+    btn.style.cssText = 'border:0;cursor:pointer;padding:5px 9px;border-radius:999px;'
+      + 'font:inherit;font-weight:600;letter-spacing:.02em;'
+      + (isActive
+        ? 'background:var(--primary,#1c2b4a);color:#fff'
+        : 'background:transparent;color:#1c2b4a;opacity:.72');
+    btn.addEventListener('click', function () { setLanguage(code); });
+    bar.appendChild(btn);
+  });
+
+  document.body.appendChild(bar);
+}
 
 // Merge a (possibly partial or missing) loginPage with defaults. Old configs
 // have no loginPage at all — derive visibility from legacy collectName/collectEmail.
@@ -88,6 +434,9 @@ function normalizeLoginPage(cfg) {
     fields[key] = {
       enabled: (s.enabled === undefined) ? def.enabled : s.enabled !== false,
       label: (typeof s.label === 'string') ? s.label : def.label,
+      // Only ever set by a translation overlay today — the CMS has no
+      // per-field placeholder editor for built-in fields.
+      placeholder: (typeof s.placeholder === 'string') ? s.placeholder : '',
       required: (s.required === undefined) ? def.required : s.required === true,
     };
   });
@@ -152,8 +501,15 @@ function applyPortalConfig(cfg) {
   // Login-form fields + consent-step copy (both no-ops on missing elements)
   applyLoginPage(cfg);
   applyConsentPage(cfg);
+  applyLanguageSelector(cfg);
 
   // Footer links — set both ways so live preview toggles can re-show them
+  // The country-search placeholder is baked into all 33 templates; translating
+  // it here beats editing every one of them. Country NAMES stay English in v1 —
+  // 51 names x 3 languages buys little when the search also has to match them.
+  var countrySearch = document.getElementById('countrySearch');
+  if (countrySearch) countrySearch.setAttribute('placeholder', t('country.search'));
+
   var pl = document.getElementById('privacyLink');
   if (pl) pl.style.display = (cfg.showPrivacyPolicy === false) ? 'none' : '';
   var tl = document.getElementById('termsLink');
@@ -176,7 +532,26 @@ function applyLoginPage(cfg) {
     if (lbl) {
       // Cache the template's baked-in label so clearing a custom label restores it.
       if (!lbl.dataset.orig) lbl.dataset.orig = lbl.textContent.trim();
-      lbl.textContent = (f.label || lbl.dataset.orig) + (f.required ? ' *' : '');
+      // Precedence: the venue's own label (already language-resolved by
+      // resolveLangConfig) → the catalog's translation of the built-in label →
+      // the template's English markup. The catalog rung is what stops a German
+      // guest reading "First Name" at a venue that never renamed the field.
+      var fallbackLabel = (ACTIVE_LANG === 'en')
+        ? lbl.dataset.orig
+        : t('field.' + id + '.label');
+      lbl.textContent = (f.label || fallbackLabel) + (f.required ? ' *' : '');
+    }
+    // Placeholders were never config-driven before; they are now, because a
+    // translated form with English sample data reads half-finished.
+    if (el && el.tagName === 'INPUT') {
+      if (el.dataset.origPlaceholder === undefined) {
+        el.dataset.origPlaceholder = el.getAttribute('placeholder') || '';
+      }
+      var fallbackPlaceholder = (ACTIVE_LANG === 'en')
+        ? el.dataset.origPlaceholder
+        : t('field.' + id + '.placeholder');
+      var placeholder = f.placeholder || fallbackPlaceholder;
+      if (placeholder) el.setAttribute('placeholder', placeholder);
     }
   });
 
@@ -308,7 +683,7 @@ function applyView(cfg) {
 // ── Verification step ──────────────────────────────────────────────────────
 // MIRROR SITE — the shape below must agree with the other five listed in the
 // header of cms/app/api/captive-portal/_lib/connected-page.js.
-var VERIFY_DEFAULTS = {
+var VERIFY_DEFAULTS_EN = {
   enabled: false,
   channels: { email: { enabled: true }, sms: { enabled: false }, whatsapp: { enabled: false } },
   defaultChannel: 'email',
@@ -323,6 +698,9 @@ var VERIFY_DEFAULTS = {
   rememberDays: 30,
 };
 
+var VERIFY_DEFAULTS = VERIFY_DEFAULTS_EN;
+
+// Channel names are brand/protocol nouns — the same in all four languages.
 var VERIFY_CHANNEL_LABELS = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
 
 // Same "trust nothing" rule as normalizeConnectedPage: this also runs on config
@@ -407,7 +785,7 @@ function renderVerifyStep(cfg, opts) {
     chooser.id = 'verifyChannelGroup';
     var chooserLabel = document.createElement('label');
     chooserLabel.className = 'field-label';
-    chooserLabel.textContent = 'Send my code by';
+    chooserLabel.textContent = t('verify.channelPrompt');
     chooser.appendChild(chooserLabel);
     page.activeChannels.forEach(function (channel) {
       var wrap = document.createElement('label');
@@ -480,13 +858,13 @@ function renderVerifyStep(cfg, opts) {
   change.type = 'button';
   change.id = 'btnChangeDestination';
   change.style.cssText = resend.style.cssText;
-  change.textContent = 'Use a different one';
+  change.textContent = t('verify.changeDestination');
   card.appendChild(change);
 
   if (opts.preview) {
     var note = document.createElement('p');
     note.style.cssText = 'margin:14px 0 0;font-size:12px;opacity:.6;text-align:center';
-    note.textContent = 'Preview only — no code is sent.';
+    note.textContent = t('verify.previewNote');
     card.appendChild(note);
     // Hard-coded sample, never derived from real guest or tenant data.
     sub.textContent = page.subheading + ' (e.g. j•••@example.com)';
@@ -517,8 +895,15 @@ var _connRedirectTimers = [];
 // page. They fall back to the unbranded template, which is the old behaviour,
 // rather than being stranded on the spinner.
 try {
-  applyPortalConfig(CONFIG);
-  applyView(CONFIG);
+  // Resolve the language BEFORE the first paint so the guest never sees English
+  // copy flip to their own. setLanguage repaints on its own, which is why there
+  // is no separate applyPortalConfig call on this path.
+  //
+  // persist:false — the initial pick may come from the browser's Accept-Language
+  // rather than a deliberate choice, and writing that to localStorage would make
+  // a guess look like a decision on the next visit. Only a tap on the switcher
+  // persists.
+  setLanguage(pickInitialLanguage(RAW_CONFIG), { persist: false });
 } finally {
   document.documentElement.classList.add('hf-ready');
 }
@@ -642,7 +1027,7 @@ function renderConnectedView(cfg) {
     destBtn.style.textDecoration = 'none';
     destBtn.style.boxSizing = 'border-box';
     destBtn.style.marginTop = '16px';
-    destBtn.textContent = (redirectActive && !page.showButton) ? 'Continue' : page.buttonText;
+    destBtn.textContent = (redirectActive && !page.showButton) ? t('connected.continue') : page.buttonText;
     card.appendChild(destBtn);
   }
 
@@ -677,7 +1062,7 @@ function renderConnectedView(cfg) {
       submitBtn.className = btnClass;
       submitBtn.id = 'connectedSubmit';
       submitBtn.type = 'button';
-      submitBtn.textContent = 'Submit';
+      submitBtn.textContent = t('connected.submit');
       submitBtn.addEventListener('click', function () { submitConnectedForm(false); });
       wrap.appendChild(submitBtn);
     }
@@ -689,7 +1074,7 @@ function renderConnectedView(cfg) {
     thanks.id = 'connectedThanks';
     thanks.style.display = 'none';
     thanks.style.marginTop = '18px';
-    thanks.textContent = 'Thanks! Your response has been saved.';
+    thanks.textContent = t('connected.thanks');
     card.appendChild(thanks);
 
     var errEl = document.createElement('p');
@@ -734,7 +1119,7 @@ function renderConnectedView(cfg) {
       // Describe the behaviour instead of performing it — the editor iframe must
       // never navigate away, and a countdown that hits zero and does nothing
       // reads as broken.
-      redirectNote.textContent = 'Redirects to ' + host + ' after ' + page.redirectDelaySeconds + 's';
+      redirectNote.textContent = t('connected.redirectNote', host, page.redirectDelaySeconds);
       if (destBtn) destBtn.addEventListener('click', function (e) { e.preventDefault(); });
     } else {
       if (destBtn) {
@@ -743,8 +1128,8 @@ function renderConnectedView(cfg) {
       var remaining = page.redirectDelaySeconds;
       var tick = function () {
         redirectNote.textContent = remaining > 0
-          ? 'Redirecting… ' + remaining + 's'
-          : 'Redirecting…';
+          ? t('connected.redirectingIn', remaining)
+          : t('connected.redirecting');
         if (remaining > 0) {
           remaining -= 1;
           _connRedirectTimers.push(setTimeout(tick, 1000));
@@ -798,7 +1183,7 @@ function submitConnectedForm(auto) {
 
   if (!auto && missing) {
     if (errEl) {
-      errEl.textContent = 'Please fill in: ' + missing;
+      errEl.textContent = t('error.fillIn', missing);
       errEl.style.display = 'block';
     }
     return;
@@ -808,13 +1193,13 @@ function submitConnectedForm(auto) {
   var showSaved = function () {
     if (!thanks) return;
     if (auto) {
-      thanks.textContent = 'Saved';
+      thanks.textContent = t('connected.saved');
       thanks.style.display = 'block';
       clearTimeout(_connThanksTimer);
       _connThanksTimer = setTimeout(function () { thanks.style.display = 'none'; }, 2000);
     } else {
       wrap.style.display = 'none';
-      thanks.textContent = 'Thanks! Your response has been saved.';
+      thanks.textContent = t('connected.thanks');
       thanks.style.display = 'block';
     }
   };
@@ -825,7 +1210,7 @@ function submitConnectedForm(auto) {
   }
 
   var btn = document.getElementById('connectedSubmit');
-  if (!auto && btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  if (!auto && btn) { btn.disabled = true; btn.textContent = t('connected.saving'); }
 
   fetch('/api/connected-form', {
     method: 'POST',
@@ -840,9 +1225,9 @@ function submitConnectedForm(auto) {
     showSaved();
   }).catch(function () {
     if (auto) return; // silent — next interaction retries
-    if (btn) { btn.disabled = false; btn.textContent = 'Submit'; }
+    if (btn) { btn.disabled = false; btn.textContent = t('connected.submit'); }
     if (errEl) {
-      errEl.textContent = 'Could not save your response. Please try again.';
+      errEl.textContent = t('connected.saveFailed');
       errEl.style.display = 'block';
     }
   });
@@ -866,13 +1251,20 @@ if (window.PREVIEW_MODE) {
     var d = e.data;
     if (!d || d.type !== 'heidifi:splash-preview' || !d.config) return;
     // Only fields applyable without a reload; templateId is handled via iframe reload.
+    // Pushes land on RAW_CONFIG, not CONFIG: CONFIG is a derived, language-resolved
+    // view, so writing to it directly would be overwritten by the next language
+    // switch — and the editor's untranslated base text would leak into whichever
+    // language happened to be showing.
     ['title', 'subtitle', 'primaryColor', 'backgroundColor', 'logoUrl', 'showLogo',
      'showPrivacyPolicy', 'showTermsOfService',
-     'loginPage', 'consentPage', 'verificationPage', 'connectedPage', 'view'].forEach(function (k) {
-      if (d.config[k] !== undefined) CONFIG[k] = d.config[k];
+     'loginPage', 'consentPage', 'verificationPage', 'connectedPage', 'languages',
+     'view'].forEach(function (k) {
+      if (d.config[k] !== undefined) RAW_CONFIG[k] = d.config[k];
     });
-    applyPortalConfig(CONFIG);
-    applyView(CONFIG);
+    // `lang` is the editor's "show me this language" control, separate from the
+    // stored config. Falls back to the current pick so a push that omits it does
+    // not silently reset the preview to the default language.
+    setLanguage(d.config.lang || ACTIVE_LANG, { persist: false });
     console.log('[heidifi preview] applied live config from', e.origin);
   });
   console.log('[heidifi preview] live preview listener attached');

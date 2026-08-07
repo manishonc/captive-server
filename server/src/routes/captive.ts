@@ -8,6 +8,7 @@ import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } f
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '../services/unifi';
 import { getVenueName } from '../services/venue';
+import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
@@ -140,6 +141,10 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
   const marketingOptIn = marketingConsent?.given ?? false;
   const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
+  // null when the guest never chose (single-language venue, or an older portal
+  // build). Left off the document entirely in that case rather than defaulted,
+  // so audience filters can tell "chose English" from "we do not know".
+  const guestLanguage = normalizeLanguage(req.body.language);
 
   let wifiGuestId: string;
 
@@ -163,6 +168,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+      ...(guestLanguage ? { language: guestLanguage } : {}),
       ...verificationFields(gate),
     };
 
@@ -181,6 +187,10 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     // wipe earlier responses to fields they skipped this time.
     const reconnectUpdates: Record<string, unknown> = {
       connectionCount: FieldValue.increment(1),
+      // Last write wins: a returning guest who switches the splash screen to
+      // French is telling us they now want French. Absent stays absent — a
+      // portal that sends nothing must not erase an earlier choice.
+      ...(guestLanguage ? { language: guestLanguage } : {}),
       ...verificationFields(gate),
     };
     for (const [id, response] of Object.entries(splashFormResponses)) {
@@ -208,17 +218,17 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
   // Marketing scheduling (event-aware)
   if (marketingOptIn && captivePortalAccessPointId) {
-    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
+    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
-    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent)
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
-    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[WHATSAPP SCHEDULE ERROR]', err));
     // Tenant Campaign Manager: fire any active automation campaigns for this event.
     fireAutomationsForGuest(
       captivePortalAccessPointId,
       wifiGuestId,
-      { firstName, lastName, email, phone, phoneCountryCode },
+      { firstName, lastName, email, phone, phoneCountryCode, language: guestLanguage },
       wifiEvent,
     ).catch((err) => console.error('[CAMPAIGN AUTOMATION ERROR]', err));
   }
@@ -231,7 +241,8 @@ async function scheduleSmsForEvent(
   wifiGuestId: string,
   phone: string,
   phoneCountryCode: string,
-  wifiEvent: WifiEvent
+  wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   const to = toE164(phoneCountryCode, phone);
   if (!to) {
@@ -266,7 +277,9 @@ async function scheduleSmsForEvent(
   }
 
   for (let i = 0; i < smsConfig.messages.length; i++) {
-    const msg = smsConfig.messages[i];
+    // Base fields are the venue's default-language copy; a variant for this
+    // guest's language overrides only the fields it defines.
+    const msg = resolveVariant(smsConfig.messages[i], guestLanguage);
     if (!msg.content) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;
@@ -332,7 +345,8 @@ async function scheduleWhatsAppForEvent(
   firstName: string,
   phone: string,
   phoneCountryCode: string,
-  wifiEvent: WifiEvent
+  wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   const to = toE164WA(phoneCountryCode, phone);
   if (!to) {
@@ -370,7 +384,10 @@ async function scheduleWhatsAppForEvent(
   const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < whatsappConfig.messages.length; i++) {
-    const msg = whatsappConfig.messages[i];
+    const msg = resolveVariant(whatsappConfig.messages[i], guestLanguage);
+    // languageCode here is the Meta template locale, pinned at save time from
+    // the approved catalogue — a variant may swap it only for another approved
+    // locale of the same template.
     if (!msg.templateName || !msg.languageCode) continue;
 
     const delayMinutes: number = msg.delayMinutes ?? 0;
@@ -476,7 +493,8 @@ async function scheduleEmailForEvent(
   wifiGuestId: string,
   firstName: string,
   userEmail: string,
-  wifiEvent: WifiEvent
+  wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   if (!userEmail) {
     console.warn('[EMAIL] Skipping: no email address for wifi guest', wifiGuestId);
@@ -512,7 +530,7 @@ async function scheduleEmailForEvent(
   const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < emailConfig.messages.length; i++) {
-    const msg = emailConfig.messages[i];
+    const msg = resolveVariant(emailConfig.messages[i], guestLanguage);
     if (!msg.subject || !msg.body) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;
@@ -635,15 +653,52 @@ async function resolveVenueIdFromApmac(apmac: string): Promise<string | null> {
   }
 }
 
-type PortalDocContent = { title?: string; content?: string };
+type PortalDocContent = { title?: string; content?: string; language?: string };
 
-function docFromSnap(snapshot: FirebaseFirestore.QuerySnapshot): PortalDocContent | null {
-  if (snapshot.empty) return null;
-  const data = snapshot.docs[0].data();
-  return { title: data?.title, content: data?.latestContent };
+/**
+ * Pick a language variant WITHIN an already-chosen document.
+ *
+ * Scope resolves before language, deliberately: a venue's own published terms in
+ * its default language outrank a translated platform default. Mixing the two
+ * tiers per-language would show a guest terms the venue never adopted, which is
+ * a worse outcome than showing adopted terms in the wrong language.
+ *
+ * Variants live under `translations.<code> = { title, content }`; the base
+ * title/latestContent are the document's default-language text.
+ */
+function pickDocLanguage(
+  data: FirebaseFirestore.DocumentData | undefined,
+  language: string | null,
+): PortalDocContent {
+  const base: PortalDocContent = { title: data?.title, content: data?.latestContent };
+  if (!language) return base;
+  const variant = data?.translations?.[language];
+  if (!variant || typeof variant !== 'object') return base;
+  const content = typeof variant.content === 'string' && variant.content.trim()
+    ? variant.content
+    : base.content;
+  // A variant with a title but no content is half-authored; take whichever
+  // fields are actually present rather than dropping the whole variant.
+  return {
+    title: typeof variant.title === 'string' && variant.title.trim() ? variant.title : base.title,
+    content,
+    ...(content !== base.content ? { language } : {}),
+  };
 }
 
-async function fetchDocumentForVenue(types: string[], venueId: string | null): Promise<PortalDocContent | null> {
+function docFromSnap(
+  snapshot: FirebaseFirestore.QuerySnapshot,
+  language: string | null = null,
+): PortalDocContent | null {
+  if (snapshot.empty) return null;
+  return pickDocLanguage(snapshot.docs[0].data(), language);
+}
+
+async function fetchDocumentForVenue(
+  types: string[],
+  venueId: string | null,
+  language: string | null = null,
+): Promise<PortalDocContent | null> {
   const collection = db.collection('CaptivePortal_Documents');
 
   if (venueId) {
@@ -654,7 +709,7 @@ async function fetchDocumentForVenue(types: string[], venueId: string | null): P
       .where('status', '==', 'published')
       .limit(1)
       .get();
-    const override = docFromSnap(overrideSnap);
+    const override = docFromSnap(overrideSnap, language);
     if (override) {
       console.log(`[DOCUMENTS] Venue override for type in [${types}] venue=${venueId}`);
       return override;
@@ -667,7 +722,7 @@ async function fetchDocumentForVenue(types: string[], venueId: string | null): P
     .where('status', '==', 'published')
     .limit(1)
     .get();
-  const globalDoc = docFromSnap(globalSnap);
+  const globalDoc = docFromSnap(globalSnap, language);
   if (globalDoc) return globalDoc;
 
   const legacySnap = await collection
@@ -675,7 +730,7 @@ async function fetchDocumentForVenue(types: string[], venueId: string | null): P
     .where('published', '==', true)
     .limit(1)
     .get();
-  const legacyDoc = docFromSnap(legacySnap);
+  const legacyDoc = docFromSnap(legacySnap, language);
   if (!legacyDoc) console.warn(`[DOCUMENTS] No published document found for types=[${types}]`);
   return legacyDoc;
 }
@@ -683,7 +738,7 @@ async function fetchDocumentForVenue(types: string[], venueId: string | null): P
 router.get('/privacy-policy', async (req, res) => {
   try {
     const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
-    const doc = await fetchDocumentForVenue(DOC_TYPES_PRIVACY, venueId);
+    const doc = await fetchDocumentForVenue(DOC_TYPES_PRIVACY, venueId, normalizeLanguage(req.query.lang));
     if (!doc) return res.status(404).json({ success: false });
     res.json({ success: true, ...doc });
   } catch (err) {
@@ -695,7 +750,7 @@ router.get('/privacy-policy', async (req, res) => {
 router.get('/terms', async (req, res) => {
   try {
     const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
-    const doc = await fetchDocumentForVenue(DOC_TYPES_TERMS, venueId);
+    const doc = await fetchDocumentForVenue(DOC_TYPES_TERMS, venueId, normalizeLanguage(req.query.lang));
     if (!doc) return res.status(404).json({ success: false });
     res.json({ success: true, ...doc });
   } catch (err) {
@@ -1222,6 +1277,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   const wifiEvent: WifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
   const marketingOptIn = marketingConsent?.given ?? false;
   const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
+  const guestLanguage = normalizeLanguage(req.body.language);
   let wifiGuestId: string;
 
   if (!existingWifiGuestId) {
@@ -1244,6 +1300,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       termsConsent: termsConsent || defaultConsent(),
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+      ...(guestLanguage ? { language: guestLanguage } : {}),
       ...verificationFields(gate),
     };
 
@@ -1261,6 +1318,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     console.log('[UNIFI] Reconnect', wifiGuestId, email, normalizedApMac);
     const reconnectUpdates: Record<string, unknown> = {
       connectionCount: FieldValue.increment(1),
+      ...(guestLanguage ? { language: guestLanguage } : {}),
       ...verificationFields(gate),
     };
     for (const [id, response] of Object.entries(splashFormResponses)) {
@@ -1286,11 +1344,11 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   }
 
   if (marketingOptIn && captivePortalAccessPointId) {
-    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
+    scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[UNIFI SMS SCHEDULE ERROR]', err));
-    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent)
+    scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[UNIFI EMAIL SCHEDULE ERROR]', err));
-    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+    scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
       .catch((err) => console.error('[UNIFI WHATSAPP SCHEDULE ERROR]', err));
     // Tenant Campaign Manager: fire any active automation campaigns for this event.
     fireAutomationsForGuest(

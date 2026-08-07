@@ -51,6 +51,12 @@ import {
   swapTrackedLinks,
 } from './shortlinks';
 import { buildUnsubscribeUrl } from './unsubscribe';
+import {
+  matchesLanguageFilter,
+  normalizeLanguage,
+  resolveVariant,
+  UNKNOWN_LANGUAGE,
+} from './guestLanguage';
 
 const CAMPAIGNS = 'CaptivePortal_Campaigns';
 const CAMPAIGN_SENDS = 'CaptivePortal_CampaignSends';
@@ -75,6 +81,18 @@ interface CampaignMessage {
   templateName?: string;
   languageCode?: string;
   builtInTemplateId?: string;
+  /**
+   * Per-language overrides of this message's own content fields, keyed by
+   * language code. The base fields above ARE the campaign's default-language
+   * copy, so a guest whose language has no variant simply gets them — that is
+   * the spec's "fall back to the default language" with no lookup required.
+   *
+   * Structural fields (id, channel, delayMinutes) are never present in a
+   * variant; the CMS validator rejects them, so one message stays one message
+   * across every language and its metrics stay attributable.
+   */
+  translations?: Record<string, Partial<Pick<CampaignMessage,
+    'subject' | 'body' | 'content' | 'templateName' | 'languageCode'>>>;
 }
 
 interface CampaignSegment {
@@ -82,6 +100,13 @@ interface CampaignSegment {
   entityType?: string;
   signedUpAfter?: string;
   signedUpBefore?: string;
+  /**
+   * Optional language targeting: a supported code, or 'unknown' for guests
+   * captured before the venue offered a language choice. Absent means every
+   * language — adding this field must never shrink an existing campaign's
+   * audience.
+   */
+  language?: string;
 }
 
 interface CampaignTrigger {
@@ -120,6 +145,8 @@ interface AudienceMember {
   phoneCountryCode: string;
   accessPointId: string | null;
   venueId: string | null;
+  /** Splash language the guest chose; null when never recorded. */
+  language: string | null;
   /** Channel-specific suppressions captured at materialization time. */
   optOuts?: { email?: boolean; sms?: boolean; whatsapp?: boolean };
 }
@@ -208,6 +235,7 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
   const after = segment.signedUpAfter ? new Date(segment.signedUpAfter).getTime() : null;
   const before = segment.signedUpBefore ? new Date(segment.signedUpBefore).getTime() : null;
   const wantEntityType = segment.entityType || null;
+  const wantLanguage = segment.language || null;
 
   const out: AudienceMember[] = [];
   const seen = new Set<string>();
@@ -224,6 +252,7 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
         // in dispatchOne via the optOuts flags captured below.
         if (!hasMarketingConsent(u)) return;
         if (wantEntityType && u.entityType !== wantEntityType) return;
+        if (wantLanguage && !matchesLanguageFilter(u.language, wantLanguage)) return;
         if (after !== null || before !== null) {
           const raw = u.createdAt || u.timestamp;
           const t = raw ? new Date(raw?.toDate ? raw.toDate() : raw).getTime() : NaN;
@@ -241,6 +270,7 @@ export async function materializeAudience(campaign: CampaignDoc): Promise<Audien
           phoneCountryCode: u.phoneCountryCode || '',
           accessPointId: u.captivePortalAccessPointId || null,
           venueId: apVenue.get(u.captivePortalAccessPointId) ?? null,
+          language: normalizeLanguage(u.language),
           optOuts: {
             email: u.unsubscribed === true,
             sms: u.smsOptOut === true,
@@ -360,11 +390,16 @@ interface DispatchOutcome {
 /** Dispatch one message to one guest through the right channel service. */
 async function dispatchOne(
   campaign: CampaignDoc,
-  msg: CampaignMessage,
+  baseMsg: CampaignMessage,
   member: AudienceMember,
   venueNameCache: Map<string, string>,
   sendId: string,
 ): Promise<DispatchOutcome> {
+  // Resolve the guest's language variant once, here, so every branch below
+  // reads translated content without knowing languages exist. Falls through to
+  // the base message when the guest has no language or the campaign has no
+  // variant for it.
+  const msg = resolveVariant(baseMsg, member.language);
   const venueId = member.venueId || '';
   let venueName = venueNameCache.get(venueId) || '';
   if (!venueName && venueId) {
@@ -1082,6 +1117,10 @@ export async function retryHeldSends(
         email: typeof guest.email === 'string' && guest.email.includes('@') ? guest.email : null,
         phone: typeof guest.phone === 'string' && guest.phone.trim() ? guest.phone : null,
         phoneCountryCode: (guest.phoneCountryCode as string) || '',
+        // Re-read on retry rather than trusting the original run: a guest who
+        // switched language between the failed send and the retry should get
+        // the retry in the language they now read.
+        language: normalizeLanguage(guest.language),
         accessPointId,
         venueId: accessPointId ? (apVenue.get(accessPointId) ?? null) : null,
         optOuts: {
@@ -1247,7 +1286,10 @@ async function setStatusIf(
 export async function fireAutomationsForGuest(
   accessPointId: string,
   guestId: string,
-  fields: { firstName?: string; lastName?: string; email?: string; phone?: string; phoneCountryCode?: string },
+  fields: {
+    firstName?: string; lastName?: string; email?: string;
+    phone?: string; phoneCountryCode?: string; language?: string | null;
+  },
   wifiEvent: 'onConnect' | 'onReconnect' | 'onDisconnect',
 ): Promise<void> {
   if (!accessPointId || !guestId) return;
@@ -1273,6 +1315,7 @@ export async function fireAutomationsForGuest(
     phoneCountryCode: fields.phoneCountryCode || '',
     accessPointId,
     venueId,
+    language: normalizeLanguage(fields.language),
   };
   const venueNameCache = new Map<string, string>();
 
@@ -1300,6 +1343,10 @@ export async function fireAutomationsForGuest(
 
     const seg = campaign.segment || {};
     if (seg.venueIds && seg.venueIds.length > 0 && !seg.venueIds.includes(venueId)) continue;
+    // Automations re-check the segment per firing because they never go through
+    // materializeAudience — without this a language-targeted automation would
+    // fire for every guest.
+    if (seg.language && !matchesLanguageFilter(member.language, seg.language)) continue;
 
     const messages = (campaign.messages || []).filter((m) => campaign.channels.includes(m.channel));
 

@@ -17,6 +17,7 @@ import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
+import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 
 const router = Router();
 
@@ -72,6 +73,10 @@ router.post('/', async (req: Request, res: Response) => {
     const firstName = user['first-name']?.trim() || '';
     const lastName = user['last-name']?.trim() || '';
     const marketingOptIn = user['is-subscribed'] ?? false;
+    // Social WiFi has always sent this; it was declared on the payload type and
+    // then dropped on the floor. Persisting it means these guests get the same
+    // language-aware sends as portal guests.
+    const guestLanguage = normalizeLanguage(user.language);
 
     const swVenueId = swVenue.id;
     const accessPointId = swVenueId ? SOCIAL_WIFI_AP_MAP[swVenueId] : undefined;
@@ -122,6 +127,7 @@ router.post('/', async (req: Request, res: Response) => {
         privacyPolicyConsent: { given: false, timestamp, version: '1.0' },
         termsConsent: { given: false, timestamp, version: '1.0' },
         marketingConsent: { given: marketingOptIn, timestamp, version: '1.0' },
+        ...(guestLanguage ? { language: guestLanguage } : {}),
       });
       wifiGuestId = ref.id;
       console.log('[SOCIAL_WIFI] New guest created:', wifiGuestId, phone || email);
@@ -129,7 +135,10 @@ router.post('/', async (req: Request, res: Response) => {
       wifiGuestId = existingGuestId;
       console.log('[SOCIAL_WIFI] Reconnect:', wifiGuestId, phone || email);
       db.collection('CaptivePortal_Users').doc(wifiGuestId)
-        .update({ connectionCount: FieldValue.increment(1) })
+        .update({
+          connectionCount: FieldValue.increment(1),
+          ...(guestLanguage ? { language: guestLanguage } : {}),
+        })
         .catch((err) => console.error('[SOCIAL_WIFI] Reconnect count error:', err));
     }
 
@@ -138,11 +147,11 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    scheduleSmsForVenue(accessPointId, wifiGuestId, phone, wifiEvent)
+    scheduleSmsForVenue(accessPointId, wifiGuestId, phone, wifiEvent, guestLanguage)
       .catch((err) => console.error('[SOCIAL_WIFI] SMS schedule error:', err));
-    scheduleWhatsAppForVenue(accessPointId, wifiGuestId, firstName, phone, wifiEvent)
+    scheduleWhatsAppForVenue(accessPointId, wifiGuestId, firstName, phone, wifiEvent, guestLanguage)
       .catch((err) => console.error('[SOCIAL_WIFI] WhatsApp schedule error:', err));
-    scheduleEmailForVenue(accessPointId, wifiGuestId, firstName, email, wifiEvent)
+    scheduleEmailForVenue(accessPointId, wifiGuestId, firstName, email, wifiEvent, guestLanguage)
       .catch((err) => console.error('[SOCIAL_WIFI] Email schedule error:', err));
 
   } catch (err) {
@@ -157,6 +166,7 @@ async function scheduleSmsForVenue(
   wifiGuestId: string,
   phone: string,
   wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   if (!phone) return;
 
@@ -172,7 +182,7 @@ async function scheduleSmsForVenue(
   if (!smsConfig?.enabled || !smsConfig?.messages?.length) return;
 
   for (let i = 0; i < smsConfig.messages.length; i++) {
-    const msg = smsConfig.messages[i];
+    const msg = resolveVariant(smsConfig.messages[i], guestLanguage);
     if (!msg.content) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;
@@ -210,6 +220,7 @@ async function scheduleWhatsAppForVenue(
   firstName: string,
   phone: string,
   wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   if (!phone) return;
 
@@ -227,7 +238,7 @@ async function scheduleWhatsAppForVenue(
   const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < whatsappConfig.messages.length; i++) {
-    const msg = whatsappConfig.messages[i];
+    const msg = resolveVariant(whatsappConfig.messages[i], guestLanguage);
     if (!msg.templateName || !msg.languageCode) continue;
 
     const delayMinutes: number = msg.delayMinutes ?? 0;
@@ -300,6 +311,7 @@ async function scheduleEmailForVenue(
   firstName: string,
   email: string,
   wifiEvent: WifiEvent,
+  guestLanguage: string | null = null,
 ): Promise<void> {
   if (!email) return;
 
@@ -317,7 +329,7 @@ async function scheduleEmailForVenue(
   const venueName: string = await getVenueName(venueId, marketingDoc.data()?.venueName);
 
   for (let i = 0; i < emailConfig.messages.length; i++) {
-    const msg = emailConfig.messages[i];
+    const msg = resolveVariant(emailConfig.messages[i], guestLanguage);
     if (!msg.subject || !msg.body) continue;
 
     const delayMinutes = msg.delayMinutes ?? 0;

@@ -17,6 +17,7 @@ import { sendWhatsAppTemplate } from './whatsapp';
 import { scheduleSms } from './twilio';
 import { sendEmail } from './brevo';
 import type { VerifyChannel } from './guestOtp';
+import { languageOrDefault, type SupportedLanguage } from './guestLanguage';
 
 /**
  * Registered in Meta WhatsApp Manager. Mirrored for review in
@@ -27,6 +28,82 @@ import type { VerifyChannel } from './guestOtp';
  * total channel outage.
  */
 export const OTP_WHATSAPP_TEMPLATE = { name: 'heidifi_verification_code', language: 'en' };
+
+/**
+ * Meta locales this template is APPROVED in — not the languages the portal
+ * offers.
+ *
+ * An AUTHENTICATION template is approved per locale, and sending a locale Meta
+ * has not approved is error 132001 "template does not exist", which the guest
+ * experiences as WhatsApp verification being entirely broken. So the list is an
+ * ops fact, not a product setting: a German guest gets an English WhatsApp code
+ * until `de` is approved and added here. Email and SMS are free text and are
+ * translated from day one.
+ *
+ * To add a locale: submit the template translation via the add-whatsapp-template
+ * flow, wait for Meta approval, THEN append the code here. Appending first
+ * breaks the channel.
+ */
+export const OTP_WHATSAPP_APPROVED_LOCALES: readonly string[] = ['en'];
+
+function whatsappOtpLocale(language: SupportedLanguage): string {
+  return OTP_WHATSAPP_APPROVED_LOCALES.includes(language)
+    ? language
+    : OTP_WHATSAPP_TEMPLATE.language;
+}
+
+/**
+ * Free-text OTP copy per language. WhatsApp is absent by design — Meta owns
+ * that body.
+ *
+ * `smsBody` and `emailSubject` take the code and an already-escaped venue name;
+ * both handle the no-venue-name case, which happens when the AP is not yet
+ * linked to a venue.
+ */
+const OTP_COPY: Record<SupportedLanguage, {
+  smsBody: (code: string, venue: string) => string;
+  emailSubject: (code: string, venue: string) => string;
+  emailIntro: (venue: string) => string;
+  emailExpiry: string;
+  emailSecurity: string;
+}> = {
+  en: {
+    smsBody: (code, venue) =>
+      `${code} is your${venue ? ` ${venue}` : ''} WiFi verification code. It expires in 10 minutes. Do not share it.`,
+    emailSubject: (code, venue) =>
+      venue ? `${code} is your ${venue} WiFi code` : `${code} is your WiFi verification code`,
+    emailIntro: (venue) => `Here is your WiFi verification code${venue ? ` for ${venue}` : ''}:`,
+    emailExpiry: 'This code expires in 10 minutes.',
+    emailSecurity: 'For your security, do not share this code with anyone.',
+  },
+  de: {
+    smsBody: (code, venue) =>
+      `${code} ist Ihr${venue ? ` ${venue}` : ''} WLAN-Bestätigungscode. Er läuft in 10 Minuten ab. Geben Sie ihn nicht weiter.`,
+    emailSubject: (code, venue) =>
+      venue ? `${code} ist Ihr WLAN-Code für ${venue}` : `${code} ist Ihr WLAN-Bestätigungscode`,
+    emailIntro: (venue) => `Hier ist Ihr WLAN-Bestätigungscode${venue ? ` für ${venue}` : ''}:`,
+    emailExpiry: 'Dieser Code läuft in 10 Minuten ab.',
+    emailSecurity: 'Geben Sie diesen Code zu Ihrer Sicherheit an niemanden weiter.',
+  },
+  it: {
+    smsBody: (code, venue) =>
+      `${code} è il tuo codice di verifica WiFi${venue ? ` di ${venue}` : ''}. Scade tra 10 minuti. Non condividerlo.`,
+    emailSubject: (code, venue) =>
+      venue ? `${code} è il tuo codice WiFi di ${venue}` : `${code} è il tuo codice di verifica WiFi`,
+    emailIntro: (venue) => `Ecco il tuo codice di verifica WiFi${venue ? ` per ${venue}` : ''}:`,
+    emailExpiry: 'Questo codice scade tra 10 minuti.',
+    emailSecurity: 'Per la tua sicurezza, non condividere questo codice con nessuno.',
+  },
+  fr: {
+    smsBody: (code, venue) =>
+      `${code} est votre code de vérification WiFi${venue ? ` ${venue}` : ''}. Il expire dans 10 minutes. Ne le partagez pas.`,
+    emailSubject: (code, venue) =>
+      venue ? `${code} est votre code WiFi ${venue}` : `${code} est votre code de vérification WiFi`,
+    emailIntro: (venue) => `Voici votre code de vérification WiFi${venue ? ` pour ${venue}` : ''} :`,
+    emailExpiry: 'Ce code expire dans 10 minutes.',
+    emailSecurity: 'Pour votre sécurité, ne partagez ce code avec personne.',
+  },
+};
 
 export type OtpSendResult =
   | { ok: true; providerMessageId: string | null }
@@ -55,14 +132,14 @@ function twilioErrorCode(err: unknown): number | null {
   return typeof code === 'number' ? code : null;
 }
 
-function otpEmailHtml(code: string, venueName: string): string {
-  const where = venueName ? ` for ${escapeHtml(venueName)}` : '';
+function otpEmailHtml(code: string, venueName: string, language: SupportedLanguage): string {
+  const copy = OTP_COPY[language];
   return `
 <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#222">
-  <p style="font-size:15px;margin:0 0 16px">Here is your WiFi verification code${where}:</p>
+  <p style="font-size:15px;margin:0 0 16px">${escapeHtml(copy.emailIntro(venueName))}</p>
   <p style="font-size:34px;letter-spacing:8px;font-weight:bold;margin:0 0 16px;color:#1c2b4a">${code}</p>
-  <p style="font-size:14px;color:#717171;margin:0 0 8px">This code expires in 10 minutes.</p>
-  <p style="font-size:14px;color:#717171;margin:0">For your security, do not share this code with anyone.</p>
+  <p style="font-size:14px;color:#717171;margin:0 0 8px">${escapeHtml(copy.emailExpiry)}</p>
+  <p style="font-size:14px;color:#717171;margin:0">${escapeHtml(copy.emailSecurity)}</p>
 </div>`.trim();
 }
 
@@ -79,12 +156,16 @@ export async function sendOtp(
   destination: string,
   code: string,
   venueName: string,
+  language?: unknown,
 ): Promise<OtpSendResult> {
+  const lang = languageOrDefault(language);
+  const copy = OTP_COPY[lang];
   try {
     if (channel === 'whatsapp') {
       const wamid = await sendWhatsAppTemplate(destination, {
         templateName: OTP_WHATSAPP_TEMPLATE.name,
-        languageCode: OTP_WHATSAPP_TEMPLATE.language,
+        // Falls back to English unless Meta has approved the guest's locale.
+        languageCode: whatsappOtpLocale(lang),
         components: [
           { type: 'body', parameters: [{ type: 'text', text: code }] },
           // The Copy-code button carries the SAME code as the body. Meta declares
@@ -99,22 +180,19 @@ export async function sendOtp(
     }
 
     if (channel === 'sms') {
-      const where = venueName ? ` ${venueName}` : '';
       // No link: link-bearing OTP SMS trips carrier spam filtering. No "Reply
       // STOP" either — this is transactional, and the marketing dispatcher's
       // suffix logic lives in campaigns.ts and does not run here.
-      const body = `${code} is your${where} WiFi verification code. It expires in 10 minutes. Do not share it.`;
+      const body = copy.smsBody(code, venueName);
       const sid = await scheduleSms(destination, body, 0);
       if (sid === null) return { ok: false, kind: 'unconfigured', detail: 'twilio env unset' };
       return { ok: true, providerMessageId: sid };
     }
 
-    const subject = venueName
-      ? `${code} is your ${venueName} WiFi code`
-      : `${code} is your WiFi verification code`;
+    const subject = copy.emailSubject(code, venueName);
     // Deliberately no unsubscribeUrl: a List-Unsubscribe header on a verification
     // code would let a guest unsubscribe from their own login.
-    const messageId = await sendEmail(destination, subject, otpEmailHtml(code, venueName), 0);
+    const messageId = await sendEmail(destination, subject, otpEmailHtml(code, venueName, lang), 0);
     if (messageId === null) return { ok: false, kind: 'unconfigured', detail: 'brevo env unset' };
     return { ok: true, providerMessageId: messageId };
   } catch (err) {

@@ -6,12 +6,11 @@ function clientMac() { return param('mac') || param('id'); }
 function apMac() { return param('apmac') || param('ap'); }
 
 // ── 3. Step 1 → Step 2 transition ─────────────────────────────────────────
-var FIELD_ERROR_MSGS = {
-  firstName: 'Please enter your first name.',
-  lastName:  'Please enter your last name.',
-  email:     'Please enter a valid email address.',
-  phone:     'Please enter your phone number.',
-};
+// Resolved per call, not cached in an object literal: the guest can switch
+// language after a failed submit, and a cached English message would survive it.
+function fieldErrorMsg(id) {
+  return t('error.' + id);
+}
 
 function goToConsent() {
   var lp  = normalizeLoginPage(CONFIG);
@@ -24,7 +23,7 @@ function goToConsent() {
     if (!f.enabled || !f.required) continue;
     var value = document.getElementById(id).value.trim();
     var invalid = (id === 'email') ? (!value || !value.includes('@')) : !value;
-    if (invalid) { showErr(err, FIELD_ERROR_MSGS[id]); return; }
+    if (invalid) { showErr(err, fieldErrorMsg(id)); return; }
   }
 
   // Required custom splash fields
@@ -38,7 +37,7 @@ function goToConsent() {
         ? !input.checked
         : !(input.value || '').trim();
       if (empty) {
-        showErr(err, 'Please fill in: ' + input.getAttribute('data-label'));
+        showErr(err, t('error.fillIn', input.getAttribute('data-label')));
         return;
       }
     }
@@ -208,22 +207,20 @@ var _verifyState = {
 // is broken.
 var _submitInFlight = false;
 
-var VERIFY_ERRORS = {
-  invalid_code:             'That code is not right. Please check and try again.',
-  code_expired:             'That code expired. Send a new one to continue.',
-  too_many_attempts:        'Too many attempts. Please wait a few minutes and try again.',
-  too_many_requests:        'Too many requests. Please wait a few minutes and try again.',
-  invalid_destination:      'That contact detail does not look right. Go back and check it.',
-  undeliverable:            'We could not reach you there.',
-  channel_unavailable:      'That method is unavailable right now.',
-  channel_not_enabled:      'That method is not available here.',
-  provider_error:           'We could not send your code. Please try again.',
-  ap_not_registered:        'This WiFi point is not set up. Please ask staff for help.',
-  verification_unavailable: 'Verification is unavailable right now. Please ask staff for help.',
-};
+// The server returns machine codes only (see server/src/routes/verify.ts), which
+// is what lets every one of these live in the translation catalog rather than in
+// the API response. An unknown code falls back to the generic message.
+var VERIFY_ERROR_CODES = [
+  'invalid_code', 'code_expired', 'too_many_attempts', 'too_many_requests',
+  'invalid_destination', 'undeliverable', 'channel_unavailable',
+  'channel_not_enabled', 'provider_error', 'ap_not_registered',
+  'verification_unavailable',
+];
 
 function verifyErrorText(code, extra) {
-  var msg = VERIFY_ERRORS[code] || 'Something went wrong. Please try again.';
+  var msg = (VERIFY_ERROR_CODES.indexOf(code) !== -1)
+    ? t('verifyError.' + code)
+    : t('error.generic');
   return extra ? msg + ' ' + extra : msg;
 }
 
@@ -251,10 +248,12 @@ function verifyDestinationPayload() {
 // Copy for the connecting wait. A spinner that says nothing for ~12s reads as
 // broken in a captive mini-browser, and "keep this page open" is the
 // operationally useful line — guests close the CNA sheet.
+// Text resolved lazily via key so a language switch mid-connect repaints
+// correctly on the next tick.
 var VERIFY_CONNECT_COPY = [
-  { at: 0,    text: 'Code confirmed — getting you online…' },
-  { at: 4000, text: 'Still connecting — this can take a few seconds.' },
-  { at: 8000, text: 'Almost there. Please keep this page open.' },
+  { at: 0,    key: 'connect.step1' },
+  { at: 4000, key: 'connect.step2' },
+  { at: 8000, key: 'connect.step3' },
 ];
 // fetch() has no timeout of its own, so without this a hung request would trap
 // the guest behind a card with every control disabled.
@@ -300,7 +299,7 @@ function paintResendButton() {
   var label = normalizeVerification(CONFIG.verificationPage).resendLabel;
   if (_verifyState.phase !== 'idle') { btn.disabled = true; return; }
   var left = Math.ceil((_verifyState.resendUntil - Date.now()) / 1000);
-  if (left > 0) { btn.disabled = true; btn.textContent = label + ' (' + left + 's)'; return; }
+  if (left > 0) { btn.disabled = true; btn.textContent = t('verify.resendCountdown', label, left); return; }
   btn.disabled = false;
   btn.textContent = label;
 }
@@ -370,18 +369,18 @@ function paintVerifyState(next, opts) {
   paintResendButton();
 
   if (!btn) return;
-  if (next === 'sending')   { btn.disabled = true; setVerifyBusyLabel(btn, 'Sending code…'); return; }
-  if (next === 'verifying') { btn.disabled = true; setVerifyBusyLabel(btn, 'Verifying…');    return; }
+  if (next === 'sending')   { btn.disabled = true; setVerifyBusyLabel(btn, t('verify.sending')); return; }
+  if (next === 'verifying') { btn.disabled = true; setVerifyBusyLabel(btn, t('verify.verifying')); return; }
 
   if (next === 'connecting') {
     btn.disabled = true;
-    setVerifyBusyLabel(btn, 'Connecting…');
+    setVerifyBusyLabel(btn, t('verify.connecting'));
     if (sub) {
-      sub.textContent = VERIFY_CONNECT_COPY[0].text;
+      sub.textContent = t(VERIFY_CONNECT_COPY[0].key);
       for (var s = 1; s < VERIFY_CONNECT_COPY.length; s++) {
         (function (step) {
           _verifyState.connectTimers.push(setTimeout(function () {
-            if (_verifyState.phase === 'connecting') sub.textContent = step.text;
+            if (_verifyState.phase === 'connecting') sub.textContent = t(step.key);
           }, step.at));
         })(VERIFY_CONNECT_COPY[s]);
       }
@@ -390,14 +389,14 @@ function paintVerifyState(next, opts) {
       if (_verifyState.phase !== 'connecting') return;
       var c = document.getElementById('btnChangeDestination');
       if (c) c.disabled = false;
-      if (sub) sub.textContent = 'This is taking longer than usual.';
+      if (sub) sub.textContent = t('verify.takingLonger');
     }, VERIFY_CONNECT_WATCHDOG_MS));
     return;
   }
 
   // idle
   btn.disabled = false;
-  btn.textContent = opts.label || btn.getAttribute('data-idle-label') || 'Verify';
+  btn.textContent = opts.label || btn.getAttribute('data-idle-label') || t('verify.verifyButtonText');
   if (sub && _verifyState.subheadingText) sub.textContent = _verifyState.subheadingText;
   if (input && opts.clearCode) input.value = '';
   if (input && opts.focus) { try { input.focus(); } catch (e) {} }
@@ -499,6 +498,9 @@ async function sendCode() {
     channel: _verifyState.channel,
     apmac: apMac(),
     mac: clientMac(),
+    // Picks the OTP email/SMS wording; see services/otpMessages.ts. WhatsApp is
+    // pinned to an approved Meta locale server-side, so this is advisory there.
+    language: ACTIVE_LANG,
   }, verifyDestinationPayload());
 
   try {
@@ -518,7 +520,7 @@ async function sendCode() {
 
     if (res.ok) {
       if (data.destinationMasked) {
-        setVerifySubheading('Enter the 6-digit code we sent to ' + data.destinationMasked);
+        setVerifySubheading(t('verify.codeSentTo', data.destinationMasked));
       }
       // A fresh code means the old rejection no longer applies.
       _verifyState.lastRejectedCode = null;
@@ -530,16 +532,16 @@ async function sendCode() {
     // A cooldown is NOT a failure — the guest reopened the captive browser and a
     // code is already in flight. Show the entry state with the countdown.
     if (data.code === 'resend_too_soon') {
-      setVerifySubheading('We already sent a code'
-        + (data.destinationMasked ? ' to ' + data.destinationMasked : '')
-        + ' — check your messages.');
+      setVerifySubheading(data.destinationMasked
+        ? t('verify.alreadySentTo', data.destinationMasked)
+        : t('verify.alreadySent'));
       setVerifyState('idle');
       startResendCountdown(data.retryAfterSeconds || 60);
       return;
     }
 
     var alt = (Array.isArray(data.fallbackChannels) && data.fallbackChannels.length)
-      ? 'You can also try: ' + data.fallbackChannels.join(', ') + '.'
+      ? t('verify.alsoTry', data.fallbackChannels.join(', '))
       : '';
     startResendCountdown(0);
     showVerifyError(data.code, alt);
@@ -592,8 +594,10 @@ async function checkCode(page) {
       return;
     }
 
-    var left = (typeof data.attemptsLeft === 'number')
-      ? data.attemptsLeft + ' attempt' + (data.attemptsLeft === 1 ? '' : 's') + ' left.'
+    // Plural form comes from the catalog, not string concatenation — the rule
+    // differs per language and concatenation cannot express it.
+    var left = (typeof data.attemptsLeft === 'number' && window.HF_I18N)
+      ? window.HF_I18N.plural('verify.attemptsLeft', data.attemptsLeft)
       : '';
     _verifyState.lastRejectedCode = code;
     showVerifyError(data.code, left, {
@@ -669,6 +673,9 @@ async function completeSubmission(verificationToken) {
         marketingConsent,
         splashResponses,
         verificationToken,
+        // Persisted on the guest record and reused for every later email/SMS/
+        // WhatsApp we send them — see services/guestLanguage.ts.
+        language: ACTIVE_LANG,
       }),
     });
     if (!res.ok) throw new Error('Server error');
@@ -689,6 +696,7 @@ async function completeSubmission(verificationToken) {
           marketingConsent,
           splashResponses,
           verificationToken,
+          language: ACTIVE_LANG,
         }),
       });
       var authData = await authRes.json().catch(function() { return {}; });
@@ -701,8 +709,12 @@ async function completeSubmission(verificationToken) {
       // tenant destination — captive.apple.com/hotspot-detect.html (whose body is
       // the word "Success") or connectivitycheck.gstatic.com/generate_204 (blank).
       // Honouring it skipped /success, so the venue's connected page never showed.
+      // lang rides the URL because /success is a fresh document: some captive
+      // network assistants run with localStorage disabled, and without this the
+      // connected card would revert to the venue default language.
       window.location.href = '/success?apmac=' + encodeURIComponent(apMac())
-        + '&mac=' + encodeURIComponent(clientMac());
+        + '&mac=' + encodeURIComponent(clientMac())
+        + '&lang=' + encodeURIComponent(ACTIVE_LANG);
       return;
     }
 
@@ -730,6 +742,17 @@ async function completeSubmission(verificationToken) {
       }
       tokenInput.value = verificationToken;
     }
+    // Same reasoning as the token above: /submit re-renders the template
+    // server-side, so the chosen language has to survive the POST.
+    var langInput = document.getElementById('f_lang');
+    if (!langInput) {
+      langInput = document.createElement('input');
+      langInput.type = 'hidden';
+      langInput.id = 'f_lang';
+      langInput.name = 'lang';
+      document.getElementById('portalForm').appendChild(langInput);
+    }
+    langInput.value = ACTIVE_LANG;
     document.getElementById('portalForm').submit();
 
   } catch (e) {
@@ -740,11 +763,11 @@ async function completeSubmission(verificationToken) {
     var stepVerify = document.getElementById('stepVerify');
     if (stepVerify && !stepVerify.classList.contains('hidden')) {
       setVerifyState('idle', {
-        error: 'Something went wrong. Please try again.',
-        label: 'Try again',
+        error: t('error.generic'),
+        label: t('verify.tryAgain'),
       });
     } else if (err) {
-      showErr(err, 'Something went wrong. Please try again.');
+      showErr(err, t('error.generic'));
     }
     if (btnAccept) {
       btnAccept.disabled = false;
@@ -764,15 +787,17 @@ async function completeSubmission(verificationToken) {
 window.addEventListener('pageshow', function (e) {
   if (!e.persisted) return;
   _submitInFlight = false;
-  if (_verifyState.phase === 'connecting') setVerifyState('idle', { label: 'Try again' });
+  if (_verifyState.phase === 'connecting') setVerifyState('idle', { label: t('verify.tryAgain') });
 });
 
 // ── 6. Document modal (Privacy Policy + Terms of Service) ─────────────────
-var docCache = {};   // keyed by 'privacy' | 'terms'
+// Keyed by 'privacy'|'terms' AND language: the same venue serves a different
+// document per language, so a language switch must not reuse the cached one.
+var docCache = {};
 
 var DOC_CONFIG = {
-  privacy: { api: '/api/privacy-policy', label: 'Privacy Policy' },
-  terms:   { api: '/api/terms',          label: 'Terms of Service' },
+  privacy: { api: '/api/privacy-policy', labelKey: 'doc.privacy' },
+  terms:   { api: '/api/terms',          labelKey: 'doc.terms' },
 };
 
 function openDoc(e, type) {
@@ -780,27 +805,34 @@ function openDoc(e, type) {
   var cfg = DOC_CONFIG[type];
   if (!cfg) return;
 
-  document.getElementById('ppTitle').textContent = cfg.label;
+  var cacheKey = type + ':' + ACTIVE_LANG;
+  document.getElementById('ppTitle').textContent = t(cfg.labelKey);
   document.getElementById('ppModal').classList.add('open');
 
-  if (docCache[type]) {
-    document.getElementById('ppContent').textContent = docCache[type];
+  if (docCache[cacheKey]) {
+    document.getElementById('ppContent').textContent = docCache[cacheKey];
     return;
   }
 
-  document.getElementById('ppContent').textContent = 'Loading\u2026';
-  // Forward the AP MAC so the backend can serve this venue's document override.
-  var docUrl = apMac() ? cfg.api + '?apmac=' + encodeURIComponent(apMac()) : cfg.api;
-  fetch(docUrl)
+  document.getElementById('ppContent').textContent = t('doc.loading');
+  // Forward the AP MAC so the backend can serve this venue's document override,
+  // and the language so it can serve that override's translation. Scope resolves
+  // BEFORE language server-side: a venue's own document in its default language
+  // beats a translated platform default.
+  var docParams = new URLSearchParams();
+  if (apMac()) docParams.set('apmac', apMac());
+  docParams.set('lang', ACTIVE_LANG);
+  fetch(cfg.api + '?' + docParams.toString())
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      var text = d.content || (cfg.label + ' not available.');
-      docCache[type] = text;
+      var text = d.content || t('doc.notAvailable', t(cfg.labelKey));
+      docCache[cacheKey] = text;
+      // The document's own title is translated too when a variant exists.
+      if (d.title) document.getElementById('ppTitle').textContent = d.title;
       document.getElementById('ppContent').textContent = text;
     })
     .catch(function() {
-      document.getElementById('ppContent').textContent =
-        'Unable to load document. Please ask staff for a copy.';
+      document.getElementById('ppContent').textContent = t('doc.unavailable');
     });
 }
 
