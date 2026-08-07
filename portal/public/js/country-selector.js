@@ -72,7 +72,9 @@ function renderCountries(q) {
       '<span class="opt-code">' + c.dial + '</span></div>';
   });
   list.innerHTML = html ||
-    '<div style="padding:12px 14px;color:#bbb;font-size:13px">No results</div>';
+    '<div style="padding:12px 14px;color:#bbb;font-size:13px">'
+      + (window.HF_I18N ? window.HF_I18N.t('country.noResults') : 'No results')
+      + '</div>';
 }
 
 function selectCountry(dial, flag) {

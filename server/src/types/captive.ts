@@ -24,6 +24,10 @@ export interface CreateUserRequestBody {
   marketingConsent?: ConsentRecord;
   /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
   splashResponses?: Record<string, unknown>;
+  /** Splash-screen language the guest chose ('en'|'de'|'it'|'fr'). Absent when
+   *  the venue offers one language or the guest never picked — see
+   *  services/guestLanguage.ts for why absent is meaningful. */
+  language?: string;
 }
 
 export interface MarketingSmsMessage {
@@ -251,6 +255,10 @@ export interface CaptivePortalUserDocument {
   connectedFormUpdatedAt?: FieldValue;
   /** Answers from splash-form custom fields (loginPage.customFields), keyed by field id. */
   splashFormResponses?: Record<string, ConnectedFormResponse>;
+  /** Splash-screen language the guest chose ('en'|'de'|'it'|'fr'). Absent when
+   *  the venue offers one language or the guest never picked — see
+   *  services/guestLanguage.ts for why absent is meaningful. */
+  language?: string;
 }
 
 export interface CaptivePortalSessionDocument {
@@ -289,4 +297,8 @@ export interface UnifiAuthorizeRequestBody {
   marketingConsent?: ConsentRecord;
   /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
   splashResponses?: Record<string, unknown>;
+  /** Splash-screen language the guest chose ('en'|'de'|'it'|'fr'). Absent when
+   *  the venue offers one language or the guest never picked — see
+   *  services/guestLanguage.ts for why absent is meaningful. */
+  language?: string;
 }

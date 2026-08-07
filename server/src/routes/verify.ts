@@ -254,7 +254,9 @@ router.post('/send', async (req: Request, res: Response) => {
   }
 
   const venueName = ctx.venueId ? await getVenueName(ctx.venueId) : '';
-  const result = await sendOtp(channel, destination, issued.code, venueName);
+  // The portal sends the language the guest is reading the splash screen in.
+  // Unrecognised or absent falls back to English inside sendOtp.
+  const result = await sendOtp(channel, destination, issued.code, venueName, req.body?.language);
   if (channel === 'whatsapp') noteWhatsappResult(result);
 
   if (!result.ok) {

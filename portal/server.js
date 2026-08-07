@@ -95,6 +95,28 @@ function safeColor(value, fallback) {
   return hex.slice(0, 7);
 }
 
+// The four languages the portal ships catalogs for. Kept in sync with
+// SUPPORTED in portal/public/js/i18n.js and SUPPORTED_LANGUAGES in
+// server/src/services/guestLanguage.ts.
+const SUPPORTED_LANGS = ['en', 'de', 'it', 'fr'];
+
+// Guest-supplied, and it reaches both a query string and rendered HTML — treat
+// it exactly like a colour: allowlist or nothing.
+function safeLang(value) {
+  if (typeof value !== 'string') return '';
+  const base = value.trim().toLowerCase().split(/[-_]/)[0];
+  return SUPPORTED_LANGS.includes(base) ? base : '';
+}
+
+// The iOS interstitial is plain server-rendered HTML with no client catalog in
+// scope, so its one string lives here rather than in i18n.js.
+const CONNECTING_COPY = {
+  en: 'Connecting you to the internet...',
+  de: 'Sie werden mit dem Internet verbunden...',
+  it: 'Ti stiamo connettendo a internet...',
+  fr: 'Connexion à internet en cours...',
+};
+
 function injectBootGate(html, config) {
   const fg = safeColor(config && config.primaryColor, DEFAULT_PRIMARY);
 
@@ -107,8 +129,13 @@ function injectBootGate(html, config) {
     ? `  html:not(.hf-ready) body { background: ${rawBg}; }\n`
     : '';
 
+  // i18n.js is a BLOCKING head script, not deferred: config.js and form-logic.js
+  // read every literal through HF_I18N.t(), and both run before the boot gate
+  // lifts. Loading it async would race the first paint of translated copy. It is
+  // static, small and served with the same 1h cache as the rest of /js.
   const head = `
 <link rel="preload" as="script" href="/js/config.js">
+<script src="/js/i18n.js"></script>
 <style id="hf-boot-style">
 ${bodyBg}  html:not(.hf-ready) #step1,
   html:not(.hf-ready) #stepVerify,
@@ -225,10 +252,18 @@ function proxyGet(backendPath, res) {
   proxyReq.end();
 }
 
-// Forward the AP MAC so the backend can resolve venue-specific document overrides.
+// Forward the AP MAC so the backend can resolve venue-specific document overrides,
+// and the language so it can pick that override's translation. Scope resolves
+// before language on the backend: a venue's own document in its default language
+// outranks a translated platform default.
 function docPath(backendPath, req) {
+  const params = new URLSearchParams();
   const apmac = String(req.query.apmac || '').trim();
-  return apmac ? `${backendPath}?apmac=${encodeURIComponent(apmac)}` : backendPath;
+  if (apmac) params.set('apmac', apmac);
+  const lang = safeLang(req.query.lang);
+  if (lang) params.set('lang', lang);
+  const qs = params.toString();
+  return qs ? `${backendPath}?${qs}` : backendPath;
 }
 
 // GET /api/privacy-policy — proxies to backend GET /privacy-policy
@@ -325,6 +360,17 @@ function androidConnectTail({ switchUrl, email, buttonUrl, buttonHost, primaryCo
 </form>
 <script>
 (function () {
+  // i18n.js is injected into this same re-rendered template, but auth must never
+  // depend on it: every lookup falls back to the English literal the call site
+  // supplies, so a missing catalog costs wording, not connectivity.
+  function tail(key, arg) {
+    try { return window.HF_I18N.t(key, arg); } catch (e) {
+      if (key === 'grant.connecting') return 'Connecting\\u2026';
+      if (key === 'grant.activatingIn') return 'Activating connection in ' + arg + 's\\u2026';
+      if (key === 'grant.openBrowser') return 'Open your browser and visit:';
+      return 'Connect Now';
+    }
+  }
   var form = document.getElementById('hfArubaForm');
   var secs = 5, submitted = false, label = null, btn = null;
 
@@ -332,12 +378,12 @@ function androidConnectTail({ switchUrl, email, buttonUrl, buttonHost, primaryCo
     if (submitted) return;
     submitted = true;
     clearInterval(timer);
-    try { if (btn) { btn.disabled = true; btn.textContent = 'Connecting\\u2026'; } } catch (e) {}
+    try { if (btn) { btn.disabled = true; btn.textContent = tail('grant.connecting'); } } catch (e) {}
     form.submit();
   }
   var timer = setInterval(function () {
     secs -= 1;
-    try { if (label) label.textContent = 'Activating connection in ' + secs + 's\\u2026'; } catch (e) {}
+    try { if (label) label.textContent = tail('grant.activatingIn', secs); } catch (e) {}
     if (secs <= 0) go();
   }, 1000);
 
@@ -349,7 +395,7 @@ function androidConnectTail({ switchUrl, email, buttonUrl, buttonHost, primaryCo
 
     var hint = document.createElement('p');
     hint.className = 'section-sub';
-    hint.textContent = 'Open your browser and visit:';
+    hint.textContent = tail('grant.openBrowser');
 
     var box = document.createElement('div');
     box.style.cssText = 'background:rgba(0,0,0,.05);border-radius:10px;padding:14px;margin:12px 0;text-align:center';
@@ -361,12 +407,12 @@ function androidConnectTail({ switchUrl, email, buttonUrl, buttonHost, primaryCo
     label = document.createElement('p');
     label.className = 'section-sub';
     label.style.cssText = 'font-size:12px;opacity:.7;margin:0 0 12px';
-    label.textContent = 'Activating connection in ' + secs + 's\\u2026';
+    label.textContent = tail('grant.activatingIn', secs);
 
     btn = document.createElement('button');
     btn.type = 'button';
     btn.className = sampleBtn ? sampleBtn.className : 'btn-primary';
-    btn.textContent = 'Connect Now';
+    btn.textContent = tail('grant.connectNow');
     btn.onclick = go;
 
     card.appendChild(hint);
@@ -563,8 +609,13 @@ app.post('/submit', async (req, res) => {
   const portalDomain = process.env.PORTAL_DOMAIN || req.headers.host;
   // Named to distinguish it from connectedPage.redirectUrl — this is where Aruba
   // returns the guest so /success can render, not a tenant destination.
+  // Posted by the hidden #f_lang input form-logic.js appends. Aruba re-renders
+  // the template server-side, so without this the connected card would revert to
+  // the venue default language after the guest already chose one.
+  const submitLang = safeLang(req.body.lang);
   const successReturnUrl = `http://${portalDomain}/success`
-    + `?apmac=${encodeURIComponent(apmac || '')}&mac=${encodeURIComponent(mac || '')}`;
+    + `?apmac=${encodeURIComponent(apmac || '')}&mac=${encodeURIComponent(mac || '')}`
+    + (submitLang ? `&lang=${encodeURIComponent(submitLang)}` : '');
 
   const cardArgs = { switchUrl, email, buttonUrl, buttonHost, primaryColor };
 
@@ -580,6 +631,8 @@ app.post('/submit', async (req, res) => {
       // portal, which is inside the walled garden.
       const preAuthConfig = {
         ...config,
+        // config.js reads `lang` at the top of its boot priority chain.
+        ...(submitLang ? { lang: submitLang } : {}),
         view: 'connected',
         connectedPage: {
           ...(config.connectedPage || {}),
@@ -609,7 +662,7 @@ app.post('/submit', async (req, res) => {
 <html>
 <head><title>Connecting...</title></head>
 <body>
-  <p style="text-align:center;margin-top:40vh;font-family:sans-serif;color:#555;">Connecting you to the internet...</p>
+  <p style="text-align:center;margin-top:40vh;font-family:sans-serif;color:#555;">${escapeHtml(CONNECTING_COPY[submitLang] || CONNECTING_COPY.en)}</p>
   <form id="loginForm" method="POST" action="${escapeHtml(switchUrl)}">
     <input type="hidden" name="cmd" value="authenticate" />
     <input type="hidden" name="user" value="${escapeHtml(email)}" />
@@ -638,7 +691,14 @@ app.get('/success', async (req, res) => {
       return res.sendFile(STATIC_SUCCESS_HTML);
     }
     // view:'connected' rides inside the config JSON so no template needs editing.
-    const config = { ...(result.config || {}), view: 'connected' };
+    // ?lang= is how the language survives the hop to this fresh document when
+    // the captive browser has no usable localStorage.
+    const successLang = safeLang(req.query.lang);
+    const config = {
+      ...(result.config || {}),
+      ...(successLang ? { lang: successLang } : {}),
+      view: 'connected',
+    };
     const rawId = (preview === '1' && templateIdOverride && VALID_TEMPLATES.includes(templateIdOverride))
       ? templateIdOverride
       : (config.templateId || DEFAULT_TEMPLATE);
