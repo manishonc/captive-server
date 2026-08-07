@@ -31,7 +31,7 @@ a translation overlay and reports it as a `structural_key_ignored` warning.
 | Copy the venue wrote (title, labels, consent, buttons) | `languages.translations.<code>` in the splash config | the tenant, in the CMS Languages tab |
 | Everything else a guest reads (validation errors, OTP progress, "Redirecting…", doc-modal chrome) | `portal/public/js/i18n.js` CATALOG | us |
 | OTP email/SMS body | `server/src/services/otpMessages.ts` OTP_COPY | us |
-| Terms / Privacy | `CaptivePortal_Documents.translations.<code>` | the tenant (CMS write path not yet built) |
+| Terms / Privacy | `CaptivePortal_Documents.translations.<code>` | the tenant, in the CMS Terms & Privacy tab |
 
 Adding a language means adding it to **all** of:
 
@@ -76,6 +76,29 @@ least two languages on a test venue first.
   real guest on that device (preview never writes `localStorage`)
 - a language removed from the venue after a guest picked it: the guest falls back
   to the default, and their stored `language` is left alone for targeting
+
+## Terms & Privacy per language
+
+Variants live on the SAME document under `translations.<code>`; the base
+`title`/`latestContent` are the venue's default-language text. One document
+rather than one per language, because **scope resolves before language**: the
+portal picks the venue's own document over the platform default first, and only
+then picks a variant inside it. The other order could show a guest a translated
+platform default in place of terms the venue actually adopted — adopted terms in
+the wrong language beat unadopted terms in the right one.
+
+A translation is a variant of the venue's OWN document, so it needs one to
+exist: publishing a translation before the venue has adopted its own text is
+refused, otherwise the override would be created with empty default-language
+content and served to everyone else.
+
+Removing a translation (`DELETE` with `language`, or `reset_venue_document` with
+`language`) leaves the document published — those guests just fall back to its
+default-language text. The confirm token is scoped by language, so approving
+"drop the German version" cannot also drop the whole document.
+
+No AI translate button here, and the MCP tools say the same: this text is stored
+verbatim as each guest's consent record.
 
 ## Marketing in the guest's language
 
