@@ -318,6 +318,12 @@ function pickInitialLanguage(raw) {
     return typeof code === 'string' && langs.available.indexOf(code.trim().toLowerCase()) !== -1;
   }
   if (usable(raw && raw.lang)) return raw.lang.trim().toLowerCase();
+  // In the CMS preview the editor is the authority on which language to show,
+  // and it says so in every postMessage. Honouring the admin's own browser
+  // language or a stored guest choice here would boot the iframe into the wrong
+  // language for the moment before the first message arrives, which reads as
+  // "the preview ignores the language picker".
+  if (window.PREVIEW_MODE) return langs.default;
   var stored = readStoredLang();
   if (usable(stored)) return stored.trim().toLowerCase();
   var fromQuery = queryLang();

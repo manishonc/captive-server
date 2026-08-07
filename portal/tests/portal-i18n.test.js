@@ -286,6 +286,36 @@ console.log('\nInitial language pick');
     const ctx = buildContext(baseConfig(FULL_LANGUAGES), { search: '?lang=it', browserLanguages: ['en'] });
     assertEqual(vm.runInContext('pickInitialLanguage(RAW_CONFIG)', ctx), 'en');
   });
+  // Regression: a venue whose default is not English. The CMS editor used to
+  // open on a hardcoded "en", which for this venue is an available language but
+  // NOT the one the base copy is written in — so the preview resolved through
+  // the fallback chain and rendered German for an Italian venue.
+  test('a non-English default venue previews in ITS default, not the browser language', () => {
+    const cfg = baseConfig({
+      enabled: true,
+      default: 'it',
+      fallback: 'de',
+      autoDetect: true,
+      available: ['en', 'de', 'it', 'fr'],
+      translations: { de: { title: 'Willkommen' } },
+    });
+    const ctx = buildContext(cfg, { browserLanguages: ['en-US', 'en'] });
+    // A guest with an English browser legitimately gets English…
+    assertEqual(vm.runInContext('pickInitialLanguage(RAW_CONFIG)', ctx), 'en');
+    // …but the CMS preview must start from the venue's own default.
+    const preview = buildContext(cfg, { browserLanguages: ['en-US', 'en'] });
+    vm.runInContext('window.PREVIEW_MODE = true;', preview);
+    assertEqual(vm.runInContext('pickInitialLanguage(RAW_CONFIG)', preview), 'it');
+  });
+
+  test('preview ignores a stored guest language too', () => {
+    const cfg = baseConfig(Object.assign({}, FULL_LANGUAGES, { default: 'fr' }));
+    const ctx = buildContext(cfg, { browserLanguages: ['de'] });
+    vm.runInContext("window.localStorage.setItem('hf_lang', 'de');", ctx);
+    vm.runInContext('window.PREVIEW_MODE = true;', ctx);
+    assertEqual(vm.runInContext('pickInitialLanguage(RAW_CONFIG)', ctx), 'fr');
+  });
+
   test('setLanguage coerces an unavailable language to the default', () => {
     const ctx = buildContext(baseConfig(FULL_LANGUAGES));
     assertEqual(vm.runInContext("setLanguage('it', { persist: false })", ctx), 'en');
