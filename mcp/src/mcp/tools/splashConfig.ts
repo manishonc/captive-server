@@ -324,7 +324,7 @@ export function registerSplashConfigTools(server: McpServer): void {
   addTool<{ venueId: string }>(
     server,
     'get_venue_documents',
-    'Read the venue\'s Terms & Conditions and Privacy Policy — the documents linked from the splash screen footer. For each one you get the venue\'s own version if it has published one, the platform default, and `inForce` telling you which the guests are actually being shown ("override", "platform_default" or "none"). Note the footer links only appear when showPrivacyPolicy / showTermsOfService are on in the splash config.',
+    'Read the venue\'s Terms & Conditions and Privacy Policy — the documents linked from the splash screen footer. For each one you get the venue\'s own version if it has published one, the platform default, `inForce` telling you which the guests are actually being shown ("override", "platform_default" or "none"), and `translatedLanguages` listing which languages that live text has its own version in. Note the footer links only appear when showPrivacyPolicy / showTermsOfService are on in the splash config.',
     { venueId: z.string().describe('The venue id (from list_venues).') },
     async (args, extra) => {
       const gate = await withVenue(tenantFrom(extra), args.venueId);
@@ -340,7 +340,7 @@ export function registerSplashConfigTools(server: McpServer): void {
     },
   );
 
-  addTool<{ venueId: string; type: string; content: string; title?: string }>(
+  addTool<{ venueId: string; type: string; content: string; title?: string; language?: string }>(
     server,
     'preview_venue_document',
     'DRY RUN for replacing a venue\'s Terms & Conditions or Privacy Policy. Writes NOTHING. Returns a summary of how the text would change and a confirmToken. This is the venue\'s LEGAL TEXT shown to guests — do not draft, translate or "improve" it yourself. Use the wording the tenant gives you, read the change back to them, and get an explicit yes before applying. If they want to go back to the platform default, use reset_venue_document rather than publishing a copy of it.',
@@ -349,6 +349,11 @@ export function registerSplashConfigTools(server: McpServer): void {
       type: z.enum(DOCUMENT_TYPES).describe('Which document to replace.'),
       content: z.string().describe('The full document text, supplied by the tenant. Max 100000 characters.'),
       title: z.string().optional().describe('Optional heading; defaults to "Privacy Policy" / "Terms & Conditions".'),
+      language: z.enum(['en', 'de', 'it', 'fr']).optional().describe("Publish this text as the TRANSLATION of the venue's own document in this language, "
+        + 'instead of replacing the document itself. The document must already exist in the '
+        + "venue's default language. Guests reading a language with no translation see the "
+        + 'default-language text. NEVER translate the document yourself — this must be wording '
+        + 'the tenant supplied in that language.'),
     },
     async (args, extra) => {
       const gate = await withVenue(tenantFrom(extra), args.venueId);
@@ -361,6 +366,7 @@ export function registerSplashConfigTools(server: McpServer): void {
         type: args.type,
         content: args.content,
         title: args.title,
+        language: args.language,
       });
       if (!result.ok) return errorResult(result.error);
 
@@ -371,7 +377,7 @@ export function registerSplashConfigTools(server: McpServer): void {
     },
   );
 
-  addTool<{ venueId: string; type: string; content: string; title?: string; confirmToken: string }>(
+  addTool<{ venueId: string; type: string; content: string; title?: string; language?: string; confirmToken: string }>(
     server,
     'apply_venue_document',
     'Publish a venue\'s Terms & Conditions or Privacy Policy. LIVE IMMEDIATELY for guests. Requires the confirmToken from preview_venue_document for this exact text. Publishing creates a new version — the previous text is kept in history, so a mistake is recoverable. Only call this after the tenant has approved the wording.',
@@ -380,6 +386,7 @@ export function registerSplashConfigTools(server: McpServer): void {
       type: z.enum(DOCUMENT_TYPES).describe('Which document to publish.'),
       content: z.string().describe('The same text that was passed to preview_venue_document.'),
       title: z.string().optional().describe('The same title that was passed to preview_venue_document.'),
+      language: z.enum(['en', 'de', 'it', 'fr']).optional().describe('The same language that was passed to preview_venue_document.'),
       confirmToken: z.string().describe('The confirmToken returned by preview_venue_document.'),
     },
     async (args, extra) => {
@@ -393,6 +400,7 @@ export function registerSplashConfigTools(server: McpServer): void {
         type: args.type,
         content: args.content,
         title: args.title,
+        language: args.language,
         confirmToken: args.confirmToken,
       });
 
@@ -408,14 +416,15 @@ export function registerSplashConfigTools(server: McpServer): void {
     },
   );
 
-  addTool<{ venueId: string; type: string; confirmToken?: string }>(
+  addTool<{ venueId: string; type: string; language?: string; confirmToken?: string }>(
     server,
     'reset_venue_document',
-    'Drop a venue\'s own Terms & Conditions or Privacy Policy so guests see the platform default again. Requires a confirmToken — call once without it to get the token and to show the tenant what they are giving up, then again with it. The venue\'s text is archived rather than deleted, so publishing again restores it.',
+    'Drop a venue\'s own Terms & Conditions or Privacy Policy so guests see the platform default again. With `language`, removes only that TRANSLATION instead — the document stays published and those guests fall back to its default-language text. Requires a confirmToken — call once without it to get the token and to show the tenant what they are giving up, then again with it. Nothing is deleted: the venue\'s text is archived and publishing again restores it.',
     {
       venueId: z.string().describe('The venue id (from list_venues).'),
       type: z.enum(DOCUMENT_TYPES).describe('Which document to reset.'),
-      confirmToken: z.string().optional().describe('Omit on the first call to receive the token; pass it back to confirm.'),
+      language: z.enum(['en', 'de', 'it', 'fr']).optional().describe('Remove only this translation, leaving the document itself published.'),
+      confirmToken: z.string().optional().describe('Omit on the first call to receive the token; pass it back to confirm. The token is scoped to the language, so approving "remove the German version" cannot also drop the whole document.'),
     },
     async (args, extra) => {
       const gate = await withVenue(tenantFrom(extra), args.venueId);
@@ -426,6 +435,7 @@ export function registerSplashConfigTools(server: McpServer): void {
         venueId: args.venueId,
         action: 'reset',
         type: args.type,
+        language: args.language,
         confirmToken: args.confirmToken,
       });
 
