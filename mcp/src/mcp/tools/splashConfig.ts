@@ -52,6 +52,22 @@ const CONFIG_SCHEMA = z
     consentPage: z.object({}).passthrough().optional(),
     verificationPage: z.object({}).passthrough().optional(),
     connectedPage: z.object({}).passthrough().optional(),
+    languages: z
+      .object({})
+      .passthrough()
+      .optional()
+      .describe(
+        'Multi-language setup: { enabled, default, fallback, autoDetect, available: ["en","de","it","fr"], '
+        + 'translations: { de: { title?, subtitle?, loginPage?, consentPage?, verificationPage?, connectedPage? } } }. '
+        + 'The TOP-LEVEL fields of this config are the default language\'s copy — a translation is a sparse '
+        + 'overlay on them, and any field it omits falls back (selected → fallback → default), so a partial '
+        + 'translation is safe. A translation may change WORDS ONLY: which fields exist, whether verification '
+        + 'is on, colours and the template are shared across languages and are ignored inside a translation. '
+        + 'Buttons, error messages and OTP copy are already translated by the portal — only translate wording '
+        + 'the venue wrote. NEVER write or machine-translate consentPage.bodyParagraphs: that text is stored '
+        + 'verbatim as each guest\'s consent record and must come from the tenant. Like the rest of this config, '
+        + '`languages` is FULL REPLACE — always send the complete object, including translations you are not changing.',
+      ),
   })
   .passthrough();
 

@@ -250,6 +250,43 @@ export const SPLASH_INTERVIEW: InterviewStep[] = [
       },
     ],
   },
+  {
+    id: 'languages',
+    title: 'Guest languages',
+    why: 'Whether guests can read the splash screen in their own language, and which languages the venue offers. The language a guest picks is stored with them and reused for the verification code and for marketing sends, so this is worth asking about even for a venue that only wants one language today.',
+    previewPage: 'login',
+    questions: [
+      {
+        key: 'languages.enabled',
+        ask: 'Do your guests speak more than one language? I can add a language switcher to the splash screen.',
+        type: 'boolean',
+        note: 'Off by default. A switcher with only one language does not render, so this needs at least two entries in languages.available.',
+      },
+      {
+        key: 'languages.available',
+        ask: 'Which languages should guests be able to choose? I can offer English, German, Italian and French.',
+        type: 'enum',
+        options: ['en', 'de', 'it', 'fr'],
+        dependsOn: 'languages.enabled',
+        note: 'Only these four are supported — the portal ships translated buttons, error messages and OTP copy for exactly this set. Anything else is dropped with a warning.',
+      },
+      {
+        key: 'languages.default',
+        ask: 'Which of those is the main one? That is the language the copy we just wrote is in.',
+        type: 'enum',
+        options: ['en', 'de', 'it', 'fr'],
+        dependsOn: 'languages.enabled',
+        note: 'The top-level title/subtitle/labels ARE this language. Changing it later does not translate anything — it just relabels what is already there. It is always offered to guests even if left out of available.',
+      },
+      {
+        key: 'languages.translations',
+        ask: 'Shall I write down your wording for the other languages now, or leave them falling back for now?',
+        type: 'text',
+        dependsOn: 'languages.enabled',
+        note: 'Ask the tenant for each translation, one language at a time — do NOT translate for them beyond obvious short labels, and never touch consentPage.bodyParagraphs. Untranslated fields fall back to the default language rather than rendering blank, so leaving gaps is safe. preview_splash_config lists exactly which fields still fall back.',
+      },
+    ],
+  },
 ];
 
 /**
@@ -270,6 +307,11 @@ export const SPLASH_RULES: string[] = [
   'A guest who declines marketing consent still gets online. Consent is not access — do not describe declining as being cut off.',
   'Terms & Conditions and the Privacy Policy are NOT part of the splash config — they are separate documents with their own tools (get_venue_documents / preview_venue_document / apply_venue_document / reset_venue_document). A venue either publishes its own text or inherits the platform default; the splash config only controls whether the footer links appear.',
   'Never author, translate or reword a privacy policy or terms document. It is the venue\'s legal text. Use exactly what the tenant supplies, and if they want the standard wording back, reset rather than pasting a copy of it.',
+  'Translations are a SPARSE OVERLAY on the top-level config, not a separate config. A field a translation omits falls back (selected language → languages.fallback → the default language), so a half-finished translation renders real copy rather than blanks. The `notes` from preview_splash_config list exactly which fields still fall back — read them back to the tenant instead of claiming a language is "done".',
+  'A translation may change WORDS ONLY. Which login fields exist, whether verification is on and which channels it uses, colours and the template are venue settings shared by every language — put them inside a translation and they are ignored, with a structural_key_ignored warning.',
+  'Never machine-translate consentPage.bodyParagraphs, and never translate a privacy policy or terms document. Whatever renders is stored verbatim as that guest\'s consent record. Ask the tenant for the wording in each language, or leave the fallback in place and tell them which language their guests will actually see.',
+  'languages.translations is full-replace along with the rest of the config: send every language you want to keep, not just the one you edited. A translation for a language missing from languages.available is KEPT but invisible to guests — useful for drafting, and worth mentioning so the tenant knows why they cannot see it yet.',
+  'Only en, de, it and fr are supported, because the portal ships translated buttons, error messages and verification copy for exactly those. Do not offer a tenant a fifth language.',
 ];
 
 /** How to run the interview, as opposed to what to ask. */
