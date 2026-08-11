@@ -1118,21 +1118,77 @@ export async function sendBroadcast(
 const RESERVATION_SWEEP_HOURS = 6;
 
 /**
- * Reservation-leak sweeper (spec §9): a dispatch crash between reserve and
- * settle leaves `creditReservation` on the campaign and held credits on the
- * wallet. Any reservation older than RESERVATION_SWEEP_HOURS is released —
- * a healthy dispatch settles within minutes, so age alone marks the leak.
- * releaseReservation shares the settle's ledger doc id, so racing a
- * late-but-alive settle is safe (whichever runs second no-ops).
+ * How long a campaign may sit in `sending` before the run is presumed dead.
+ *
+ * `dispatchCampaign` is fire-and-forget in memory, so a deploy, crash or OOM
+ * kills the run and leaves the doc at `sending` forever. Six hours is a wide
+ * margin: MAX_AUDIENCE is 10 000 at DISPATCH_CONCURRENCY 8, so even a slow
+ * provider finishes in well under an hour.
+ */
+const STUCK_SENDING_SWEEP_HOURS = 6;
+
+/**
+ * A campaign stuck in `sending` is unreachable by BOTH recovery paths:
+ * `claimForSending` requires `draft|scheduled`, `retryHeldSends` requires
+ * `sent`. So it sits there forever with its held send records orphaned and no
+ * button in the UI that does anything.
+ *
+ * Closing it out as `sent` is the only safe move. Sending it back to `draft`
+ * would let the tenant re-send to everyone who already received the message.
+ *
+ * Note what this does NOT recover: units the dead run never reached have no
+ * `CampaignSends` record at all — they were never written — so `retryHeldSends`
+ * cannot find them. Only units explicitly held for credits come back. The
+ * warning says so rather than implying a clean recovery.
+ */
+async function recoverStuckSending(
+  ref: FirebaseFirestore.DocumentReference,
+  campaignId: string,
+  detail: string,
+): Promise<void> {
+  await ref.update({
+    status: 'sent',
+    sentAt: FieldValue.serverTimestamp(),
+    interruptedAt: FieldValue.serverTimestamp(),
+    creditsWarning:
+      'This send was interrupted before it finished (the server restarted mid-run). ' +
+      'Messages already sent were delivered. Any messages held for credits can be retried below; ' +
+      'recipients the run never reached were not recorded, so check the send list before sending a follow-up.',
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  console.warn(`[CAMPAIGN SWEEPER] recovered stuck campaign ${campaignId} (${detail}) — sending → sent`);
+}
+
+/**
+ * Reservation-leak + stuck-run sweeper (spec §9).
+ *
+ * Two independent failures, both from a dispatch that died mid-run:
+ *
+ *  1. `creditReservation` left on the campaign and credits still held on the
+ *     wallet. Any reservation older than RESERVATION_SWEEP_HOURS is released —
+ *     a healthy dispatch settles within minutes, so age alone marks the leak.
+ *     `releaseReservation` shares the settle's ledger doc id, so racing a
+ *     late-but-alive settle is safe (whichever runs second no-ops).
+ *  2. The campaign left at `status: 'sending'`, which no recovery path accepts.
+ *
+ * They need separate queries. Pass 1 keys on the reservation, so it misses a
+ * campaign that crashed with NO reservation — which is EVERY campaign while
+ * `ENFORCE_CREDITS` is off or in warn mode, i.e. production today. Pass 2 keys
+ * on the status, so it misses a campaign whose settle succeeded but whose doc
+ * update then failed, leaving a dangling reservation on an already-`sent` doc.
  */
 export async function sweepStaleReservations(): Promise<void> {
-  const cutoffIso = new Date(Date.now() - RESERVATION_SWEEP_HOURS * 60 * 60 * 1000).toISOString();
-  const snap = await db
+  const now = Date.now();
+  const recovered = new Set<string>();
+
+  // ── Pass 1: stale reservations (credits held by a dead run) ────────────────
+  const cutoffIso = new Date(now - RESERVATION_SWEEP_HOURS * 60 * 60 * 1000).toISOString();
+  const staleReservations = await db
     .collection(CAMPAIGNS)
     .where('creditReservation.reservedAt', '<', cutoffIso)
     .get();
 
-  for (const doc of snap.docs) {
+  for (const doc of staleReservations.docs) {
     const data = doc.data() as CampaignDoc;
     const reservation = normalizeReservation(data.creditReservation);
     if (!reservation) continue;
@@ -1151,8 +1207,47 @@ export async function sweepStaleReservations(): Promise<void> {
       console.warn(
         `[CAMPAIGN SWEEPER] released stale reservation of ${reservation.total} credits on ${doc.id} (status ${data.status})`,
       );
+
+      // The credits are back, but the campaign is still unreachable unless we
+      // also move it out of `sending`.
+      if (data.status === 'sending') {
+        await recoverStuckSending(doc.ref, doc.id, 'stale reservation');
+        recovered.add(doc.id);
+      }
     } catch (err) {
       console.error(`[CAMPAIGN SWEEPER] failed to release reservation on ${doc.id}:`, err);
+    }
+  }
+
+  // ── Pass 2: stuck in `sending` with no reservation to key off ──────────────
+  // Single-field equality only, with the age filter applied in memory. Adding
+  // `.where('updatedAt','<',…)` would make this a composite query, and this
+  // Firestore project is shared — docs/firestore-indexes.md says indexes must
+  // be created by hand in the console, so a composite query here would throw
+  // FAILED_PRECONDITION inside a cron job and quietly never sweep. The result
+  // set is naturally tiny (only campaigns actively dispatching, plus the stuck
+  // ones this pass then drains).
+  const stuckCutoff = now - STUCK_SENDING_SWEEP_HOURS * 60 * 60 * 1000;
+  const sending = await db.collection(CAMPAIGNS).where('status', '==', 'sending').get();
+
+  for (const doc of sending.docs) {
+    if (recovered.has(doc.id)) continue;
+    const data = doc.data() as CampaignDoc;
+
+    // `updatedAt` is stamped when the status flips to `sending` and nothing
+    // touches the doc again until the run finishes, so it dates the run.
+    const updatedAt = (doc.get('updatedAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis?.();
+    if (updatedAt === undefined) continue; // never stamped — leave it alone
+    if (updatedAt >= stuckCutoff) continue; // still young; the run may be alive
+
+    // A reservation younger than the pass-1 cutoff means the run may still be
+    // alive; leave it for the next tick rather than closing out a live send.
+    if (data.creditReservation?.reservedAt && data.creditReservation.reservedAt >= cutoffIso) continue;
+
+    try {
+      await recoverStuckSending(doc.ref, doc.id, 'no live dispatch');
+    } catch (err) {
+      console.error(`[CAMPAIGN SWEEPER] failed to recover stuck campaign ${doc.id}:`, err);
     }
   }
 }
