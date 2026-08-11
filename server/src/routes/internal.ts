@@ -307,6 +307,10 @@ router.post('/campaigns/send', async (req: Request<{}, {}, CampaignActionBody>, 
         ok: false,
         error: result.error,
         ...(result.needed !== undefined ? { needed: result.needed, spendable: result.spendable } : {}),
+        // Which channels are short, and whether the fix is "move credits"
+        // rather than "top up" — the CMS turns these into the right CTA.
+        ...(result.shortfalls ? { shortfalls: result.shortfalls } : {}),
+        ...(result.sharedContended !== undefined ? { sharedContended: result.sharedContended } : {}),
       });
     }
     return res.json({ ok: true, status: result.status, scheduledFor: result.scheduledFor });
