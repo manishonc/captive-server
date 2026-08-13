@@ -49,6 +49,18 @@ export interface PublicPricing {
    * because the trial plan is never sold and so never appears in `plans`.
    */
   trialDays: number | null;
+  /**
+   * Whether starting a trial requires a card up front.
+   *
+   * Top-level rather than per-plan because it is one global admin setting, and
+   * because keeping it out of `PublicPlan` leaves the pinned per-plan key set
+   * (and its test) untouched.
+   *
+   * The marketing site reads this to decide between "no credit card required"
+   * and "card required, cancel any time" — copy that is legally load-bearing
+   * and must flip with the setting, not with the next deploy.
+   */
+  trialRequiresCard: boolean;
 }
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
@@ -104,4 +116,16 @@ export function isPublishable(data: Raw): boolean {
 export function trialDaysFrom(data: Raw | undefined): number | null {
   const raw = Number(data?.freeTrialDays);
   return Number.isInteger(raw) && raw > 0 ? raw : null;
+}
+
+/**
+ * Whether a card is required to start a trial, from `CaptivePortal_Settings/global`.
+ *
+ * Defaults to false on a missing or malformed settings document — the same
+ * fail-safe the CMS applies. Claiming a card is required when it is not merely
+ * loses signups; claiming it is not when it IS produces a customer who was
+ * charged after being told they would not be.
+ */
+export function trialRequiresCardFrom(data: Raw | undefined): boolean {
+  return data?.requireCardForTrial === true;
 }

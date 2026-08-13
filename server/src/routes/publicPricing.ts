@@ -2,7 +2,8 @@
  * Public, unauthenticated pricing feed for the marketing site. Mounted at
  * `/public`, served from api.heidifi.ai.
  *
- *   GET /public/pricing -> { plans: [...], trialDays: 14 | null }
+ *   GET /public/pricing
+ *     -> { plans: [...], trialDays: 14 | null, trialRequiresCard: boolean }
  *
  * The field allowlist — the thing keeping internal plan data off the public
  * internet — lives in services/publicPricing.ts so it is pure and testable.
@@ -21,11 +22,13 @@ import {
   serializePublicPlan,
   serializePublicPrice,
   trialDaysFrom,
+  trialRequiresCardFrom,
   type PublicPricing,
 } from '../services/publicPricing';
 
 const router = Router();
 const PLANS = 'CaptivePortal_Plans';
+const SETTINGS = 'CaptivePortal_Settings';
 
 /** Cache the assembled payload — this is a marketing page, it spikes. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -43,7 +46,12 @@ type Raw = Record<string, unknown>;
 
 /** Read the published plans straight from Firestore. */
 export async function buildPublicPricing(): Promise<PublicPricing> {
-  const snapshot = await db.collection(PLANS).where('status', '==', 'active').get();
+  // One extra read, behind the 5-minute cache below, so it costs effectively
+  // nothing per request.
+  const [snapshot, settingsDoc] = await Promise.all([
+    db.collection(PLANS).where('status', '==', 'active').get(),
+    db.collection(SETTINGS).doc('global').get(),
+  ]);
 
   const candidates = snapshot.docs.filter((doc) => isPublishable(doc.data() as Raw));
 
@@ -57,7 +65,11 @@ export async function buildPublicPricing(): Promise<PublicPricing> {
   plans.sort(comparePublicPlans);
 
   const trialDoc = snapshot.docs.find((doc) => (doc.data() as Raw).isFreeTrial === true);
-  return { plans, trialDays: trialDaysFrom(trialDoc?.data() as Raw | undefined) };
+  return {
+    plans,
+    trialDays: trialDaysFrom(trialDoc?.data() as Raw | undefined),
+    trialRequiresCard: trialRequiresCardFrom(settingsDoc.data() as Raw | undefined),
+  };
 }
 
 function applyCors(req: Request, res: Response): void {
