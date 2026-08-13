@@ -18,6 +18,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import {
   comparePublicPlans,
+  comparePublicPrices,
   isPublishable,
   serializePublicPlan,
   serializePublicPrice,
@@ -58,7 +59,11 @@ export async function buildPublicPricing(): Promise<PublicPricing> {
   const plans = await Promise.all(
     candidates.map(async (doc) => {
       const pricesSnap = await doc.ref.collection('prices').where('status', '==', 'active').get();
-      const prices = pricesSnap.docs.map((p) => serializePublicPrice(p.data() as Raw));
+      // Subcollection reads come back in doc-id order; sort so `prices[0]` is
+      // deterministically the monthly recurring price (see comparePublicPrices).
+      const prices = pricesSnap.docs
+        .map((p) => serializePublicPrice(p.data() as Raw))
+        .sort(comparePublicPrices);
       return serializePublicPlan(doc.data() as Raw, prices);
     }),
   );

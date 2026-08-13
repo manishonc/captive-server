@@ -13,6 +13,13 @@
  */
 
 import { db } from '../firebase';
+import {
+  classifySubscriptionState,
+  isLapsedTrial,
+  type SubscriptionState,
+} from './subscriptionState';
+
+export type { SubscriptionState } from './subscriptionState';
 
 export const USAGE_COLLECTION = 'CaptivePortal_TenantUsage';
 export const CREDITS_COLLECTION = 'CaptivePortal_TenantCredits';
@@ -124,27 +131,6 @@ function resolvePlanCredits(plan: Record<string, unknown> | null): {
   return { includedCredits, total };
 }
 
-/**
- * A `trialing` subscription stops entitling the tenant once `trialEndsAt` has
- * passed. Nothing flips the stored status when a trial lapses, so the date is
- * the only source of truth — without this an expired trial keeps sending
- * forever. Must stay identical to isLapsedTrial in cms _lib/entitlements.js,
- * or the two repos disagree about who may send.
- *
- * Missing/unparseable `trialEndsAt` counts as NOT expired: an open-ended trial
- * is a data problem, not a reason to cut a tenant off mid-campaign.
- */
-function isLapsedTrial(subscription: Record<string, unknown>, now = new Date()): boolean {
-  if (subscription?.status !== 'trialing') return false;
-  const rawEnd = subscription.trialEndsAt as { toDate?: () => Date } | Date | string | undefined;
-  const endsAt =
-    (rawEnd as { toDate?: () => Date })?.toDate?.() ?? (rawEnd as Date | string | undefined);
-  if (!endsAt) return false;
-  const time = endsAt instanceof Date ? endsAt.getTime() : new Date(endsAt).getTime();
-  if (!Number.isFinite(time)) return false;
-  return time <= now.getTime();
-}
-
 export interface CreditWalletSnapshot {
   balance: number;
   subscriptionBalance: number;
@@ -156,6 +142,13 @@ export interface CreditWalletSnapshot {
 
 export interface Entitlements {
   planId: string | null;
+  /**
+   * Reported, not enforced — quotas/flags keep their documented fail-open
+   * defaults. Lets a caller tell "billing lapsed" from "never had billing"
+   * instead of inferring either from a null plan. Mirrors the CMS field of the
+   * same name (_lib/entitlements.js).
+   */
+  subscriptionState: SubscriptionState;
   quotas: Record<string, number | null>;
   flags: PlanFlags;
   /** -1 = unlimited. Enforced in the CMS at venue / access-point creation. */
@@ -205,8 +198,8 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
     .collection('CaptivePortal_Subscriptions')
     .where('tenantUserId', '==', tenantUserId)
     .get();
-  const subs = subsSnap.docs
-    .map((doc) => doc.data() as Raw)
+  const allSubs = subsSnap.docs.map((doc) => doc.data() as Raw);
+  const subs = allSubs
     .filter((s) => ACTIVE_SUBSCRIPTION_STATUSES.includes(s.status as string))
     .filter((s) => !isLapsedTrial(s))
     .sort((a, b) => {
@@ -215,6 +208,7 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
       return bt - at;
     });
   const subscription = subs[0] ?? null;
+  const subscriptionState = classifySubscriptionState(subscription, allSubs);
 
   let plan: Raw | null = null;
   if (subscription?.planId) {
@@ -272,6 +266,7 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
 
   const value: Entitlements = {
     planId: (subscription?.planId as string) ?? null,
+    subscriptionState,
     quotas,
     flags,
     limits,
@@ -293,4 +288,46 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
 /** Drop the cache entry (e.g. right after recording a large batch of sends). */
 export function invalidateEntitlements(tenantUserId: string): void {
   cache.delete(tenantUserId);
+}
+
+/**
+ * Dispatch-time lapse gate for time-shifted sends (the campaign scheduler).
+ *
+ * The CMS's `requireActiveSubscription` (cms _lib/plan-gates.js) runs when the
+ * tenant clicks send/schedule — but a broadcast scheduled for Sep 1 by a tenant
+ * who cancels on Aug 20 sails straight past it. This is the same gate applied
+ * at the moment that matters for a scheduled send: dispatch. Same three
+ * narrowing conditions, and all three matter there and here:
+ *
+ *  1. `requireCardForTrial` is ON (`CaptivePortal_Settings/global`) — the flag
+ *     stays a complete kill-switch; turning it off relaxes every gate,
+ *     including this one. An unreadable settings doc reads as OFF, the
+ *     historical behaviour.
+ *  2. The account's `Users` doc has `trialActivatedAt`, i.e. it went through
+ *     the card flow. A grandfathered card-free tenant has no such stamp and is
+ *     never gated, even though their expired trial classifies as 'lapsed'.
+ *  3. `subscriptionState === 'lapsed'` — history but nothing retained. 'none'
+ *     is excluded (pre-billing tenants), and 'payment_failed' is retained
+ *     access (see DUNNING_STATUS in services/subscriptionState.ts).
+ *
+ * Fails open: if the billing lookup itself errors, this reports NOT lapsed and
+ * the send goes out — a Firestore hiccup in a billing check must not silently
+ * kill a legitimate scheduled campaign.
+ *
+ * @returns true when the tenant is lapsed and the send must be withheld.
+ */
+export async function isLapsedForSending(tenantUserId: string): Promise<boolean> {
+  try {
+    const settingsSnap = await db.collection('CaptivePortal_Settings').doc('global').get();
+    if (settingsSnap.data()?.requireCardForTrial !== true) return false;
+
+    const userSnap = await db.collection('Users').doc(tenantUserId).get();
+    if (!userSnap.exists || !userSnap.data()?.trialActivatedAt) return false;
+
+    const { subscriptionState } = await getEntitlements(tenantUserId);
+    return subscriptionState === 'lapsed';
+  } catch (error) {
+    console.error(`[ENTITLEMENTS] lapse check failed for ${tenantUserId}; allowing dispatch:`, error);
+    return false; // fail open — dispatch anyway, matching the CMS gate
+  }
 }

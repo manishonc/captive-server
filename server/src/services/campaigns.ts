@@ -21,7 +21,12 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { sendEmail } from './brevo';
 import { scheduleSms, toE164 } from './twilio';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from './whatsapp';
-import { getEntitlements, quotasEnforced, type Channel as MessagingChannel } from './entitlements';
+import {
+  getEntitlements,
+  isLapsedForSending,
+  quotasEnforced,
+  type Channel as MessagingChannel,
+} from './entitlements';
 import { recordSends } from './usage';
 import {
   creditsEnforcementMode,
@@ -1260,6 +1265,28 @@ export async function runDueScheduledCampaigns(): Promise<void> {
     const data = doc.data() as CampaignDoc;
     const sendAt = data.schedule?.sendAt;
     if (!sendAt || new Date(sendAt).getTime() > now) continue;
+    // Dispatch-time lapse gate. The CMS's requireActiveSubscription ran when
+    // the tenant clicked schedule, but the subscription can end between then
+    // and sendAt — without this, cancelling on Aug 20 still sends the full
+    // Sep 1 volume at the business's provider cost. Same parking mechanism as
+    // insufficient credits below: the campaign stays `scheduled` with a
+    // visible warning, so re-subscribing lets it out on the next tick with no
+    // further action. Fails open inside isLapsedForSending — a billing-check
+    // outage must not kill a legitimate scheduled send.
+    if (await isLapsedForSending(data.tenantUserId)) {
+      console.warn(
+        `[CAMPAIGN] withholding scheduled dispatch of ${doc.id} — tenant ${data.tenantUserId} has no active subscription`,
+      );
+      await doc.ref
+        .update({
+          creditsWarning:
+            'Scheduled send is on hold: this account has no active subscription. ' +
+            'Choose a plan under Billing & Credits and it goes out on the next check.',
+          updatedAt: FieldValue.serverTimestamp(),
+        })
+        .catch(() => {});
+      continue;
+    }
     const claim = await claimForSending(doc.id, data.tenantUserId);
     if (!claim.ok) {
       // A scheduled campaign short on credits stays parked; surface why so the
