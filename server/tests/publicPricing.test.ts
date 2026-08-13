@@ -23,7 +23,11 @@
  * stripePriceId, createdBy, status, marketing.publicVisible.
  */
 
-import { serializePublicPlan, serializePublicPrice } from '../src/services/publicPricing';
+import {
+  serializePublicPlan,
+  serializePublicPrice,
+  trialRequiresCardFrom,
+} from '../src/services/publicPricing';
 
 let passed = 0;
 let failed = 0;
@@ -165,6 +169,23 @@ test('non-string bullets are dropped rather than rendered', () => {
 
 test('currency defaults to CHF, the house currency', () => {
   assertEqual(serializePublicPrice({ label: 'M', amount: 5 }).currency, 'CHF', 'currency');
+});
+
+test('trialRequiresCard is true only on an explicit boolean true', () => {
+  assertEqual(trialRequiresCardFrom({ requireCardForTrial: true }), true, 'explicit true');
+  assertEqual(trialRequiresCardFrom({ requireCardForTrial: false }), false, 'explicit false');
+});
+
+test('trialRequiresCard fails safe to false', () => {
+  // A missing settings doc, an unset flag, or a truthy-but-not-true value must
+  // all read as "no card required". Wrongly telling the marketing site a card
+  // is NOT needed loses signups; wrongly telling it one IS needed when the
+  // product does not collect one produces customers who were charged after
+  // being told they would not be.
+  assertEqual(trialRequiresCardFrom(undefined), false, 'missing doc');
+  assertEqual(trialRequiresCardFrom({}), false, 'unset flag');
+  assertEqual(trialRequiresCardFrom({ requireCardForTrial: 'yes' }), false, 'truthy string');
+  assertEqual(trialRequiresCardFrom({ requireCardForTrial: 1 }), false, 'truthy number');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
