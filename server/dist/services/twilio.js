@@ -45,6 +45,15 @@ async function scheduleSms(to, content, delayMinutes) {
         to,
         body: content,
     };
+    // Tell Twilio where to POST delivery updates (queued/sent/delivered/failed/
+    // undelivered). Without this, no status callback fires and every send is stuck
+    // at "sent" in the portal. Built the same way twilioWebhook.ts validates the
+    // signature URL so the two match exactly. A per-message statusCallback takes
+    // precedence over the Messaging Service's console-configured callback.
+    const publicUrl = process.env.SERVER_PUBLIC_URL;
+    if (publicUrl) {
+        createParams.statusCallback = `${publicUrl}/webhook/twilio/sms-status`;
+    }
     if (shouldSchedule) {
         const sendAt = new Date(Date.now() + delayMinutes * 60 * 1000);
         createParams.scheduleType = 'fixed';

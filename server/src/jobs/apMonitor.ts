@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { sendApOfflineAlert, sendApRecoveryAlert } from '../services/brevo';
+import { adoptRegisteredPendingDevices } from '../services/unifiAdoption';
 
 const BACK_ONLINE_GRACE_MS = 5 * 60_000;
 const ALERT_COOLDOWN_MS = 12 * 60 * 60_000; // 12 hours between offline alerts
@@ -67,8 +68,20 @@ async function runCheck(): Promise<void> {
 }
 
 export function startApMonitor(): void {
-  cron.schedule('*/5 * * * *', () => {
-    runCheck().catch((err) => console.error('[AP MONITOR ERROR]', err));
+  cron.schedule('*/5 * * * *', async () => {
+    await runCheck().catch((err) => console.error('[AP MONITOR ERROR]', err));
+
+    // Separate try/catch: a controller outage must never affect the Firestore-only
+    // alert sweep above. The reconciler is non-throwing by contract, but the alert
+    // sweep stays isolated regardless.
+    try {
+      const sweep = await adoptRegisteredPendingDevices();
+      if (sweep.adopted.length > 0 || sweep.failed.length > 0) {
+        console.log('[AP ADOPT] sweep:', JSON.stringify(sweep));
+      }
+    } catch (err) {
+      console.error('[AP ADOPT] sweep error:', err);
+    }
   });
   console.log('[AP MONITOR] Started — checking every 5 minutes');
 }

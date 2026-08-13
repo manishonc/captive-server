@@ -59,7 +59,7 @@ async function blocklistContact(email) {
         console.warn(`[BREVO] blocklistContact ${email} -> HTTP ${res.status}`);
     }
 }
-const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://cms.heidifi.ai';
+const CMS_DASHBOARD_URL = process.env.CMS_DASHBOARD_URL ?? 'https://portal.heidifi.ai';
 async function sendApOfflineAlert(to, apName, venueName, offlineSince) {
     const lastSeenStr = offlineSince.toLocaleString('en-US', {
         month: 'long', day: 'numeric', year: 'numeric',

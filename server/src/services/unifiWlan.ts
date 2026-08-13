@@ -248,8 +248,8 @@ function redactArray(data: unknown): unknown {
   return data.map((o) => (o && typeof o === 'object' ? redact(o as Record<string, unknown>) : o));
 }
 
-/** Resolve a controller config from any UniFi AP doc (env fallback) for a controller-wide dump. */
-async function resolveAnyController(): Promise<UnifiConfig> {
+/** Resolve a controller config from any UniFi AP doc (env fallback) for controller-wide operations. */
+export async function resolveAnyController(): Promise<UnifiConfig> {
   const snap = await db.collection(AP_COLLECTION).where('vendor', '==', 'unifi').limit(10).get();
   let stored: StoredUnifiConfig | undefined;
   snap.forEach((d) => {

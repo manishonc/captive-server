@@ -44,6 +44,15 @@ export function normalizeMac(mac: string): string {
   return String(mac || '').toLowerCase().trim();
 }
 
+/**
+ * Canonical MAC for cross-source matching: lowercase, separators stripped. Legacy AP
+ * docs store hyphenated or bare-hex MACs, which `normalizeMac` alone cannot match
+ * against the controller's colon format.
+ */
+export function canonMac(mac: string): string {
+  return normalizeMac(mac).replace(/[^0-9a-f]/g, '');
+}
+
 /** state === 1 means the device is connected/adopted and online. */
 export function mapDeviceState(state: number | undefined): 'online' | 'offline' {
   return Number(state) === 1 ? 'online' : 'offline';
@@ -97,6 +106,12 @@ function rawRequest(
       },
     );
     req.on('error', reject);
+    // An established-but-stalled socket otherwise leaves this promise pending
+    // forever — and the adoption sweep dials unattended from cron, so an
+    // unanswered request must fail, not hang. destroy() surfaces via 'error'.
+    req.setTimeout(20_000, () => {
+      req.destroy(new Error(`UniFi controller request timed out: ${opts.method} ${url.pathname}`));
+    });
     if (opts.body) req.write(opts.body);
     req.end();
   });
@@ -309,6 +324,73 @@ export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
     uptime: d.uptime,
     lastSeen: d.last_seen,
   }));
+}
+
+// ── Device adoption ───────────────────────────────────────────────────────────
+
+export interface UnifiPendingDevice {
+  mac: string;
+  state: number;
+  adopted?: boolean;
+  name?: string;
+  model?: string;
+  version?: string;
+  ip?: string;
+  lastSeen?: number;
+}
+
+/**
+ * Whether a device row is waiting for adoption. Defensive across controller
+ * versions: `adopted: false` is authoritative when present; otherwise state 2
+ * (pending) counts unless the row explicitly says it is adopted.
+ */
+export function isPendingDevice(d: { state?: unknown; adopted?: unknown }): boolean {
+  if (d.adopted === false) return true;
+  return Number(d.state) === 2 && d.adopted !== true;
+}
+
+/**
+ * Devices waiting for adoption. `stat/device` is the primary source (the service
+ * account has "Show pending devices" enabled); `stat/device-basic` is probed as well
+ * because some controller versions only surface unadopted devices there. The probe
+ * runs first and failures are swallowed, so `stat/device` rows win on merge and a
+ * broken probe never hides what the primary already found.
+ */
+export async function getPendingDevices(config: UnifiConfig): Promise<UnifiPendingDevice[]> {
+  const toRow = (d: any): UnifiPendingDevice => ({
+    mac: normalizeMac(d.mac),
+    state: Number(d.state),
+    adopted: typeof d.adopted === 'boolean' ? d.adopted : undefined,
+    name: d.name,
+    model: d.model,
+    version: d.version,
+    ip: d.ip,
+    lastSeen: d.last_seen,
+  });
+
+  const byMac = new Map<string, UnifiPendingDevice>();
+  try {
+    for (const d of ensureOk(await siteRequest(config, 'GET', 'stat/device-basic'), 'stat/device-basic')) {
+      const row = toRow(d);
+      byMac.set(canonMac(row.mac), row);
+    }
+  } catch {
+    /* defensive probe only */
+  }
+  for (const d of ensureOk(await siteRequest(config, 'GET', 'stat/device'), 'stat/device')) {
+    const row = toRow(d);
+    byMac.set(canonMac(row.mac), row);
+  }
+  return [...byMac.values()].filter(isPendingDevice);
+}
+
+/** Adopt a device onto the controller. */
+export async function adoptDevice(config: UnifiConfig, mac: string): Promise<void> {
+  const res = await siteRequest(config, 'POST', 'cmd/devmgr', { cmd: 'adopt', mac: normalizeMac(mac) });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`UniFi adopt failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  }
+  console.log('[UNIFI] Adopt requested for', normalizeMac(mac), 'via', config.controllerUrl);
 }
 
 export async function getApGroups(config: UnifiConfig): Promise<UnifiApGroup[]> {

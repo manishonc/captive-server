@@ -9,7 +9,15 @@ const whatsapp_1 = require("../services/whatsapp");
 const shortlinks_1 = require("../services/shortlinks");
 const unifi_1 = require("../services/unifi");
 const venue_1 = require("../services/venue");
+const guestLanguage_1 = require("../services/guestLanguage");
+const openPixel_1 = require("../services/openPixel");
+const mergeTags_1 = require("../services/mergeTags");
+const unsubscribe_1 = require("../services/unsubscribe");
 const campaigns_1 = require("../services/campaigns");
+const verificationGate_1 = require("../services/verificationGate");
+const verificationConfig_1 = require("../services/verificationConfig");
+const verificationToken_1 = require("../services/verificationToken");
+const guestOtp_1 = require("../services/guestOtp");
 const router = (0, express_1.Router)();
 const defaultConsent = () => ({
     given: false,
@@ -78,6 +86,18 @@ router.post('/create-user', async (req, res) => {
     catch (err) {
         console.error('[APMAC LOOKUP ERROR]', err);
     }
+    // Verification gate. Runs before any write so an unverified guest leaves no
+    // trace. No-ops (ok:true) for every venue that does not require verification.
+    const gate = await (0, verificationGate_1.checkVerificationGate)({
+        venueId,
+        accessPointId: captivePortalAccessPointId,
+        body: req.body,
+        mac: (0, verificationToken_1.normalizeMac)(mac),
+    });
+    if (!gate.ok) {
+        console.warn('[VERIFY GATE] /create-user refused:', gate.reason, apmac);
+        return res.status(403).json({ success: false, code: 'verification_required', reason: gate.reason });
+    }
     // Reconnect detection
     let existingWifiGuestId = null;
     if (email && captivePortalAccessPointId) {
@@ -98,6 +118,10 @@ router.post('/create-user', async (req, res) => {
     const wifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
     const marketingOptIn = marketingConsent?.given ?? false;
     const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
+    // null when the guest never chose (single-language venue, or an older portal
+    // build). Left off the document entirely in that case rather than defaulted,
+    // so audience filters can tell "chose English" from "we do not know".
+    const guestLanguage = (0, guestLanguage_1.normalizeLanguage)(req.body.language);
     let wifiGuestId;
     if (!existingWifiGuestId) {
         const doc = {
@@ -119,6 +143,8 @@ router.post('/create-user', async (req, res) => {
             termsConsent: termsConsent || defaultConsent(),
             marketingConsent: marketingConsent || defaultConsent(),
             ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+            ...(guestLanguage ? { language: guestLanguage } : {}),
+            ...(0, verificationGate_1.verificationFields)(gate),
         };
         try {
             const ref = await firebase_1.db.collection('CaptivePortal_Users').add(doc);
@@ -135,7 +161,14 @@ router.post('/create-user', async (req, res) => {
         console.log('[RECONNECT]', wifiGuestId, email, captivePortalAccessPointId);
         // Merge any fresh splash answers via field paths so repeat visitors don't
         // wipe earlier responses to fields they skipped this time.
-        const reconnectUpdates = { connectionCount: firestore_1.FieldValue.increment(1) };
+        const reconnectUpdates = {
+            connectionCount: firestore_1.FieldValue.increment(1),
+            // Last write wins: a returning guest who switches the splash screen to
+            // French is telling us they now want French. Absent stays absent — a
+            // portal that sends nothing must not erase an earlier choice.
+            ...(guestLanguage ? { language: guestLanguage } : {}),
+            ...(0, verificationGate_1.verificationFields)(gate),
+        };
         for (const [id, response] of Object.entries(splashFormResponses)) {
             reconnectUpdates[`splashFormResponses.${id}`] = response;
         }
@@ -159,18 +192,18 @@ router.post('/create-user', async (req, res) => {
     }
     // Marketing scheduling (event-aware)
     if (marketingOptIn && captivePortalAccessPointId) {
-        scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
+        scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[SMS SCHEDULE ERROR]', err));
-        scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
+        scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[EMAIL SCHEDULE ERROR]', err));
-        scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+        scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[WHATSAPP SCHEDULE ERROR]', err));
         // Tenant Campaign Manager: fire any active automation campaigns for this event.
-        (0, campaigns_1.fireAutomationsForGuest)(captivePortalAccessPointId, wifiGuestId, { firstName, lastName, email, phone, phoneCountryCode }, wifiEvent).catch((err) => console.error('[CAMPAIGN AUTOMATION ERROR]', err));
+        (0, campaigns_1.fireAutomationsForGuest)(captivePortalAccessPointId, wifiGuestId, { firstName, lastName, email, phone, phoneCountryCode, language: guestLanguage }, wifiEvent).catch((err) => console.error('[CAMPAIGN AUTOMATION ERROR]', err));
     }
     res.json({ success: true, id: wifiGuestId });
 });
-async function scheduleSmsForEvent(accessPointId, wifiGuestId, phone, phoneCountryCode, wifiEvent) {
+async function scheduleSmsForEvent(accessPointId, wifiGuestId, phone, phoneCountryCode, wifiEvent, guestLanguage = null) {
     const to = (0, twilio_1.toE164)(phoneCountryCode, phone);
     if (!to) {
         console.warn('[SMS] Skipping: no valid phone for E.164', { phone, phoneCountryCode });
@@ -201,7 +234,9 @@ async function scheduleSmsForEvent(accessPointId, wifiGuestId, phone, phoneCount
         return;
     }
     for (let i = 0; i < smsConfig.messages.length; i++) {
-        const msg = smsConfig.messages[i];
+        // Base fields are the venue's default-language copy; a variant for this
+        // guest's language overrides only the fields it defines.
+        const msg = (0, guestLanguage_1.resolveVariant)(smsConfig.messages[i], guestLanguage);
         if (!msg.content)
             continue;
         const delayMinutes = msg.delayMinutes ?? 0;
@@ -259,7 +294,7 @@ async function scheduleSmsForEvent(accessPointId, wifiGuestId, phone, phoneCount
         }
     }
 }
-async function scheduleWhatsAppForEvent(accessPointId, wifiGuestId, firstName, phone, phoneCountryCode, wifiEvent) {
+async function scheduleWhatsAppForEvent(accessPointId, wifiGuestId, firstName, phone, phoneCountryCode, wifiEvent, guestLanguage = null) {
     const to = (0, whatsapp_1.toE164)(phoneCountryCode, phone);
     if (!to) {
         console.warn('[WHATSAPP] Skipping: no valid phone for E.164', { phone, phoneCountryCode });
@@ -291,7 +326,10 @@ async function scheduleWhatsAppForEvent(accessPointId, wifiGuestId, firstName, p
     }
     const venueName = await (0, venue_1.getVenueName)(venueId, marketingDoc.data()?.venueName);
     for (let i = 0; i < whatsappConfig.messages.length; i++) {
-        const msg = whatsappConfig.messages[i];
+        const msg = (0, guestLanguage_1.resolveVariant)(whatsappConfig.messages[i], guestLanguage);
+        // languageCode here is the Meta template locale, pinned at save time from
+        // the approved catalogue — a variant may swap it only for another approved
+        // locale of the same template.
         if (!msg.templateName || !msg.languageCode)
             continue;
         const delayMinutes = msg.delayMinutes ?? 0;
@@ -388,7 +426,7 @@ async function scheduleWhatsAppForEvent(accessPointId, wifiGuestId, firstName, p
         }
     }
 }
-async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifiEvent) {
+async function scheduleEmailForEvent(accessPointId, wifiGuestId, firstName, userEmail, wifiEvent, guestLanguage = null) {
     if (!userEmail) {
         console.warn('[EMAIL] Skipping: no email address for wifi guest', wifiGuestId);
         return;
@@ -417,8 +455,9 @@ async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifi
         console.warn('[EMAIL] Skipping: email.messages empty for event=%s, venue:', wifiEvent, venueId);
         return;
     }
+    const venueName = await (0, venue_1.getVenueName)(venueId, marketingDoc.data()?.venueName);
     for (let i = 0; i < emailConfig.messages.length; i++) {
-        const msg = emailConfig.messages[i];
+        const msg = (0, guestLanguage_1.resolveVariant)(emailConfig.messages[i], guestLanguage);
         if (!msg.subject || !msg.body)
             continue;
         const delayMinutes = msg.delayMinutes ?? 0;
@@ -429,8 +468,21 @@ async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifi
             wifiGuestId,
             channel: 'email',
         };
+        // Same merge-tag vocabulary the Campaign Manager dispatcher resolves, so a
+        // body authored in the shared composer behaves identically on both
+        // surfaces. Without this the CMS-injected footer ships a literal
+        // "{{unsubscribeUrl}}" — a dead unsubscribe link on a marketing email.
+        const mergeCtx = {
+            firstName: firstName || '',
+            venueName: venueName || '',
+            ratingUrl: `${shortlinks_1.VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/rate`,
+            unsubscribeUrl: (0, unsubscribe_1.buildUnsubscribeUrl)({ g: wifiGuestId, v: venueId }),
+        };
+        const finalSubject = (0, mergeTags_1.interpolate)(String(msg.subject), mergeCtx);
         const shortCodes = [];
-        let finalBody = msg.body;
+        // Interpolate BEFORE the swaps: {{ratingUrl}} expands to the canonical rate
+        // URL, which is the exact literal swapVenueRatingUrl looks for.
+        let finalBody = (0, mergeTags_1.interpolate)(String(msg.body), mergeCtx);
         try {
             const rateSwap = await (0, shortlinks_1.swapVenueRatingUrl)(finalBody, ctx);
             finalBody = rateSwap.content;
@@ -443,7 +495,14 @@ async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifi
         catch (err) {
             console.error('[SHORTLINK SWAP ERROR - email]', err);
         }
-        const messageId = await (0, brevo_1.sendEmail)(userEmail, msg.subject, finalBody, delayMinutes);
+        // Open tracking, keyed by the Marketing doc we pre-allocated above. Same
+        // pixel the Campaign Manager uses; /t/o/:sendId resolves against both
+        // collections. Must come after the link swaps so the pixel URL is never
+        // itself rewritten into a short link.
+        finalBody = (0, openPixel_1.injectOpenPixel)(finalBody, mRef.id);
+        // The 5th arg adds the RFC 8058 List-Unsubscribe headers, so Gmail/Apple
+        // show a native unsubscribe button. Empty string when unconfigured.
+        const messageId = await (0, brevo_1.sendEmail)(userEmail, finalSubject, finalBody, delayMinutes, mergeCtx.unsubscribeUrl || undefined);
         if (messageId) {
             console.log('[EMAIL] Scheduled msg %d for wifi guest %s, id=%s, delay=%d min', i, wifiGuestId, messageId, delayMinutes);
             const record = {
@@ -453,7 +512,9 @@ async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifi
                 wifiGuestId,
                 messageId,
                 to: userEmail,
-                subject: msg.subject,
+                // Record what was actually sent, not the template — analytics snippets
+                // and any support lookup should match the guest's inbox.
+                subject: finalSubject,
                 body: finalBody,
                 messageIndex: i,
                 templateMessageId: msg.id || null,
@@ -465,6 +526,10 @@ async function scheduleEmailForEvent(accessPointId, wifiGuestId, userEmail, wifi
                 clickCount: 0,
                 firstClickedAt: null,
                 lastClickedAt: null,
+                openCounted: false,
+                openedAt: null,
+                openCount: 0,
+                lastOpenedAt: null,
                 firstVisitId: null,
                 visitedAt: null,
                 visitCount: 0,
@@ -504,13 +569,41 @@ async function resolveVenueIdFromApmac(apmac) {
         return null;
     }
 }
-function docFromSnap(snapshot) {
+/**
+ * Pick a language variant WITHIN an already-chosen document.
+ *
+ * Scope resolves before language, deliberately: a venue's own published terms in
+ * its default language outrank a translated platform default. Mixing the two
+ * tiers per-language would show a guest terms the venue never adopted, which is
+ * a worse outcome than showing adopted terms in the wrong language.
+ *
+ * Variants live under `translations.<code> = { title, content }`; the base
+ * title/latestContent are the document's default-language text.
+ */
+function pickDocLanguage(data, language) {
+    const base = { title: data?.title, content: data?.latestContent };
+    if (!language)
+        return base;
+    const variant = data?.translations?.[language];
+    if (!variant || typeof variant !== 'object')
+        return base;
+    const content = typeof variant.content === 'string' && variant.content.trim()
+        ? variant.content
+        : base.content;
+    // A variant with a title but no content is half-authored; take whichever
+    // fields are actually present rather than dropping the whole variant.
+    return {
+        title: typeof variant.title === 'string' && variant.title.trim() ? variant.title : base.title,
+        content,
+        ...(content !== base.content ? { language } : {}),
+    };
+}
+function docFromSnap(snapshot, language = null) {
     if (snapshot.empty)
         return null;
-    const data = snapshot.docs[0].data();
-    return { title: data?.title, content: data?.latestContent };
+    return pickDocLanguage(snapshot.docs[0].data(), language);
 }
-async function fetchDocumentForVenue(types, venueId) {
+async function fetchDocumentForVenue(types, venueId, language = null) {
     const collection = firebase_1.db.collection('CaptivePortal_Documents');
     if (venueId) {
         const overrideSnap = await collection
@@ -520,7 +613,7 @@ async function fetchDocumentForVenue(types, venueId) {
             .where('status', '==', 'published')
             .limit(1)
             .get();
-        const override = docFromSnap(overrideSnap);
+        const override = docFromSnap(overrideSnap, language);
         if (override) {
             console.log(`[DOCUMENTS] Venue override for type in [${types}] venue=${venueId}`);
             return override;
@@ -532,7 +625,7 @@ async function fetchDocumentForVenue(types, venueId) {
         .where('status', '==', 'published')
         .limit(1)
         .get();
-    const globalDoc = docFromSnap(globalSnap);
+    const globalDoc = docFromSnap(globalSnap, language);
     if (globalDoc)
         return globalDoc;
     const legacySnap = await collection
@@ -540,7 +633,7 @@ async function fetchDocumentForVenue(types, venueId) {
         .where('published', '==', true)
         .limit(1)
         .get();
-    const legacyDoc = docFromSnap(legacySnap);
+    const legacyDoc = docFromSnap(legacySnap, language);
     if (!legacyDoc)
         console.warn(`[DOCUMENTS] No published document found for types=[${types}]`);
     return legacyDoc;
@@ -548,7 +641,7 @@ async function fetchDocumentForVenue(types, venueId) {
 router.get('/privacy-policy', async (req, res) => {
     try {
         const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
-        const doc = await fetchDocumentForVenue(DOC_TYPES_PRIVACY, venueId);
+        const doc = await fetchDocumentForVenue(DOC_TYPES_PRIVACY, venueId, (0, guestLanguage_1.normalizeLanguage)(req.query.lang));
         if (!doc)
             return res.status(404).json({ success: false });
         res.json({ success: true, ...doc });
@@ -561,7 +654,7 @@ router.get('/privacy-policy', async (req, res) => {
 router.get('/terms', async (req, res) => {
     try {
         const venueId = await resolveVenueIdFromApmac(String(req.query.apmac || ''));
-        const doc = await fetchDocumentForVenue(DOC_TYPES_TERMS, venueId);
+        const doc = await fetchDocumentForVenue(DOC_TYPES_TERMS, venueId, (0, guestLanguage_1.normalizeLanguage)(req.query.lang));
         if (!doc)
             return res.status(404).json({ success: false });
         res.json({ success: true, ...doc });
@@ -582,7 +675,11 @@ const CONNECTED_PAGE_DEFAULTS = {
     showButton: true,
     autoSubmit: false,
     customFields: [],
+    redirectEnabled: false,
+    redirectUrl: '',
+    redirectDelaySeconds: 3,
 };
+const REDIRECT_DELAY_MAX = 30;
 const LOGIN_PAGE_DEFAULTS = {
     fields: {
         firstName: { enabled: true, label: '', required: true },
@@ -620,9 +717,9 @@ const SPLASH_DEFAULTS = {
     showMarketingOptIn: true,
     showPrivacyPolicy: true,
     showTermsOfService: true,
-    redirectUrl: '',
     loginPage: LOGIN_PAGE_DEFAULTS,
     consentPage: CONSENT_PAGE_DEFAULTS,
+    verificationPage: verificationConfig_1.VERIFICATION_PAGE_DEFAULTS,
     connectedPage: CONNECTED_PAGE_DEFAULTS,
 };
 // Deep-merge a stored loginPage with defaults. Old docs have no loginPage at all —
@@ -669,46 +766,134 @@ function mergeConsentPage(docData) {
     }
     return merged;
 }
+/**
+ * Widen a stored splash document to the config the portal renders.
+ *
+ * Shared by the saved-config path and the ?draft= preview path so a draft is
+ * rendered through exactly the same defaulting, clamping and verification
+ * resolution as the real thing — a preview that skipped any of it would be a
+ * preview of something the guest will never see.
+ */
+function buildEffectiveConfig(docData) {
+    const config = { ...SPLASH_DEFAULTS, ...docData };
+    // The top-level spread is shallow — a partial connectedPage doc would clobber
+    // the nested defaults, so merge that object explicitly.
+    const docConnected = (docData.connectedPage && typeof docData.connectedPage === 'object' && !Array.isArray(docData.connectedPage))
+        ? docData.connectedPage
+        : {};
+    const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
+    if (!Array.isArray(connectedPage.customFields))
+        connectedPage.customFields = [];
+    // Raw spread — a doc carrying a huge or negative delay would otherwise reach
+    // the portal verbatim and strand the guest. URL scheme checking stays with the
+    // two consumers (portal/server.js, portal/public/js/config.js), as for buttonUrl.
+    // Guard the type before Number(): Number(null)/Number('')/Number(false) are
+    // all 0, a valid delay meaning "redirect immediately", so an unset value
+    // would become the most aggressive setting instead of the default.
+    const rawDelay = connectedPage.redirectDelaySeconds;
+    const delay = (typeof rawDelay === 'number' || (typeof rawDelay === 'string' && rawDelay.trim() !== ''))
+        ? Number(rawDelay)
+        : NaN;
+    connectedPage.redirectDelaySeconds = Number.isFinite(delay)
+        ? Math.min(REDIRECT_DELAY_MAX, Math.max(0, Math.round(delay)))
+        : CONNECTED_PAGE_DEFAULTS.redirectDelaySeconds;
+    config.connectedPage = connectedPage;
+    config.loginPage = mergeLoginPage(docData);
+    config.consentPage = mergeConsentPage(docData);
+    // Serve the RESOLVED verification, not the stored one: a channel whose
+    // provider is unconfigured, or whose contact field the venue has hidden, is
+    // subtracted here so the portal never renders a step the guest cannot clear.
+    // Same resolver the grant gate uses, so the two cannot disagree.
+    const resolvedVerification = (0, verificationConfig_1.resolveVerification)(docData, config.loginPage.fields);
+    config.verificationPage = resolvedVerification.effective;
+    if (resolvedVerification.degraded) {
+        config.verificationDegraded = resolvedVerification.degraded;
+        config.verificationChannelsUnavailable = resolvedVerification.channelsUnavailable;
+    }
+    // strip Firestore-internal fields
+    delete config.createdAt;
+    delete config.updatedAt;
+    delete config.updatedVia;
+    delete config.updatedBy;
+    delete config.lastChange;
+    return config;
+}
+/**
+ * A pending splash config the CMS staged for review, fetched by the opaque id the
+ * portal was given via ?draft=. Read-only and short-lived: this is how an agent
+ * shows a tenant a proposed design before anything goes live.
+ */
+async function loadDraftConfig(draftId) {
+    const snap = await firebase_1.db.collection('CaptivePortal_SplashDrafts').doc(draftId).get();
+    if (!snap.exists)
+        return null;
+    const d = snap.data() || {};
+    const expiresAt = d.expiresAt?.toDate?.() ?? (d.expiresAt ? new Date(d.expiresAt) : null);
+    if (!expiresAt || expiresAt.getTime() <= Date.now())
+        return null;
+    if (!d.config || typeof d.config !== 'object')
+        return null;
+    return { config: d.config, venueId: d.venueId ?? null };
+}
 router.get('/splash-config', async (req, res) => {
-    const { apmac: apmacParam, ap } = req.query;
+    const { apmac: apmacParam, ap, draft: draftParam } = req.query;
     const apmac = (apmacParam || ap || '').toLowerCase().trim();
+    const draftId = (draftParam || '').trim();
+    // A draft carries its own config, so it renders with or without an access point.
+    // That is deliberate: a venue with no hardware yet still needs to be designable.
+    if (draftId) {
+        try {
+            const draft = await loadDraftConfig(draftId);
+            if (draft) {
+                const config = buildEffectiveConfig(draft.config);
+                config.scopeKey = (0, guestOtp_1.scopeKeyFor)({ venueId: draft.venueId, accessPointId: null });
+                config.isDraft = true;
+                return res.json({ success: true, config });
+            }
+            // Expired or unknown: fall through to the saved config rather than showing a
+            // blank screen, and say so, so the caller knows to re-stage the preview.
+            console.warn(`[SPLASH CONFIG] draft ${draftId} is missing or expired — serving the saved config`);
+            if (!apmac)
+                return res.json({ success: true, config: SPLASH_DEFAULTS, draftExpired: true });
+            const fallback = await loadSavedSplashConfig(apmac);
+            return res.json({ ...fallback, draftExpired: true });
+        }
+        catch (err) {
+            console.error('[SPLASH DRAFT ERROR]', err);
+            return res.json({ success: true, config: SPLASH_DEFAULTS, draftExpired: true });
+        }
+    }
     if (!apmac)
         return res.json({ success: true, config: SPLASH_DEFAULTS });
     try {
-        const apSnap = await firebase_1.db.collection('CaptivePortal_AccessPoints')
-            .where('mac', '==', apmac)
-            .limit(1)
-            .get();
-        if (apSnap.empty)
-            return res.json({ success: true, registered: false });
-        const ap = apSnap.docs[0].data();
-        const configId = `venue_${ap.venueId}`;
-        const configDoc = await firebase_1.db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
-        if (!configDoc.exists)
-            return res.json({ success: true, config: SPLASH_DEFAULTS });
-        const docData = configDoc.data() || {};
-        const config = { ...SPLASH_DEFAULTS, ...docData };
-        // The top-level spread is shallow — a partial connectedPage doc would clobber
-        // the nested defaults, so merge that object explicitly.
-        const docConnected = (docData.connectedPage && typeof docData.connectedPage === 'object' && !Array.isArray(docData.connectedPage))
-            ? docData.connectedPage
-            : {};
-        const connectedPage = { ...CONNECTED_PAGE_DEFAULTS, ...docConnected };
-        if (!Array.isArray(connectedPage.customFields))
-            connectedPage.customFields = [];
-        config.connectedPage = connectedPage;
-        config.loginPage = mergeLoginPage(docData);
-        config.consentPage = mergeConsentPage(docData);
-        // strip Firestore-internal fields
-        delete config.createdAt;
-        delete config.updatedAt;
-        res.json({ success: true, config });
+        return res.json(await loadSavedSplashConfig(apmac));
     }
     catch (err) {
         console.error('[SPLASH CONFIG ERROR]', err);
-        res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
+        return res.json({ success: true, config: SPLASH_DEFAULTS }); // safe fallback, never 500
     }
 });
+/** mac -> venue -> saved splash config, in the `/splash-config` response shape. */
+async function loadSavedSplashConfig(apmac) {
+    const apSnap = await firebase_1.db.collection('CaptivePortal_AccessPoints')
+        .where('mac', '==', apmac)
+        .limit(1)
+        .get();
+    if (apSnap.empty)
+        return { success: true, registered: false };
+    const ap = apSnap.docs[0].data();
+    const configId = `venue_${ap.venueId}`;
+    const configDoc = await firebase_1.db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
+    if (!configDoc.exists)
+        return { success: true, config: SPLASH_DEFAULTS };
+    const config = buildEffectiveConfig(configDoc.data() || {});
+    // The portal validates verification tokens locally on the Aruba /submit path
+    // (no backend round trip on the critical path). It needs the venue identity
+    // to reject a token minted at a different venue — not secret, venueId is
+    // already public in CMS URLs.
+    config.scopeKey = (0, guestOtp_1.scopeKeyFor)({ venueId: ap.venueId || null, accessPointId: apSnap.docs[0].id });
+    return { success: true, config };
+}
 // ── Connected-page custom form submissions ─────────────────────────────────
 // Guests are anonymous here (no auth token), so abuse is bounded by a small
 // in-memory sliding window keyed on client MAC + IP.
@@ -905,6 +1090,19 @@ router.post('/unifi/authorize', async (req, res) => {
         console.error('[UNIFI AUTH] AP lookup error:', err);
         return res.status(500).json({ success: false, message: 'Internal error' });
     }
+    // Verification gate — MUST run before unifiAuthorizeGuest. After that call the
+    // controller has already opened the firewall for this device, so refusing
+    // afterwards would deny nothing.
+    const gate = await (0, verificationGate_1.checkVerificationGate)({
+        venueId,
+        accessPointId: captivePortalAccessPointId,
+        body: req.body,
+        mac: normalizedClientMac,
+    });
+    if (!gate.ok) {
+        console.warn('[VERIFY GATE] /unifi/authorize refused:', gate.reason, normalizedApMac);
+        return res.status(403).json({ success: false, code: 'verification_required', reason: gate.reason });
+    }
     // Call UniFi controller to authorize the guest device
     try {
         const minutes = Math.round(sessionTimeoutSeconds / 60);
@@ -933,6 +1131,7 @@ router.post('/unifi/authorize', async (req, res) => {
     const wifiEvent = existingWifiGuestId ? 'onReconnect' : 'onConnect';
     const marketingOptIn = marketingConsent?.given ?? false;
     const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
+    const guestLanguage = (0, guestLanguage_1.normalizeLanguage)(req.body.language);
     let wifiGuestId;
     if (!existingWifiGuestId) {
         const doc = {
@@ -954,6 +1153,8 @@ router.post('/unifi/authorize', async (req, res) => {
             termsConsent: termsConsent || defaultConsent(),
             marketingConsent: marketingConsent || defaultConsent(),
             ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
+            ...(guestLanguage ? { language: guestLanguage } : {}),
+            ...(0, verificationGate_1.verificationFields)(gate),
         };
         try {
             const ref = await firebase_1.db.collection('CaptivePortal_Users').add(doc);
@@ -969,7 +1170,11 @@ router.post('/unifi/authorize', async (req, res) => {
     else {
         wifiGuestId = existingWifiGuestId;
         console.log('[UNIFI] Reconnect', wifiGuestId, email, normalizedApMac);
-        const reconnectUpdates = { connectionCount: firestore_1.FieldValue.increment(1) };
+        const reconnectUpdates = {
+            connectionCount: firestore_1.FieldValue.increment(1),
+            ...(guestLanguage ? { language: guestLanguage } : {}),
+            ...(0, verificationGate_1.verificationFields)(gate),
+        };
         for (const [id, response] of Object.entries(splashFormResponses)) {
             reconnectUpdates[`splashFormResponses.${id}`] = response;
         }
@@ -991,11 +1196,11 @@ router.post('/unifi/authorize', async (req, res) => {
             .catch((err) => console.error('[UNIFI SESSION LOG ERROR]', err));
     }
     if (marketingOptIn && captivePortalAccessPointId) {
-        scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent)
+        scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[UNIFI SMS SCHEDULE ERROR]', err));
-        scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, email || '', wifiEvent)
+        scheduleEmailForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', email || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[UNIFI EMAIL SCHEDULE ERROR]', err));
-        scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent)
+        scheduleWhatsAppForEvent(captivePortalAccessPointId, wifiGuestId, firstName || '', phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)
             .catch((err) => console.error('[UNIFI WHATSAPP SCHEDULE ERROR]', err));
         // Tenant Campaign Manager: fire any active automation campaigns for this event.
         (0, campaigns_1.fireAutomationsForGuest)(captivePortalAccessPointId, wifiGuestId, { firstName, email, phone, phoneCountryCode }, wifiEvent).catch((err) => console.error('[UNIFI CAMPAIGN AUTOMATION ERROR]', err));
