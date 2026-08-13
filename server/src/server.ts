@@ -12,6 +12,7 @@ import trackingRoutes from './routes/tracking';
 import unsubscribeRoutes from './routes/unsubscribe';
 import internalRoutes from './routes/internal';
 import verifyRoutes from './routes/verify';
+import publicPricingRoutes from './routes/publicPricing';
 import { startApMonitor } from './jobs/apMonitor';
 import { startCampaignScheduler } from './jobs/campaignScheduler';
 import { channelConfigured, VERIFICATION_CHANNELS } from './services/verificationConfig';
@@ -35,6 +36,8 @@ app.use('/t', trackingRoutes);
 app.use('/u', unsubscribeRoutes);
 app.use('/internal', internalRoutes);
 app.use('/verify', verifyRoutes);
+// Public, unauthenticated pricing feed for the marketing site (api.heidifi.ai).
+app.use('/public', publicPricingRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
