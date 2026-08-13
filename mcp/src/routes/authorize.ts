@@ -7,6 +7,7 @@ import {
   createAuthCode,
 } from '../store/oauth';
 import { SCOPES } from '../config';
+import { getPlanFlags } from '../planFlags';
 
 /**
  * Authorization endpoint (OAuth 2.1 Authorization Code + PKCE).
@@ -84,6 +85,15 @@ authorizeRouter.get('/oauth/authorize/resume', async (req, res) => {
   const ar = await consumeApprovedAuthRequest(requestId);
   if (!ar) {
     return errorPage(res, 400, 'Authorization request was not approved, has expired, or has already been used.');
+  }
+
+  // Refuse before minting a code, so a tenant without MCP on their plan gets a
+  // readable page instead of a client that connects and then 403s on every
+  // call. The bearer middleware is what actually enforces this (it also covers
+  // tokens issued before the plan changed); this is the early, legible stop.
+  const flags = await getPlanFlags(ar.tenantUserId as string).catch(() => null);
+  if (flags && flags.mcpEnabled === false) {
+    return errorPage(res, 403, 'MCP access is not included in this plan.');
   }
 
   const rawCode = await createAuthCode({
