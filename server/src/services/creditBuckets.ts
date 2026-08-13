@@ -10,6 +10,11 @@
  *    the two repos compute different splits from the same wallet
  *  - the consumption waterfall
  *  - the heal rule (top-level scalars are the authority; drift → `shared`)
+ *  - `normalizeGrantAllocation`: a plan's included credits are keyed by
+ *    WALLET_CHANNEL_KEYS, an absent key means 0 (never unlimited), unknown keys
+ *    throw, and a scalar means `{ shared: N }`
+ *  - a `subscription_grant` ledger entry always carries `channel: null`
+ *    regardless of earmarking; the breakdown lives in `channelDeltas`
  *
  * THE WATERFALL, for a send on channel c:
  *
@@ -481,6 +486,64 @@ export function allocationFromDeltas(
     }
   }
 
+  return { allocation, total };
+}
+
+/**
+ * Normalize a subscription-grant amount into a per-key allocation.
+ *
+ * Accepts the legacy scalar — channel-less credits, which land in `shared` and
+ * stay spendable on every channel, identical to the pre-per-channel grant — or
+ * a per-key map for a plan that earmarks its allowance.
+ *
+ * Returns only keys with a POSITIVE amount, so a zero never reaches
+ * channelDeltas as a no-op the ledger replay would have to tolerate.
+ *
+ * Unknown keys THROW rather than going through `channelKey()`. That function's
+ * shared-by-default rule is right for a `channel` argument and catastrophic
+ * here: `{ smss: 5000 }` would quietly grant 5,000 shared credits every month.
+ *
+ * Mirrors normalizeGrantAllocation in cms _lib/credit-buckets.js. This repo
+ * does not currently write subscription grants — the CMS owns that path — but
+ * the function is part of the declared contract so either side can.
+ */
+export function normalizeGrantAllocation(
+  input: number | Partial<Record<WalletChannelKey, number>>,
+): { allocation: Partial<Record<WalletChannelKey, number>>; total: number } {
+  const fail = (message: string, code = 'invalid_credits'): never => {
+    const err = new Error(message) as Error & { code?: string };
+    err.code = code;
+    throw err;
+  };
+
+  if (typeof input === 'number') {
+    if (!Number.isInteger(input) || input < 1) fail('credits must be a positive integer');
+    return { allocation: { [SHARED_KEY]: input }, total: input };
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    fail('credits must be a positive integer or a per-channel map');
+  }
+
+  for (const key of Object.keys(input)) {
+    if (!WALLET_CHANNEL_KEYS.includes(key as WalletChannelKey)) {
+      fail(`unknown credit bucket key: ${key}`, 'invalid_channel');
+    }
+  }
+
+  const allocation: Partial<Record<WalletChannelKey, number>> = {};
+  let total = 0;
+  // Iterate the canonical key list rather than the caller's object, so
+  // channelDeltas key order is deterministic for anyone diffing ledger entries.
+  for (const key of WALLET_CHANNEL_KEYS) {
+    const value = input[key];
+    if (value === undefined || value === null || (value as unknown) === '') continue; // absent = 0
+    const num = Number(value);
+    if (!Number.isInteger(num) || num < 0) fail(`credits.${key} must be a non-negative integer`);
+    if (num === 0) continue;
+    allocation[key] = num;
+    total += num;
+  }
+  if (total < 1) fail('credits must total at least 1');
   return { allocation, total };
 }
 

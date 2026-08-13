@@ -6,6 +6,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { db } from '../../firebase';
+import { resolvePlanFlags } from '../../planFlags';
 import { NO_TENANT, errorResult, jsonResult, tenantFrom, type ToolExtra } from '../shared';
 
 type Raw = Record<string, unknown>;
@@ -15,7 +16,8 @@ const DEFAULT_QUOTAS: Record<string, number | null> = {
   smsPerMonth: null,
   whatsappPerMonth: null,
 };
-const DEFAULT_FLAGS = { aiEnabled: true, hidePoweredBy: false };
+// Flags come from the shared resolver so the legacy top-level shape and the
+// permissive defaults stay identical to the CMS and the send-time service.
 const CHANNELS = [
   { channel: 'email', quotaKey: 'emailsPerMonth' },
   { channel: 'sms', quotaKey: 'smsPerMonth' },
@@ -56,7 +58,7 @@ export function registerUsageTools(server: McpServer): void {
       }
 
       const quotas = { ...DEFAULT_QUOTAS, ...((plan?.quotas as Raw) ?? {}) };
-      const flags = { ...DEFAULT_FLAGS, ...((plan?.flags as Raw) ?? {}) };
+      const flags = resolvePlanFlags(plan);
 
       const month = currentUsageMonth();
       const [usageSnap, creditsSnap] = await Promise.all([

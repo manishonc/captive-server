@@ -3,6 +3,7 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { config, protectedResourceMetadataUrl } from '../config';
 import { sha256Hex } from '../crypto';
 import { getAccessTokenByHash, touchAccessToken } from '../store/oauth';
+import { getPlanFlags } from '../planFlags';
 
 /** Express request augmented with the MCP SDK's `auth` field (set by this middleware). */
 export interface AuthedRequest extends Request {
@@ -13,6 +14,40 @@ export interface AuthedRequest extends Request {
 export function unauthorized(res: Response, description: string): void {
   res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${protectedResourceMetadataUrl}"`);
   res.status(401).json({ error: 'invalid_token', error_description: description });
+}
+
+/**
+ * The token is valid but the tenant's plan does not include MCP.
+ *
+ * 403, not 401: the credential is fine, so a client that re-authenticates on
+ * 401 would otherwise spin through the whole OAuth dance and fail again.
+ */
+function planForbidden(res: Response): void {
+  res.status(403).json({
+    error: 'mcp_disabled',
+    error_description: 'MCP access is not included in this plan.',
+  });
+}
+
+/**
+ * Refuse the request when the tenant's plan has `mcpEnabled` off.
+ *
+ * Checked on EVERY request rather than only at authorize time, so revoking MCP
+ * takes effect on tokens that were already issued — gating only the OAuth flow
+ * would leave every existing connection working indefinitely.
+ *
+ * Fails OPEN on lookup errors: a Firestore blip must not sever every tenant's
+ * MCP session at once.
+ */
+async function mcpAllowed(tenantUserId: string | undefined): Promise<boolean> {
+  if (!tenantUserId) return true; // nothing to check against
+  try {
+    const flags = await getPlanFlags(tenantUserId);
+    return flags.mcpEnabled !== false;
+  } catch (err) {
+    console.error('[MCP] plan flag lookup failed; allowing request:', err);
+    return true;
+  }
 }
 
 function constantTimeMatch(a: string, b: string): boolean {
@@ -54,6 +89,8 @@ export async function requireBearer(req: AuthedRequest, res: Response, next: Nex
   if (!at) return unauthorized(res, 'Invalid bearer token.');
   if (at.revoked) return unauthorized(res, 'Token has been revoked.');
   if (Date.now() >= at.expiresAt) return unauthorized(res, 'Token has expired.');
+
+  if (!(await mcpAllowed(at.tenantUserId))) return planForbidden(res);
 
   await touchAccessToken(tokenHash); // best-effort last-used ping
   req.auth = {
