@@ -17,8 +17,10 @@ import { sendEmail } from '../services/brevo';
 import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/whatsapp';
 import { createShortLink, VISITOR_BASE_URL } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
-import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics } from '../services/unifiWlan';
+import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics, resolveAnyController } from '../services/unifiWlan';
 import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
+import { adoptDevice } from '../services/unifi';
+import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../services/unifiAdoption';
 import {
   sendBroadcast,
   pauseCampaign,
@@ -274,6 +276,60 @@ router.get('/unifi/credential-check', async (req: Request, res: Response) => {
     console.error('[INTERNAL UNIFI credential-check]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'credential-check failed' });
   }
+});
+
+// Devices waiting for adoption on the shared controller, annotated with the
+// registered AP each one matches (if any) — feeds the super-admin pending panel.
+router.get('/unifi/pending-devices', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  try {
+    const report = await listPendingDevices();
+    return res.json({ ok: true, ...report });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI pending-devices]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'pending-devices failed' });
+  }
+});
+
+/**
+ * Explicit manual adopt (super-admin action via the CMS). UNREGISTERED pending
+ * devices ARE adoptable here — the auto-adopt registered-only invariant covers the
+ * unattended paths, and the returned `registered` flag lets the UI warn. Re-checks
+ * the live pending list so an already-adopted device (or a race with the cron) gets
+ * a 404 instead of a redundant adopt command.
+ */
+router.post('/unifi/adopt', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { mac } = req.body || {};
+  if (!mac || typeof mac !== 'string' || !mac.trim()) {
+    return res.status(400).json({ ok: false, error: 'mac is required' });
+  }
+  try {
+    const report = await listPendingDevices();
+    const device = report.devices.find((d) => canonMac(d.mac) === canonMac(mac));
+    if (!device) {
+      return res.status(404).json({ ok: false, error: 'Device is not currently pending adoption' });
+    }
+    const config = await resolveAnyController();
+    await adoptDevice(config, device.mac);
+    return res.json({ ok: true, adopted: device.mac, registered: device.registered });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI adopt]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'adopt failed' });
+  }
+});
+
+// On-create hook (fire-and-forget from the CMS after an AP doc is saved). The
+// reconciler never throws and enforces the registered-only invariant itself, so
+// this always answers 200 with the sweep result.
+router.post('/unifi/adopt-if-pending', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { mac } = req.body || {};
+  if (!mac || typeof mac !== 'string' || !mac.trim()) {
+    return res.status(400).json({ ok: false, error: 'mac is required' });
+  }
+  const result = await adoptRegisteredPendingDevices({ onlyMacs: [mac] });
+  return res.json({ ok: true, result });
 });
 
 // ── Campaign Manager (called server-to-server by the CMS) ──
