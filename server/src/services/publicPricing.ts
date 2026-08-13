@@ -106,6 +106,34 @@ export function comparePublicPlans(a: PublicPlan, b: PublicPlan): number {
   return a.marketing.displayOrder - b.marketing.displayOrder || a.name.localeCompare(b.name);
 }
 
+/**
+ * Billing-cadence order for a plan's prices: recurring before one-time,
+ * monthly before yearly, anything unrecognized last. The CMS admin routes only
+ * ever write 'monthly' | 'yearly' | 'one-time', but this response is public
+ * and consumers take `prices[0]` as the headline price, so the ranking is
+ * normalized (trim, lowercase, `_` -> `-`) rather than trusting the doc.
+ */
+const INTERVAL_ORDER: Record<string, number> = { monthly: 0, yearly: 1, 'one-time': 2 };
+
+function intervalRank(interval: string): number {
+  const rank = INTERVAL_ORDER[interval.trim().toLowerCase().replace(/_/g, '-')];
+  return rank === undefined ? Object.keys(INTERVAL_ORDER).length : rank;
+}
+
+/**
+ * Sort key for a plan's prices. Firestore returns the `prices` subcollection in
+ * doc-id order — effectively random — and a feed that happens to lead with the
+ * yearly price checks visitors out on the wrong interval downstream. Interval
+ * first (see INTERVAL_ORDER), then amount and label so ties are stable.
+ */
+export function comparePublicPrices(a: PublicPrice, b: PublicPrice): number {
+  return (
+    intervalRank(a.interval) - intervalRank(b.interval) ||
+    a.amount - b.amount ||
+    a.label.localeCompare(b.label)
+  );
+}
+
 /** A plan is published only when active, not a trial, and explicitly ticked. */
 export function isPublishable(data: Raw): boolean {
   const marketing = (data.marketing as Raw) || {};

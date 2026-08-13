@@ -24,9 +24,11 @@
  */
 
 import {
+  comparePublicPrices,
   serializePublicPlan,
   serializePublicPrice,
   trialRequiresCardFrom,
+  type PublicPrice,
 } from '../src/services/publicPricing';
 
 let passed = 0;
@@ -186,6 +188,56 @@ test('trialRequiresCard fails safe to false', () => {
   assertEqual(trialRequiresCardFrom({}), false, 'unset flag');
   assertEqual(trialRequiresCardFrom({ requireCardForTrial: 'yes' }), false, 'truthy string');
   assertEqual(trialRequiresCardFrom({ requireCardForTrial: 1 }), false, 'truthy number');
+});
+
+console.log('\nprice ordering\n');
+
+const price = (interval: string, amount = 10, label = interval): PublicPrice => ({
+  label,
+  amount,
+  currency: 'CHF',
+  interval,
+});
+
+test('prices sort monthly, yearly, one-time — regardless of doc-id order', () => {
+  // Firestore returns the prices subcollection in doc-id order (effectively
+  // random); the live feed once led with Starter's yearly price, and consumers
+  // that take prices[0] checked visitors out on the wrong interval.
+  const shuffled = [price('one-time', 99), price('yearly', 250), price('monthly', 25)];
+  const sorted = [...shuffled].sort(comparePublicPrices);
+  assertEqual(
+    sorted.map((p) => p.interval),
+    ['monthly', 'yearly', 'one-time'],
+    'interval order',
+  );
+  assertEqual(sorted[0].amount, 25, 'prices[0] is the monthly price');
+});
+
+test('interval matching is case- and separator-insensitive', () => {
+  const sorted = [price(' ONE_TIME '), price('Yearly'), price('Monthly')].sort(comparePublicPrices);
+  assertEqual(
+    sorted.map((p) => p.interval),
+    ['Monthly', 'Yearly', ' ONE_TIME '],
+    'normalized interval order',
+  );
+});
+
+test('an unrecognized interval sorts last, never first', () => {
+  const sorted = [price('weekly'), price('monthly')].sort(comparePublicPrices);
+  assertEqual(sorted[0].interval, 'monthly', 'known interval leads');
+});
+
+test('same interval ties break by amount then label, so the order is stable', () => {
+  const sorted = [
+    price('monthly', 50, 'Pro'),
+    price('monthly', 25, 'Basic'),
+    price('monthly', 25, 'Alt'),
+  ].sort(comparePublicPrices);
+  assertEqual(
+    sorted.map((p) => p.label),
+    ['Alt', 'Basic', 'Pro'],
+    'tie-break order',
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

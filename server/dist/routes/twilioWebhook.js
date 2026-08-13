@@ -5,9 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const twilio_1 = __importDefault(require("twilio"));
-const firebase_1 = require("../firebase");
-const firestore_1 = require("firebase-admin/firestore");
 const campaignTracking_1 = require("../services/campaignTracking");
+const marketingTracking_1 = require("../services/marketingTracking");
 const router = (0, express_1.Router)();
 router.post('/', async (req, res) => {
     // Validate Twilio signature if SERVER_PUBLIC_URL is configured
@@ -32,18 +31,10 @@ router.post('/', async (req, res) => {
         return res.sendStatus(200);
     }
     try {
-        const snapshot = await firebase_1.db
-            .collection('CaptivePortal_Marketing')
-            .where('messageSid', '==', MessageSid)
-            .limit(1)
-            .get();
-        if (!snapshot.empty) {
-            await snapshot.docs[0].ref.update({
-                deliveryStatus: MessageStatus,
-                statusUpdatedAt: firestore_1.FieldValue.serverTimestamp(),
-            });
-        }
-        else {
+        // Twilio doesn't order these either — queued/sent/delivered can arrive out
+        // of sequence. The helper only ever moves the status forward.
+        const matched = await (0, marketingTracking_1.recordMarketingDeliveryStatus)('messageSid', MessageSid, MessageStatus);
+        if (!matched) {
             console.warn('[TWILIO WEBHOOK] No marketing record found for MessageSid:', MessageSid);
         }
         // Also reflect onto campaign sends (no-op if this SID isn't a campaign send).
