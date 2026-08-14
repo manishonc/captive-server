@@ -32,7 +32,6 @@
  */
 
 import { FieldValue } from 'firebase-admin/firestore';
-import { db } from '../firebase';
 
 export type AdoptionLimitKind =
   /** Failed code resolutions, keyed by hash of the submitted code. */
@@ -79,6 +78,27 @@ export interface LimitVerdict {
   retryAfterSeconds: number;
 }
 
+/**
+ * Is this bucket currently limited — WITHOUT charging it. For gates that run on the
+ * success path but meter a different event: the code_fail gate in authenticate() runs on
+ * every request, but only actual failures may add hits. Using the charging variant there
+ * turned every legitimate poll into a spent wrong-code token — ten valid requests locked
+ * the account's code out for ten minutes, which presented as adoption "stuck at
+ * Connecting" while everything server-side had succeeded.
+ */
+export function adoptionRateLimitPeek(kind: AdoptionLimitKind, key: string): LimitVerdict {
+  const { max, windowMs } = LIMITS[kind];
+  const now = Date.now();
+  const recent = (hits.get(`${kind}:${key}`) || []).filter((t) => now - t < windowMs);
+  if (recent.length >= max) {
+    return {
+      limited: true,
+      retryAfterSeconds: Math.max(1, Math.ceil((windowMs - (now - recent[0])) / 1000)),
+    };
+  }
+  return { limited: false, retryAfterSeconds: 0 };
+}
+
 export function adoptionRateLimited(kind: AdoptionLimitKind, key: string): LimitVerdict {
   const { max, windowMs } = LIMITS[kind];
   const mapKey = `${kind}:${key}`;
@@ -123,6 +143,9 @@ function utcDay(now = new Date()): string {
  * in the venue, which is the same posture the CMS takes on its plan gates.
  */
 export async function claimCapExceeded(tenantUserId: string): Promise<boolean> {
+  // Lazy so the in-memory limiter above stays importable without Firebase credentials
+  // (tests/adoptionRateLimit.test.ts) — only this daily counter touches Firestore.
+  const { db } = await import('../firebase');
   const ref = db.collection(CLAIM_COUNTER_COLLECTION).doc(`${tenantUserId}_${utcDay()}`);
   try {
     return await db.runTransaction(async (tx) => {

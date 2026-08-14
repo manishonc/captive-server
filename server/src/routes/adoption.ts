@@ -26,7 +26,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../firebase';
 import { accountCodeSubsystemReady, checkAccountCode, maskAccountCode } from '../services/accountCode';
 import { adoptionCodeStorageReady, resolveAccountCode } from '../services/adoptionCodes';
-import { adoptionRateLimited, claimCapExceeded } from '../services/adoptionRateLimit';
+import { adoptionRateLimitPeek, adoptionRateLimited, claimCapExceeded } from '../services/adoptionRateLimit';
 import { getPauseState, rateLimitsPaused } from '../services/adoptionSettings';
 import {
   adoptionStatus,
@@ -98,7 +98,10 @@ async function authenticate(req: Request, res: Response): Promise<Caller | null>
   }
 
   if (!paused) {
-    const failLimit = adoptionRateLimited('code_fail', key);
+    // PEEK, never charge: this gate runs on every request, but the bucket it reads meters
+    // FAILURES. The charging variant here spent a wrong-code token per legitimate call, so
+    // ten valid requests — one short helper session — locked the code out for ten minutes.
+    const failLimit = adoptionRateLimitPeek('code_fail', key);
     if (failLimit.limited) {
       limited(res, failLimit.retryAfterSeconds);
       return null;
