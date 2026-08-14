@@ -44,9 +44,14 @@ import { applyVenueWifi, resolveAnyController } from './unifiWlan';
 import { adoptRegisteredPendingDevices } from './unifiAdoption';
 import {
   AdoptionPhase,
+  AdoptionProgressEntry,
+  AdoptionStallReason,
+  classifyAdoption,
   classifyAdoptionPhase,
   controllerDeviceName,
+  isAdoptionDone,
   retryAfterSeconds,
+  summarizeAdoptionProgress,
 } from './adoptionStatus';
 import { getEntitlements, isLapsedForSending } from './entitlements';
 
@@ -77,6 +82,9 @@ export interface ClaimResult {
   phase?: AdoptionPhase;
   wifiApplied?: boolean;
   retryAfterSeconds?: number;
+  done?: boolean;
+  deviceState?: number | null;
+  reason?: AdoptionStallReason | null;
 }
 
 export interface ClaimArgs {
@@ -370,6 +378,9 @@ export async function claimAccessPoint(args: ClaimArgs): Promise<ClaimResult> {
     phase: status.phase,
     wifiApplied: status.wifiApplied,
     retryAfterSeconds: status.retryAfterSeconds,
+    done: status.done,
+    deviceState: status.deviceState,
+    reason: status.reason,
   };
 }
 
@@ -458,6 +469,11 @@ export interface AdoptionStatusResult {
   phase: AdoptionPhase;
   wifiApplied: boolean;
   retryAfterSeconds: number;
+  /** The one condition clients should stop polling on: connected AND WiFi applied. */
+  done: boolean;
+  /** Raw controller `state`, or null when the device has no row / the controller is down. */
+  deviceState: number | null;
+  reason: AdoptionStallReason | null;
   apName?: string;
   venueName?: string;
   ssid?: string;
@@ -481,7 +497,14 @@ export async function adoptionStatus(args: {
 
   const doc = apSnap.docs.find((d) => canonMac(String(d.data().mac || '')) === canon);
   if (!doc) {
-    return { phase: 'waiting_for_device', wifiApplied: false, retryAfterSeconds: 3 };
+    return {
+      phase: 'waiting_for_device',
+      wifiApplied: false,
+      retryAfterSeconds: 3,
+      done: false,
+      deviceState: null,
+      reason: 'not_registered',
+    };
   }
   const ap = doc.data() as {
     name?: string;
@@ -490,29 +513,54 @@ export async function adoptionStatus(args: {
     tenantUserId?: string;
     wifiAppliedAt?: Timestamp | null;
     adoptionRequestedAt?: Timestamp | null;
+    adoptionLastError?: string;
   };
   if (ap.tenantUserId && ap.tenantUserId !== args.tenantUserId) {
-    // Not this caller's device. Report the neutral phase rather than anything identifying.
-    return { phase: 'waiting_for_device', wifiApplied: false, retryAfterSeconds: 10 };
+    // Not this caller's device. Report the neutral phase rather than anything identifying —
+    // including no reason code, which would confirm the MAC exists.
+    return {
+      phase: 'waiting_for_device',
+      wifiApplied: false,
+      retryAfterSeconds: 10,
+      done: false,
+      deviceState: null,
+      reason: null,
+    };
   }
 
   const requestedAt = ap.adoptionRequestedAt?.toMillis?.() ?? null;
   const since = requestedAt ? Date.now() - requestedAt : 0;
 
   let phase: AdoptionPhase = 'waiting_for_device';
+  let reason: AdoptionStallReason | null = null;
+  let deviceState: number | null = null;
   let statusConfig: UnifiConfig;
   let statusDevices: UnifiDevice[] = [];
   try {
     statusConfig = await resolveAnyController();
     statusDevices = await getDevices(statusConfig);
-    const row = statusDevices.find((d) => canonMac(d.mac) === canon) || null;
-    phase = classifyAdoptionPhase(row, requestedAt);
+    let row = statusDevices.find((d) => canonMac(d.mac) === canon) || null;
+    if (!row) {
+      // Some controller versions only surface not-yet-adopted devices in stat/device-basic,
+      // which getPendingDevices probes — without this the whole pending phase reads as
+      // "waiting for device" on those controllers. Only on a miss, so the steady state
+      // stays at one (cached) controller call.
+      const pending = await getPendingDevices(statusConfig);
+      row = pending.find((d) => canonMac(d.mac) === canon) || null;
+    }
+    const cls = classifyAdoption(row, requestedAt);
+    phase = cls.phase;
+    reason = cls.reason;
+    deviceState = cls.deviceState;
   } catch (error) {
     console.error('[AP STATUS] Controller unreachable:', error);
     return {
       phase: 'waiting_for_device',
       wifiApplied: Boolean(ap.wifiAppliedAt),
       retryAfterSeconds: 10,
+      done: false,
+      deviceState: null,
+      reason: 'controller_unreachable',
       apName: ap.name,
       venueName: ap.venueName,
     };
@@ -530,17 +578,142 @@ export async function adoptionStatus(args: {
       apName: ap.name,
       devices: statusDevices,
     });
-    if (!wifiApplied) wifiApplied = await applyWifiForAp(doc.id, ap.venueId, args.ssid);
+    if (!wifiApplied) {
+      wifiApplied = await applyWifiForAp(doc.id, ap.venueId, args.ssid);
+      // Connected but the WiFi step keeps failing is the one stall the classifier cannot
+      // see; without a reason the client shows an infinite "setting up your WiFi" spinner.
+      if (!wifiApplied) reason = 'wifi_apply_failed';
+    }
   }
 
   return {
     phase,
     wifiApplied,
     retryAfterSeconds: retryAfterSeconds(since),
+    done: isAdoptionDone(phase, wifiApplied),
+    deviceState,
+    reason,
     apName: ap.name,
     venueName: ap.venueName,
     ssid: args.ssid,
   };
+}
+
+// ── Dashboard progress ────────────────────────────────────────────────────────
+
+export interface AdoptionProgressResult {
+  accessPoints: AdoptionProgressEntry[];
+  retryAfterSeconds: number;
+  /** True when the controller could not be reached — phases are placeholders. */
+  degraded?: boolean;
+}
+
+/**
+ * A tenant's recent self-serve adoptions, classified against the controller. The dashboard's
+ * counterpart to `adoptionStatus()`: keyed by tenant (and optionally venue) rather than MAC,
+ * because the dashboard has no MAC until the helper registers the device.
+ *
+ * Runs the same connected-phase side effects as `adoptionStatus()` — naming and the WiFi
+ * apply — so a dashboard left open finishes the job even if the helper was closed early.
+ * Both are idempotent, and the two pollers share the 5-second device cache, so running
+ * side by side costs one controller round trip per cache window.
+ */
+export async function adoptionProgress(args: {
+  tenantUserId: string;
+  venueId?: string;
+  sinceMs?: number;
+}): Promise<AdoptionProgressResult> {
+  const now = Date.now();
+  // Default to the last day — what the person is plausibly still watching — and clamp the
+  // caller's own window so this cannot become a full history scan.
+  const floor = now - 7 * 24 * 60 * 60_000;
+  const since = Math.max(args.sinceMs ?? now - 24 * 60 * 60_000, floor);
+
+  // Equality-only filters: served by Firestore's merged single-field indexes, no composite
+  // index required. The `since` cut happens in memory — venue AP counts are capacity-capped.
+  let query = db
+    .collection(AP_COLLECTION)
+    .where('tenantUserId', '==', args.tenantUserId)
+    .where('adoptionSource', '==', 'self_serve');
+  if (args.venueId) query = query.where('venueId', '==', args.venueId);
+  const snap = await query.limit(25).get();
+
+  type ApRow = {
+    mac?: string;
+    name?: string;
+    venueId?: string;
+    venueName?: string;
+    adoptionState?: string;
+    adoptionRequestedAt?: Timestamp | null;
+    createdAt?: Timestamp | null;
+    wifiAppliedAt?: Timestamp | null;
+    adoptionLastError?: string;
+  };
+  const docs = snap.docs
+    .map((d) => ({ id: d.id, data: d.data() as ApRow }))
+    .filter((d) => (d.data.createdAt?.toMillis?.() ?? 0) >= since);
+
+  const inputs = docs.map((d) => ({
+    apId: d.id,
+    apName: d.data.name,
+    venueId: d.data.venueId,
+    mac: canonMac(String(d.data.mac || '')),
+    adoptionState: d.data.adoptionState,
+    adoptionRequestedAt: d.data.adoptionRequestedAt?.toMillis?.() ?? null,
+    createdAt: d.data.createdAt?.toMillis?.() ?? null,
+    wifiApplied: Boolean(d.data.wifiAppliedAt),
+    lastError: d.data.adoptionLastError ?? null,
+  }));
+
+  let config: UnifiConfig | null = null;
+  let devices: UnifiDevice[] = [];
+  let degraded = false;
+  try {
+    config = await resolveAnyController();
+    devices = await getDevices(config);
+  } catch (error) {
+    console.error('[AP PROGRESS] Controller unreachable:', error);
+    degraded = true;
+  }
+  const byMac = new Map(devices.map((d) => [canonMac(d.mac), d as { state?: unknown; adopted?: unknown }]));
+
+  const entries = summarizeAdoptionProgress(inputs, byMac, now);
+
+  if (config) {
+    for (const entry of entries) {
+      if (entry.phase !== 'connected' || !entry.venueId) continue;
+      const source = docs.find((d) => d.id === entry.apId);
+      await nameDeviceOnController({
+        config,
+        canon: entry.mac,
+        venueId: entry.venueId,
+        venueName: source?.data.venueName,
+        apName: entry.apName ?? undefined,
+        devices,
+      });
+      if (!entry.wifiApplied) {
+        if (await applyWifiForAp(entry.apId, entry.venueId)) {
+          entry.wifiApplied = true;
+          entry.done = true;
+          entry.reason = null;
+        } else {
+          entry.reason = 'wifi_apply_failed';
+        }
+      }
+    }
+  }
+
+  // Poll cadence follows the youngest unfinished adoption; with nothing in flight the
+  // dashboard can idle at the slow rate.
+  const inFlight = entries.filter((e) => !e.done);
+  const newest = inFlight
+    .map((e) => e.adoptionRequestedAt ?? e.createdAt)
+    .filter((iso): iso is string => Boolean(iso))
+    .sort()
+    .pop();
+  const retry = degraded || !newest ? 10 : retryAfterSeconds(now - Date.parse(newest));
+
+  return { accessPoints: entries, retryAfterSeconds: retry, ...(degraded ? { degraded } : {}) };
 }
 
 /**

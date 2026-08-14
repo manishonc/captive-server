@@ -14,6 +14,7 @@
  * unregistered devices are surfaced in the admin panel for an explicit manual adopt.
  */
 
+import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../firebase';
 import { UnifiConfig } from '../types/captive';
 import { canonMac, normalizeMac, getPendingDevices, adoptDevice, UnifiPendingDevice } from './unifi';
@@ -147,6 +148,17 @@ export async function adoptRegisteredPendingDevices(opts?: { onlyMacs?: string[]
     try {
       await adoptDevice(config, device.mac);
       result.adopted.push({ mac: device.mac, apId: ap.apId, apName: ap.apName, venueId: ap.venueId });
+      // Stamp the doc: the phase classifier's offline-grace window is anchored to
+      // adoptionRequestedAt, and when the claim-time adopt failed this sweep is the only
+      // thing that ever sets it — without the stamp such a device reports
+      // "waiting for device" forever. A re-adopt legitimately restarts the window.
+      await db
+        .collection(AP_COLLECTION)
+        .doc(ap.apId)
+        .update({ adoptionState: 'adopt_requested', adoptionRequestedAt: FieldValue.serverTimestamp() })
+        .catch((err) =>
+          console.error('[AP ADOPT] Could not stamp adoptionRequestedAt for', ap.apId, err),
+        );
       console.log('[AP ADOPT] Adopted', device.mac, 'as', ap.apName || ap.apId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
