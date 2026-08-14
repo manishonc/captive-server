@@ -226,7 +226,7 @@ anyone could disable a tenant's setup by spamming bad codes at it.
 | `code_fail` (failed resolutions, per submitted code) | 10 | 10 min |
 | `unknown_code_global` (failures, fleet-wide) | 60 | 5 min |
 | `session` / `precheck` | 30 / 60 | 10 min |
-| `status` (per code + MAC) | 120 | 10 min |
+| `status` (per code + MAC) | 600 | 10 min |
 | `claim` (per code / per MAC) | 10 / 5 | 60 min |
 | `claim_daily` (per tenant, Firestore) | 20 | 24h UTC |
 

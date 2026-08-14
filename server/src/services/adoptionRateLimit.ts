@@ -61,7 +61,11 @@ const LIMITS: Record<AdoptionLimitKind, Window> = {
   unknown_code_global: { max: 60, windowMs: 5 * 60_000 },
   session: { max: 30, windowMs: 10 * 60_000 },
   precheck: { max: 60, windowMs: 10 * 60_000 },
-  status: { max: 120, windowMs: 10 * 60_000 },
+  // Generous on purpose: reads hit the 5s-cached device list, so the controller cost is
+  // bounded regardless, and a person retrying a flaky install re-enters the fast 2-3s
+  // cadence each attempt — 120 proved exhaustible in one real sitting, and a watched
+  // progress screen stalling on 429s for minutes is worse than the traffic.
+  status: { max: 600, windowMs: 10 * 60_000 },
   // A big venue rollout is a handful of access points in an afternoon, not dozens.
   claim: { max: 10, windowMs: 60 * 60_000 },
   claim_mac: { max: 5, windowMs: 60 * 60_000 },
