@@ -17,7 +17,7 @@
 
     <!-- Idle / instructions -->
     <section id="panel-idle" class="panel">
-      <h1>Set up your WiFi access point</h1>
+      <h1 tabindex="-1">Set up your WiFi access point</h1>
       <p class="lead">
         Plug your access point into power and network (PoE), make sure this
         computer is on the same network, then click below.
@@ -33,10 +33,152 @@
 
     <!-- Results -->
     <section id="panel-results" class="panel hidden">
-      <h2 id="results-title">Select your access point</h2>
+      <h2 id="results-title" tabindex="-1">Select your access point</h2>
+      <div id="offline-warning" class="callout warn hidden">
+        <strong>This computer isn&rsquo;t reaching HeidiFi.</strong>
+        Your access point needs an internet connection to finish setting up. Connect this
+        computer to the venue&rsquo;s main internet connection and scan again.
+      </div>
       <div id="device-list" class="device-list"></div>
-      <button id="btn-adopt" class="btn btn-primary" disabled>Send adoption request</button>
+      <button id="btn-adopt" class="btn btn-primary" disabled>Continue</button>
       <button id="btn-rescan" class="btn btn-ghost">Scan again</button>
+    </section>
+
+    <!-- Setup code -->
+    <section id="panel-code" class="panel hidden">
+      <h2 tabindex="-1">Enter your HeidiFi setup code</h2>
+      <p class="lead">
+        Your code is on your HeidiFi dashboard, under <strong>Add access point</strong>.
+        It&rsquo;s 8 letters and numbers, like H7K2-M9QX.
+      </p>
+      <label class="field">
+        <span>Setup code</span>
+        <input id="input-code" class="code-input" type="text" inputmode="text"
+               autocapitalize="characters" autocomplete="off" spellcheck="false"
+               maxlength="9" placeholder="H7K2-M9QX" aria-describedby="code-error" />
+      </label>
+      <p id="code-error" class="note bad hidden" role="alert"></p>
+      <p class="note">
+        Not case-sensitive. Codes never contain the letters I, L or O, or the numbers 0 or 1.
+      </p>
+      <button id="btn-code-continue" class="btn btn-primary" disabled>Continue</button>
+      <button id="btn-no-code" class="btn btn-ghost btn-small">I don&rsquo;t have a code</button>
+      <div id="no-code-body" class="callout hidden">
+        <p>
+          No problem. We&rsquo;ll send the request to HeidiFi and someone from the team will
+          finish the setup for you &mdash; usually within one business day. Your guest WiFi
+          won&rsquo;t be live until then.
+        </p>
+        <button id="btn-send-anyway" class="btn btn-ghost">Send the request anyway</button>
+      </div>
+      <button id="btn-code-back" class="btn btn-ghost btn-small">Back</button>
+    </section>
+
+    <!-- Already known to HeidiFi -->
+    <section id="panel-known" class="panel hidden">
+      <div id="known-icon-ok" class="result-icon success" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <div id="known-icon-bad" class="result-icon error hidden" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="7" x2="12" y2="13"></line>
+          <circle cx="12" cy="17.5" r="0.5" fill="currentColor" stroke="none"></circle>
+        </svg>
+      </div>
+      <h2 id="known-title" class="center" tabindex="-1"></h2>
+      <p id="known-message" class="lead center"></p>
+      <button id="btn-known-dashboard" class="btn btn-primary hidden">Open my dashboard</button>
+      <button id="btn-known-again" class="btn btn-ghost">Set up another access point</button>
+      <button id="btn-known-retry" class="btn btn-ghost btn-small hidden">
+        It&rsquo;s not working &mdash; set it up again
+      </button>
+    </section>
+
+    <!-- Location + WiFi -->
+    <section id="panel-setup" class="panel hidden">
+      <span id="setup-chip" class="chip ok hidden"></span>
+      <h2 id="setup-title" tabindex="-1">Set up your access point</h2>
+
+      <fieldset id="venue-field" class="field">
+        <legend>Which location is this for?</legend>
+        <div id="venue-list" class="venue-list"></div>
+      </fieldset>
+      <p id="venue-single" class="note hidden"></p>
+
+      <label class="field">
+        <span>Name this access point</span>
+        <input id="input-ap-name" type="text" maxlength="64" />
+        <em class="field-hint">
+          Just a label, so you can tell your access points apart in HeidiFi.
+        </em>
+      </label>
+
+      <div id="ssid-locked" class="callout hidden">
+        <p id="ssid-locked-text"></p>
+        <button id="btn-ssid-unlock" class="btn btn-ghost btn-small">Change the name</button>
+      </div>
+      <div id="ssid-warning" class="callout warn hidden">
+        <p id="ssid-warning-text"></p>
+      </div>
+      <label id="ssid-field" class="field">
+        <span>WiFi network name</span>
+        <input id="input-ssid" type="text" maxlength="32" placeholder="e.g. Cafe Rosa Guest" />
+        <em class="field-hint">This is the name guests will see and tap on their phone.</em>
+      </label>
+
+      <p id="setup-error" class="note bad hidden" role="alert"></p>
+      <button id="btn-setup-submit" class="btn btn-primary">Set up my access point</button>
+      <button id="btn-setup-back" class="btn btn-ghost btn-small">Back</button>
+    </section>
+
+    <!-- Working -->
+    <section id="panel-claiming" class="panel hidden">
+      <h2 class="center" tabindex="-1">Setting up your access point</h2>
+      <ol class="checklist" id="checklist">
+        <li class="checklist-row" data-step="1">
+          <span class="checklist-dot"></span>
+          <span class="checklist-label">Registering it with HeidiFi</span>
+        </li>
+        <li class="checklist-row" data-step="2">
+          <span class="checklist-dot"></span>
+          <span class="checklist-label">Waiting for it to check in</span>
+        </li>
+        <li class="checklist-row" data-step="3">
+          <span class="checklist-dot"></span>
+          <span class="checklist-label">Connecting it to HeidiFi</span>
+        </li>
+        <li class="checklist-row" data-step="4">
+          <span class="checklist-dot"></span>
+          <span class="checklist-label">Turning on your guest WiFi</span>
+        </li>
+      </ol>
+      <p id="claiming-detail" class="note center" aria-live="polite"></p>
+      <p id="claiming-slow" class="note center hidden">
+        Still going. Some access points take a little longer the first time.
+      </p>
+      <p class="note center">
+        Keep this app open and leave the access point plugged in.
+        This normally takes one to two minutes.
+      </p>
+    </section>
+
+    <!-- Done -->
+    <section id="panel-done" class="panel hidden">
+      <div class="result-icon success" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <h2 class="center" tabindex="-1">Your access point is set up</h2>
+      <p id="done-message" class="lead center"></p>
+      <button id="btn-done-dashboard" class="btn btn-primary">Continue on your dashboard</button>
+      <button id="btn-done-again" class="btn btn-ghost">Set up another access point</button>
+      <p class="note center">You can close this app.</p>
     </section>
 
     <!-- Sending -->
@@ -53,7 +195,7 @@
           <polyline points="20 6 9 17 4 12"></polyline>
         </svg>
       </div>
-      <h2 class="center">Request sent!</h2>
+      <h2 class="center" tabindex="-1">Request sent!</h2>
       <p class="lead center">
         Your administrator will approve it shortly. You can close this app.
       </p>
@@ -70,9 +212,10 @@
           <circle cx="12" cy="17.5" r="0.5" fill="currentColor" stroke="none"></circle>
         </svg>
       </div>
-      <h2 id="error-title" class="center">Something went wrong</h2>
+      <h2 id="error-title" class="center" tabindex="-1">Something went wrong</h2>
       <p id="error-message" class="lead center"></p>
-      <button id="btn-retry" class="btn btn-primary">Scan again</button>
+      <button id="btn-error-primary" class="btn btn-primary">Try again</button>
+      <button id="btn-error-secondary" class="btn btn-ghost hidden"></button>
     </section>
 
     <!-- Advanced -->
@@ -83,6 +226,11 @@
           <span>Controller inform URL</span>
           <input id="input-url" type="text" spellcheck="false"
                  placeholder="http://34.116.224.72:8085/inform" />
+        </label>
+        <label class="field">
+          <span>HeidiFi API address <em>(leave empty for the default)</em></span>
+          <input id="input-api" type="text" spellcheck="false"
+                 placeholder="https://api.heidifi.ai" />
         </label>
         <label class="field">
           <span>Access point SSH password <em>(only if the default was changed)</em></span>
@@ -113,6 +261,7 @@
       <a href="#" id="home-link">Powered by <strong>HeidiFi</strong></a>
     </footer>
   </main>
+  <script src="./account-code.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

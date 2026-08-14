@@ -10,6 +10,9 @@ const FALLBACK_CONFIG: AppConfig = {
   appName: 'HeidiFi AP Adoption Helper',
   informUrl: 'http://34.116.224.72:8085/inform',
   homeUrl: 'https://heidifi.ai/',
+  apiBaseUrl: 'https://api.heidifi.ai',
+  dashboardUrl: 'https://cms.heidifi.ai/captive-venue',
+  supportEmail: 'hello@swissopenai.com',
   brand: { primary: '#1c2b4a', surface: '#f4f5f7', background: '#ffffff' },
 };
 
@@ -60,5 +63,6 @@ export function effectiveConfig(): EffectiveConfig {
     ...config,
     settings,
     effectiveInformUrl: settings.controllerUrl?.trim() || config.informUrl,
+    effectiveApiBaseUrl: settings.apiBaseUrl?.trim() || config.apiBaseUrl,
   };
 }
