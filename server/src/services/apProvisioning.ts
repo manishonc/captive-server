@@ -26,15 +26,28 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { db } from '../firebase';
 import { UnifiConfig } from '../types/captive';
+import type { UnifiDevice } from './unifi';
 import {
   DEFAULT_OFFLINE_THRESHOLD_MINUTES,
   DEFAULT_SESSION_TIMEOUT,
   defaultApEvents,
 } from '../config/apDefaults';
-import { canonMac, getDevices, getPendingDevices, normalizeMac, validateSsid } from './unifi';
+import {
+  canonMac,
+  getDevices,
+  getPendingDevices,
+  normalizeMac,
+  setDeviceName,
+  validateSsid,
+} from './unifi';
 import { applyVenueWifi, resolveAnyController } from './unifiWlan';
 import { adoptRegisteredPendingDevices } from './unifiAdoption';
-import { AdoptionPhase, classifyAdoptionPhase, retryAfterSeconds } from './adoptionStatus';
+import {
+  AdoptionPhase,
+  classifyAdoptionPhase,
+  controllerDeviceName,
+  retryAfterSeconds,
+} from './adoptionStatus';
 import { getEntitlements, isLapsedForSending } from './entitlements';
 
 const AP_COLLECTION = 'CaptivePortal_AccessPoints';
@@ -480,10 +493,12 @@ export async function adoptionStatus(args: {
   const since = requestedAt ? Date.now() - requestedAt : 0;
 
   let phase: AdoptionPhase = 'waiting_for_device';
+  let statusConfig: UnifiConfig;
+  let statusDevices: UnifiDevice[] = [];
   try {
-    const config = await resolveAnyController();
-    const devices = await getDevices(config);
-    const row = devices.find((d) => canonMac(d.mac) === canon) || null;
+    statusConfig = await resolveAnyController();
+    statusDevices = await getDevices(statusConfig);
+    const row = statusDevices.find((d) => canonMac(d.mac) === canon) || null;
     phase = classifyAdoptionPhase(row, requestedAt);
   } catch (error) {
     console.error('[AP STATUS] Controller unreachable:', error);
@@ -497,8 +512,18 @@ export async function adoptionStatus(args: {
   }
 
   let wifiApplied = Boolean(ap.wifiAppliedAt);
-  if (phase === 'connected' && !wifiApplied && ap.venueId) {
-    wifiApplied = await applyWifiForAp(doc.id, ap.venueId, args.ssid);
+  if (phase === 'connected' && ap.venueId) {
+    // Naming runs whether or not the WiFi still needs applying: a device adopted before this
+    // shipped, or one whose WiFi already went on, should still stop showing as "U6 Pro".
+    await nameDeviceOnController({
+      config: statusConfig,
+      canon,
+      venueId: ap.venueId,
+      venueName: ap.venueName,
+      apName: ap.name,
+      devices: statusDevices,
+    });
+    if (!wifiApplied) wifiApplied = await applyWifiForAp(doc.id, ap.venueId, args.ssid);
   }
 
   return {
@@ -509,6 +534,42 @@ export async function adoptionStatus(args: {
     venueName: ap.venueName,
     ssid: args.ssid,
   };
+}
+
+/**
+ * Give the device a readable alias on the controller.
+ *
+ * Purely for whoever is looking at the controller's Devices list — nothing in the product
+ * reads it. But on a shared site every access point otherwise shows as its model, so a
+ * support question like "whose U6 Pro is this" has no answer without a database lookup.
+ *
+ * Best-effort and never throws: this is cosmetic, and an adoption must not fail because a
+ * rename did. Skipped when the alias is already correct, so the cron sweep does not PUT the
+ * same value every five minutes.
+ */
+async function nameDeviceOnController(args: {
+  config: UnifiConfig;
+  canon: string;
+  venueId: string;
+  venueName?: string;
+  apName?: string;
+  devices?: UnifiDevice[];
+}): Promise<void> {
+  try {
+    const desired = controllerDeviceName({
+      venueName: args.venueName,
+      apName: args.apName,
+      venueId: args.venueId,
+    });
+    const devices = args.devices ?? (await getDevices(args.config));
+    const row = devices.find((d) => canonMac(d.mac) === args.canon);
+    if (!row?.id || row.name === desired) return;
+
+    await setDeviceName(args.config, row.id, desired);
+    console.log('[AP CLAIM] Named device', args.canon, 'as', desired);
+  } catch (error) {
+    console.error('[AP CLAIM] Could not name device', args.canon, '-', (error as Error).message);
+  }
 }
 
 /**
@@ -570,12 +631,26 @@ export async function reconcilePendingWifi(): Promise<{ applied: number; checked
     const byMac = new Map(devices.map((d) => [canonMac(d.mac), d]));
 
     for (const doc of snap.docs) {
-      const ap = doc.data() as { mac?: string; venueId?: string; adoptionRequestedAt?: Timestamp | null };
+      const ap = doc.data() as {
+        mac?: string;
+        name?: string;
+        venueId?: string;
+        venueName?: string;
+        adoptionRequestedAt?: Timestamp | null;
+      };
       if (!ap.venueId || !ap.mac) continue;
       result.checked += 1;
       const row = byMac.get(canonMac(ap.mac)) || null;
       const phase = classifyAdoptionPhase(row, ap.adoptionRequestedAt?.toMillis?.() ?? null);
       if (phase !== 'connected') continue;
+      await nameDeviceOnController({
+        config,
+        canon: canonMac(ap.mac),
+        venueId: ap.venueId,
+        venueName: ap.venueName,
+        apName: ap.name,
+        devices,
+      });
       if (await applyWifiForAp(doc.id, ap.venueId)) result.applied += 1;
     }
   } catch (error) {
