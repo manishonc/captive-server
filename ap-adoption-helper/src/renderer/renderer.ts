@@ -507,9 +507,19 @@
       (err: unknown): AdoptResult => ({ ok: false, code: 'UNEXPECTED_OUTPUT', raw: String(err) }),
     );
     if (!sent.ok) {
-      const copy = ERROR_COPY[sent.code] ?? ERROR_COPY.UNEXPECTED_OUTPUT;
-      showError(copy.title, copy.message, 'retry-scan');
-      return;
+      // The set-inform exists to point a factory device at our controller. A device the
+      // precheck already saw on the controller doesn't need it — and often can't take it:
+      // once adopted, the controller replaces the factory ubnt/ubnt SSH credentials, so
+      // this step failing is EXPECTED there. Aborting here stranded exactly the people
+      // re-running the helper at an already-adopted access point. The claim's own
+      // proof-of-possession (the device must be visible on our controller) still holds.
+      const known = precheck.get(canon(device.mac))?.state;
+      const onController = known === 'already_registered_here' || known === 'adopted_unregistered';
+      if (!onController) {
+        const copy = ERROR_COPY[sent.code] ?? ERROR_COPY.UNEXPECTED_OUTPUT;
+        showError(copy.title, copy.message, 'retry-scan');
+        return;
+      }
     }
 
     setChecklist(2, 'Registering it with HeidiFi.');

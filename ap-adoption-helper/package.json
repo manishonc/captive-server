@@ -1,6 +1,6 @@
 {
   "name": "heidifi-ap-adoption-helper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "One-click UniFi access point adoption for HeidiFi venues",
   "main": "dist/main/main.js",
   "author": "HeidiFi",
