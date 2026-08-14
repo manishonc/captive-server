@@ -94,6 +94,7 @@
   const checklist = $('checklist');
   const claimingDetail = $('claiming-detail');
   const claimingSlow = $('claiming-slow');
+  const btnCheckNow = $<HTMLButtonElement>('btn-check-now');
   const doneMessage = $('done-message');
   const btnDoneDashboard = $<HTMLButtonElement>('btn-done-dashboard');
   const btnDoneAgain = $<HTMLButtonElement>('btn-done-again');
@@ -1043,6 +1044,21 @@
 
   btnDoneDashboard.addEventListener('click', () => void api.openExternal(dashboardUrl));
   btnDoneAgain.addEventListener('click', () => void startScan());
+
+  // Manual check on the progress screen — for the person who has just fixed the cable and
+  // doesn't want to wait out the current backoff. Skips ahead of the scheduled poll; the
+  // poll itself still applies the deadline and rate-limit handling.
+  btnCheckNow.addEventListener('click', () => {
+    // Nothing to check until the claim has gone through — before that the screen is on
+    // the set-inform/claim requests, which run on their own.
+    if (btnCheckNow.disabled || !claim) return;
+    btnCheckNow.disabled = true;
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
+    pollTimer = null;
+    void poll().finally(() => {
+      btnCheckNow.disabled = false;
+    });
+  });
 
   btnSave.addEventListener('click', async () => {
     const config = await api.saveSettings({
