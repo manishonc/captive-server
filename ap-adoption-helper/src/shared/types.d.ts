@@ -119,6 +119,12 @@ interface AdoptionStatus {
   retryAfterSeconds: number;
   apName?: string;
   venueName?: string;
+  // Sent by servers from Aug 2026 on; optional so this client still works against older
+  // ones. `done` is the server's own stop condition (connected AND WiFi applied); `reason`
+  // says why a phase is lingering (heartbeat_missed, upgrading, wifi_apply_failed, ...).
+  done?: boolean;
+  deviceState?: number | null;
+  reason?: string | null;
 }
 
 interface AdoptionClaimRequest {
@@ -142,6 +148,10 @@ interface AdoptionClaim {
   phase: AdoptionPhase;
   wifiApplied: boolean;
   retryAfterSeconds: number;
+  // Optional — see AdoptionStatus.
+  done?: boolean;
+  deviceState?: number | null;
+  reason?: string | null;
 }
 
 type AdoptionErrorCode =
@@ -162,6 +172,9 @@ type AdoptionErrorCode =
   | 'UNAVAILABLE'
   | 'VERSION_UNSUPPORTED'
   | 'CLAIM_TIMEOUT'
+  // Synthesised locally from status polls, like CLAIM_TIMEOUT — never sent by the server.
+  | 'DEVICE_OFFLINE'
+  | 'WIFI_STUCK'
   | 'SERVER_ERROR'
   | 'BAD_RESPONSE';
 
@@ -177,6 +190,8 @@ interface AdoptionErr {
   detail?: string;
   /** Present on SSID_NEEDS_CONFIRM — the name the location currently broadcasts. */
   ssid?: string;
+  /** On RATE_LIMITED: how long the server asked us to back off (Retry-After / body). */
+  retryAfterSeconds?: number;
 }
 
 type AdoptionResult<T> = AdoptionOk<T> | AdoptionErr;

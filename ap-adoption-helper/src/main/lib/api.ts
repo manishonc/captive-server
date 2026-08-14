@@ -13,7 +13,7 @@
 
 import { net } from 'electron';
 import { log } from './log';
-import { mapFailure } from './api-errors';
+import { mapFailure, parseRetryAfter } from './api-errors';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -80,6 +80,8 @@ export async function apiPost<T>(
         code: mapFailure(res.status, json),
         detail: typeof detail === 'string' ? detail : undefined,
         ssid: typeof ssid === 'string' ? ssid : undefined,
+        // 429s carry how long to back off; polling that ignores it just re-triggers the limit.
+        retryAfterSeconds: parseRetryAfter(res.headers.get('retry-after'), json),
       };
     }
     if (json === null) return { ok: false, code: 'BAD_RESPONSE' };

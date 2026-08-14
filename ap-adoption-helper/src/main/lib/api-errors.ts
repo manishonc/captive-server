@@ -17,6 +17,11 @@ const SERVER_CODE_MAP: Record<string, AdoptionErrorCode> = {
   ssid_conflict_existing: 'SSID_NEEDS_CONFIRM',
   plan_limit_access_points: 'PLAN_LIMIT',
   subscription_lapsed: 'SUBSCRIPTION_LAPSED',
+  // Explicit rather than falling through statusToCode: these are 502s, and a bare 502 from
+  // a proxy would land on the same code anyway — listing them documents that it's intended.
+  lookup_failed: 'SERVER_ERROR',
+  status_failed: 'SERVER_ERROR',
+  claim_failed: 'SERVER_ERROR',
 };
 
 /**
@@ -41,4 +46,18 @@ export function mapFailure(status: number, body: unknown): AdoptionErrorCode {
   const code = (body as { code?: unknown } | null)?.code;
   if (typeof code === 'string' && SERVER_CODE_MAP[code]) return SERVER_CODE_MAP[code];
   return statusToCode(status, body !== null && body !== undefined);
+}
+
+/**
+ * How long a 429 asked us to wait, from the Retry-After header or the body's
+ * retryAfterSeconds — header wins, since it's the standard one. Clamped to something a
+ * person watching a progress screen can survive; undefined when neither is usable, so the
+ * caller falls back to its own cadence.
+ */
+export function parseRetryAfter(header: string | null, body: unknown): number | undefined {
+  const fromHeader = header !== null ? Number(header) : NaN;
+  const fromBody = Number((body as { retryAfterSeconds?: unknown } | null)?.retryAfterSeconds);
+  const value = Number.isFinite(fromHeader) && fromHeader > 0 ? fromHeader : fromBody;
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(600, Math.max(1, Math.round(value)));
 }

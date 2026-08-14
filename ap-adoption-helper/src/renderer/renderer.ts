@@ -129,15 +129,18 @@
   let apiReachable = true;
 
   let claim: AdoptionClaim | null = null;
+  let lastStatus: AdoptionStatus | AdoptionClaim | null = null;
   let pollTimer: number | null = null;
   let claimStartedAt = 0;
   let pollFailures = 0;
+  let wifiFailStreak = 0;
+  let keepWaitingCount = 0;
 
-  /** Total time we let a provision run before offering a way out. */
-  const CLAIM_TIMEOUT_MS = 180_000;
   const SLOW_NOTICE_MS = 90_000;
   /** Venue WiFi drops constantly; one failed poll means nothing. */
   const MAX_POLL_FAILURES = 5;
+  /** "Keep waiting" presses before we stop pretending watching helps — see runAction. */
+  const KEEP_WAITING_MAX = 2;
 
   const COPY = {
     resultsOne: 'We found your access point',
@@ -494,6 +497,9 @@
     show('claiming');
     claimStartedAt = Date.now();
     pollFailures = 0;
+    wifiFailStreak = 0;
+    keepWaitingCount = 0;
+    lastStatus = null;
     claimingSlow.classList.add('hidden');
     setChecklist(1, 'Telling your access point where to find HeidiFi.');
 
@@ -533,12 +539,9 @@
     }
 
     claim = res.data;
-    renderProgress(claim.phase, claim.wifiApplied);
-    if (claim.phase === 'connected' && claim.wifiApplied) {
-      showDone();
-      return;
-    }
-    schedulePoll(claim.retryAfterSeconds);
+    lastStatus = res.data;
+    if (!applyProgress(res.data)) return;
+    schedulePoll(res.data.retryAfterSeconds);
   }
 
   // ── Progress ────────────────────────────────────────────────────────────────
@@ -552,31 +555,30 @@
     claimingDetail.textContent = detail;
   }
 
-  function renderProgress(phase: AdoptionPhase, wifiApplied: boolean): void {
-    if (wifiApplied) {
-      setChecklist(4, 'Your WiFi network is on.');
-      return;
+  /**
+   * Feed one status response through the progress model (progress.js, loaded before this
+   * script) and act on it. Returns false when the flow reached a terminal screen — done or
+   * an error — so callers know not to schedule another poll.
+   */
+  function applyProgress(s: AdoptionStatus | AdoptionClaim): boolean {
+    if (s.phase === 'connected' && s.reason === 'wifi_apply_failed') wifiFailStreak += 1;
+    else wifiFailStreak = 0;
+
+    const action = progressModel(s, wifiFailStreak);
+    if (action.kind === 'done') {
+      // Let the last dot actually turn green before the panel swaps — the checklist
+      // otherwise ends on a spinner even when everything worked.
+      setChecklist(5, 'Your WiFi network is on.');
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
+      pollTimer = window.setTimeout(() => showDone(true), 800);
+      return false;
     }
-    switch (phase) {
-      case 'waiting_for_device':
-        setChecklist(
-          2,
-          'Your access point is starting up and calling home. This usually takes about a minute.',
-        );
-        break;
-      case 'pending':
-        setChecklist(2, 'It’s checking in now.');
-        break;
-      case 'adopting':
-        setChecklist(3, 'Almost there — applying your settings.');
-        break;
-      case 'connected':
-        setChecklist(4, 'Setting up your WiFi network.');
-        break;
-      case 'offline':
-        setChecklist(2, 'We’ve lost contact with it. Check that it still has power.');
-        break;
+    if (action.kind === 'error') {
+      showAdoptionError({ ok: false, code: action.code });
+      return false;
     }
+    setChecklist(action.step, action.detail);
+    return true;
   }
 
   function schedulePoll(seconds: number): void {
@@ -585,9 +587,16 @@
   }
 
   async function poll(): Promise<void> {
-    if (!accountCode || !selectedMac) return;
+    if (!accountCode || !selectedMac) {
+      // Should be unreachable — both are set before the first poll — but returning silently
+      // here would leave the claiming screen spinning with no timer. Fail loudly instead.
+      showAdoptionError({ ok: false, code: 'SERVER_ERROR' });
+      return;
+    }
     const elapsed = Date.now() - claimStartedAt;
-    if (elapsed > CLAIM_TIMEOUT_MS) {
+    // A first-boot firmware upgrade gets a longer leash than the normal three minutes —
+    // interrupting one with "taking longer than usual" invites the power-cycle that bricks it.
+    if (elapsed > pollDeadlineMs(lastStatus?.reason)) {
       showAdoptionError({ ok: false, code: 'CLAIM_TIMEOUT' });
       return;
     }
@@ -597,33 +606,34 @@
     if (!res.ok) {
       // A slow or briefly unreachable server during provisioning is NOT a failure — the
       // access point is already registered and adopting. Keep waiting and let the overall
-      // three-minute deadline decide, which lands on "this is taking longer than usual"
-      // rather than "something went wrong at our end". Only a genuinely unexpected reply
-      // counts toward giving up early.
+      // deadline decide, which lands on "this is taking longer than usual" rather than
+      // "something went wrong at our end". Only a genuinely unexpected reply counts toward
+      // giving up early.
       const transient = res.code === 'OFFLINE' || res.code === 'TIMEOUT' || res.code === 'RATE_LIMITED';
       if (!transient && ++pollFailures >= MAX_POLL_FAILURES) {
         showAdoptionError(res);
         return;
       }
-      schedulePoll(transient ? 5 : 3);
+      // A rate-limited poll says how long to back off; retrying sooner just re-triggers it.
+      const wait = res.code === 'RATE_LIMITED' ? res.retryAfterSeconds ?? 5 : transient ? 5 : 3;
+      schedulePoll(wait);
       return;
     }
 
     pollFailures = 0;
-    renderProgress(res.data.phase, res.data.wifiApplied);
-    if (res.data.phase === 'connected' && res.data.wifiApplied) {
-      showDone();
-      return;
-    }
+    lastStatus = res.data;
+    if (!applyProgress(res.data)) return;
     schedulePoll(res.data.retryAfterSeconds);
   }
 
-  function showDone(): void {
+  function showDone(wifiOn: boolean): void {
     if (pollTimer !== null) window.clearTimeout(pollTimer);
     pollTimer = null;
     const c = claim;
+    // wifiOn comes from the status that finished the flow, not from the claim response —
+    // the claim almost always predates the WiFi apply, so its own flag is stale by now.
     doneMessage.textContent = c
-      ? fill(c.wifiApplied ? COPY.doneMessage : COPY.doneNoWifi, {
+      ? fill(wifiOn ? COPY.doneMessage : COPY.doneNoWifi, {
           ap: c.apName,
           ssid: c.ssid,
           venue: c.venueName,
@@ -791,6 +801,24 @@
       primary: 'keep-waiting',
       secondary: 'dashboard',
     },
+    DEVICE_OFFLINE: {
+      title: 'We’ve lost contact with your access point',
+      message:
+        'It stopped answering. Check that it still has power and that its network cable is ' +
+        'firmly plugged in — it reconnects on its own once it’s back. If you just moved or ' +
+        'restarted it, give it a minute and keep waiting.',
+      primary: 'keep-waiting',
+      secondary: 'dashboard',
+    },
+    WIFI_STUCK: {
+      title: 'It’s connected, but the WiFi isn’t on yet',
+      message:
+        'Your access point is set up and registered — only the WiFi network is still ' +
+        'switching on, and HeidiFi keeps retrying automatically. Check your dashboard in ' +
+        'ten minutes, and email {support} if it still isn’t broadcasting.',
+      primary: 'dashboard',
+      secondary: 'keep-waiting',
+    },
     SERVER_ERROR: {
       title: 'Something went wrong at our end',
       message:
@@ -831,8 +859,18 @@
         void api.openExternal(dashboardUrl);
         break;
       case 'keep-waiting':
+        keepWaitingCount += 1;
+        if (keepWaitingCount > KEEP_WAITING_MAX) {
+          // Two extensions is close to ten minutes of watching a spinner. From here the
+          // server's own 5-minute sweep finishes the job without this app, so the honest
+          // move is the "still switching on, check your dashboard" screen — not another
+          // round of the person on the ladder staring at a dot.
+          showDone(false);
+          break;
+        }
         claimStartedAt = Date.now();
         pollFailures = 0;
+        wifiFailStreak = 0;
         claimingSlow.classList.add('hidden');
         show('claiming');
         schedulePoll(3);
