@@ -624,8 +624,16 @@
         showAdoptionError(res);
         return;
       }
-      // A rate-limited poll says how long to back off; retrying sooner just re-triggers it.
-      const wait = res.code === 'RATE_LIMITED' ? res.retryAfterSeconds ?? 5 : transient ? 5 : 3;
+      // A rate-limited poll says how long to back off — but capped at something a person
+      // watching this screen can survive: blocked requests are not charged server-side, so
+      // probing again early is free. And time spent waiting out a limit must not burn the
+      // provision deadline, or a long cooldown converts into a bogus "taking longer than
+      // usual" while the adoption is actually finishing fine.
+      let wait = transient ? 5 : 3;
+      if (res.code === 'RATE_LIMITED') {
+        wait = Math.min(res.retryAfterSeconds ?? 5, 15);
+        claimStartedAt += wait * 1000;
+      }
       schedulePoll(wait);
       return;
     }
