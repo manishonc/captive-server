@@ -3,6 +3,7 @@ import * as path from 'path';
 import { registerIpc } from './ipc';
 import { effectiveConfig } from './config-store';
 import { log } from './lib/log';
+import { isAllowedExternal } from './lib/external-url';
 
 let win: BrowserWindow | null = null;
 
@@ -24,7 +25,9 @@ function createWindow(): void {
     },
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url === config.homeUrl) shell.openExternal(url);
+    // Same allowlist as the openExternal IPC handler — a dashboard deep link opened via
+    // target=_blank would otherwise be silently swallowed here.
+    if (isAllowedExternal(url, [config.homeUrl, config.dashboardUrl])) shell.openExternal(url);
     return { action: 'deny' };
   });
   win.on('closed', () => {

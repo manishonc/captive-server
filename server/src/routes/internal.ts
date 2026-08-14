@@ -21,6 +21,8 @@ import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostic
 import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
 import { adoptDevice } from '../services/unifi';
 import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../services/unifiAdoption';
+import { adoptionCodeStorageReady, ensureAccountCode, rotateAccountCode } from '../services/adoptionCodes';
+import { accountCodeSubsystemReady } from '../services/accountCode';
 import {
   sendBroadcast,
   pauseCampaign,
@@ -330,6 +332,59 @@ router.post('/unifi/adopt-if-pending', async (req: Request, res: Response) => {
   }
   const result = await adoptRegisteredPendingDevices({ onlyMacs: [mac] });
   return res.json({ ok: true, result });
+});
+
+// ── AP Adoption account codes (called server-to-server by the CMS) ──
+// The CMS authenticates the tenant and checks `accesspoint.create` (and, for rotate,
+// owner/admin) before calling these. Both return the code IN PLAINTEXT, which is the
+// point — the tenant has to read it off their dashboard and type it into the Adoption
+// Helper. That is also why these live behind the internal secret and not on /adoption.
+
+/** Guard both endpoints on the two keys the subsystem cannot work without. */
+function requireAdoptionCodeConfig(res: Response): boolean {
+  if (!accountCodeSubsystemReady()) {
+    res.status(503).json({ ok: false, error: 'ADOPTION_CODE_PEPPER is not configured on the server.' });
+    return false;
+  }
+  if (!adoptionCodeStorageReady()) {
+    res.status(503).json({ ok: false, error: 'ADOPTION_CODE_ENCRYPTION_KEY is not configured on the server.' });
+    return false;
+  }
+  return true;
+}
+
+/** The tenant's setup code, minting one on first request. Idempotent. */
+router.post('/adoption/code', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  if (!requireAdoptionCodeConfig(res)) return;
+  const { tenantUserId } = req.body || {};
+  if (!tenantUserId || typeof tenantUserId !== 'string') {
+    return res.status(400).json({ ok: false, error: 'tenantUserId is required' });
+  }
+  try {
+    const view = await ensureAccountCode(tenantUserId);
+    return res.json({ ok: true, ...view });
+  } catch (err) {
+    console.error('[INTERNAL adoption/code]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'code lookup failed' });
+  }
+});
+
+/** Replace the tenant's code. The old one keeps working for a 24h grace window. */
+router.post('/adoption/code/rotate', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  if (!requireAdoptionCodeConfig(res)) return;
+  const { tenantUserId } = req.body || {};
+  if (!tenantUserId || typeof tenantUserId !== 'string') {
+    return res.status(400).json({ ok: false, error: 'tenantUserId is required' });
+  }
+  try {
+    const view = await rotateAccountCode(tenantUserId);
+    return res.json({ ok: true, ...view });
+  } catch (err) {
+    console.error('[INTERNAL adoption/code/rotate]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'rotate failed' });
+  }
 });
 
 // ── Campaign Manager (called server-to-server by the CMS) ──

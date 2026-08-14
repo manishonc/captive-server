@@ -18,6 +18,9 @@ import { startCampaignScheduler } from './jobs/campaignScheduler';
 import { channelConfigured, VERIFICATION_CHANNELS } from './services/verificationConfig';
 import { verificationSubsystemReady } from './services/verificationToken';
 import { portalSecretConfigured } from './services/clientIp';
+import adoptionRoutes from './routes/adoption';
+import { accountCodeSubsystemReady } from './services/accountCode';
+import { adoptionCodeStorageReady } from './services/adoptionCodes';
 
 const app = express();
 const PORT = 4000;
@@ -36,6 +39,8 @@ app.use('/t', trackingRoutes);
 app.use('/u', unsubscribeRoutes);
 app.use('/internal', internalRoutes);
 app.use('/verify', verifyRoutes);
+// Public, authenticated by the tenant's setup code rather than a session — see the router.
+app.use('/adoption', adoptionRoutes);
 // Public, unauthenticated pricing feed for the marketing site (api.heidifi.ai).
 app.use('/public', publicPricingRoutes);
 
@@ -70,9 +75,26 @@ function logVerificationReadiness(): void {
   }
 }
 
+/**
+ * Self-serve AP adoption needs two keys. Say so at boot rather than letting a tenant
+ * discover it when the CMS shows them an error instead of their setup code.
+ */
+function logAdoptionReadiness(): void {
+  const missing: string[] = [];
+  if (!accountCodeSubsystemReady()) missing.push('ADOPTION_CODE_PEPPER');
+  if (!adoptionCodeStorageReady()) missing.push('ADOPTION_CODE_ENCRYPTION_KEY');
+  if (missing.length) {
+    console.warn(
+      `[ADOPTION] Self-serve setup codes disabled: set ${missing.join(' and ')}. `
+      + 'Access points must be added from the CMS and adopted by an admin until then.',
+    );
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
   logVerificationReadiness();
+  logAdoptionReadiness();
   startApMonitor();
   startCampaignScheduler();
 });

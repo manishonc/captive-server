@@ -1,13 +1,12 @@
 # HeidiFi AP Adoption Helper
 
-A one-click desktop app for venue staff: plug in a new UniFi access point,
-click **Find my device**, click **Send adoption request**, done. The HeidiFi
-team then approves ("adopts") the access point centrally on the UniFi
-controller — the person on site never touches a terminal, SSH, or network
-settings.
+A desktop app for venue staff: plug in a new UniFi access point, click **Find
+my device**, enter the account's **setup code**, pick the location and WiFi
+name, and the access point is live in a couple of minutes. Nobody at HeidiFi has
+to approve anything, and the person on site never touches a terminal, SSH, or
+network settings.
 
-Under the hood it automates the proven manual recipe (see
-`../docs/ap-adoption-helper-prompt.md`):
+Under the hood (see `../docs/ap-adoption-helper-prompt.md`):
 
 1. **Discover** UniFi devices on the local network via the Ubiquiti discovery
    protocol — UDP probes (v1 + v2) to port `10001` broadcast from every active
@@ -16,6 +15,17 @@ Under the hood it automates the proven manual recipe (see
 2. **Send the adoption request** over SSH (`ubnt`/`ubnt`, legacy `ssh-rsa`
    algorithms): `mca-cli-op set-inform http://34.116.224.72:8085/inform`, with
    a bare `set-inform` fallback for older firmware.
+3. **Claim it** against `https://api.heidifi.ai/adoption/*` using the setup
+   code: the server creates the access point, adopts the device on the
+   controller, and applies the venue's WiFi, while the app polls for progress.
+
+The setup code alone is not enough to register hardware — the server only
+accepts a claim for a device already informing our controller, so the caller has
+to be physically on its network. A leaked code cannot be used remotely.
+
+**Without a code** the app falls back to its original behaviour: send the
+set-inform and let a HeidiFi admin adopt it. That path still works, so older
+installed copies of this app keep functioning.
 
 > **Note the non-standard inform port `8085`** — our controller runs behind
 > Coolify where host port 8080 is taken. Do not "fix" it to 8080.
@@ -53,8 +63,16 @@ so both OSes will warn on first launch:
 1. Plug the access point into power and network through its **PoE
    injector/switch**, on the **same network** as your computer.
 2. Wait about a minute for the access point to start (steady light).
-3. Open the app → **Find my device** → select the device → **Send adoption
-   request** → ✅ done. The HeidiFi team approves it from the controller.
+3. Open the app → **Find my device** → select the device → **Continue**.
+4. Enter the **setup code** from the HeidiFi dashboard (under *Add access
+   point*). It looks like `H7K2-M9QX`.
+5. Choose the location, check the WiFi network name, and click **Set up my
+   access point**. Wait one to two minutes — leave the app open and the access
+   point plugged in — then ✅ done.
+
+If the location already has a WiFi network, its name is shown but locked.
+Changing it renames the network for the whole location and drops every guest
+who is connected, so it takes an explicit **Change the name** click.
 
 ### Troubleshooting
 
@@ -65,11 +83,19 @@ so both OSes will warn on first launch:
 | "The access point didn't accept the request" | The firmware has neither `mca-cli-op set-inform` nor `set-inform`. Open **Advanced**, **Copy log**, and send it to the administrator; the AP likely needs a firmware update. |
 | "Management server unreachable" chip in Advanced | This site can't reach the controller — check the venue's internet/firewall. The adoption request is still attempted (the AP, not this computer, ultimately connects). |
 | App shows nothing / scan instantly empty | The OS blocked UDP broadcast — see the Local Network / Firewall notes above. |
+| "We don't recognise that code" | Codes never contain the letters **I**, **L** or **O**, or the numbers **0** or **1** — a mis-read `O` for `Q` is the usual cause. Copy it from the dashboard rather than typing it. |
+| "This access point is already in HeidiFi" | It is already registered to this account. If its WiFi never appeared, use **It's not working — set it up again**, which is safe to re-run. |
+| "This access point belongs to another account" | Registered to a different HeidiFi account. Email `hello@swissopenai.com` to have it released. |
+| "This is taking longer than usual" | Not a failure — the access point is registered and still provisioning. A firmware upgrade on first adoption can take 5–15 minutes. Leave it plugged in; it finishes on its own and the dashboard will show it. |
+| "This app isn't set up safely" | The API address under **Advanced** is not `https://`. The setup code is a credential and the app refuses to send it in the clear. |
 
 ## Advanced panel
 
 - **Controller inform URL** — point the app at a different/custom controller
   (persisted on this machine; leave empty to use the built-in default).
+- **HeidiFi API address** — for staging or a self-hosted captive-server. Must be
+  `https://` (localhost excepted for development). The setup code itself is
+  never persisted, in this file or anywhere else.
 - **AP SSH password** — for APs that were previously managed and no longer
   accept `ubnt`. Stored in plain text in the app's user-data folder; the
   default `ubnt` is public anyway, so only set this if you must.
@@ -129,7 +155,15 @@ gh release create ap-adoption-helper-v1.0.0 \
 ## Field validation checklist (real AP)
 
 - [ ] Factory-reset AP on the venue LAN is found by **Find my device**
-- [ ] **Send adoption request** returns success
-- [ ] AP appears as "Pending adoption" on the controller
-      (`https://34.116.224.72:8443`) and can be adopted
+- [ ] A valid setup code is accepted and lists the account's locations
+- [ ] A code with a mis-read `O`/`0` is rejected with the mix-up hint
+- [ ] **Set up my access point** creates the AP, adopts it, and the SSID is
+      broadcasting — end to end, without anyone touching the controller
+- [ ] A **second** AP at the same venue joins the existing WiFi, and the SSID
+      field is locked until explicitly unlocked
+- [ ] Re-scanning an already-registered AP shows "already in HeidiFi" rather
+      than letting it be claimed twice
+- [ ] Closing the app mid-provision still results in working WiFi within ~5
+      minutes (the `reconcilePendingWifi` cron backstop)
+- [ ] **I don't have a code** still sends a plain set-inform for admin approval
 - [ ] Previously-adopted AP correctly triggers the factory-reset message
