@@ -14,9 +14,10 @@
  */
 
 import {
+  classifyAdoption,
   classifyAdoptionPhase,
   controllerDeviceName,
-  isTerminalPhase,
+  isAdoptionDone,
   retryAfterSeconds,
 } from '../src/services/adoptionStatus';
 
@@ -70,10 +71,63 @@ test('state 4 (firmware upgrade) is adopting, not offline', () => {
   assertEqual(classifyAdoptionPhase({ state: 4, adopted: true }), 'adopting');
 });
 
-test('an unrecognised non-zero state is adopting, not a failure', () => {
-  // Better to show continued progress for an unknown transient state than to declare a
-  // failure at a device that is mid-provision.
-  assertEqual(classifyAdoptionPhase({ state: 11, adopted: true }), 'adopting');
+test('state 7 (adopting) is adopting', () => {
+  assertEqual(classifyAdoptionPhase({ state: 7, adopted: true }), 'adopting');
+});
+
+test('actively-working states have NO time cutoff', () => {
+  // A slow firmware download is still progress; only the can't-reach-it states go offline.
+  assertEqual(classifyAdoptionPhase({ state: 4, adopted: true }, T0, T0 + 30 * 60_000), 'adopting');
+  assertEqual(classifyAdoptionPhase({ state: 5, adopted: true }, T0, T0 + 30 * 60_000), 'adopting');
+});
+
+console.log('\nthe can\'t-reach-it states — heartbeat missed, isolated, unknown');
+
+test('heartbeat missed (6) is adopting within the grace window, offline past it', () => {
+  // This was the stuck-forever bug: 6 used to fall through to "adopting" with no limit,
+  // so an adopted-but-unreachable device spun on "connecting" until the client timed out.
+  assertEqual(classifyAdoption({ state: 6, adopted: true }, T0, T0 + 30_000), {
+    phase: 'adopting',
+    reason: 'heartbeat_missed',
+    deviceState: 6,
+  });
+  assertEqual(classifyAdoption({ state: 6, adopted: true }, T0, T0 + 11 * 60_000), {
+    phase: 'offline',
+    reason: 'heartbeat_missed',
+    deviceState: 6,
+  });
+});
+
+test('heartbeat missed with no adopt of ours is offline, not waiting', () => {
+  // States 6/11 can only exist for a device the controller once held — unlike state 0,
+  // there is no "hasn't checked in yet" reading to fall back to.
+  assertEqual(classifyAdoptionPhase({ state: 6, adopted: true }), 'offline');
+});
+
+test('isolated (11) behaves like heartbeat missed, with its own reason', () => {
+  assertEqual(classifyAdoption({ state: 11, adopted: true }, T0, T0 + 30_000), {
+    phase: 'adopting',
+    reason: 'isolated',
+    deviceState: 11,
+  });
+  assertEqual(classifyAdoption({ state: 11, adopted: true }, T0, T0 + 11 * 60_000).phase, 'offline');
+});
+
+test('adoption failed (10) is offline immediately — waiting will not fix it', () => {
+  assertEqual(classifyAdoption({ state: 10, adopted: true }, T0, T0 + 5_000), {
+    phase: 'offline',
+    reason: 'adopt_failed',
+    deviceState: 10,
+  });
+});
+
+test('an unrecognised non-zero state gets the grace window, then offline', () => {
+  assertEqual(classifyAdoption({ state: 3, adopted: true }, T0, T0 + 30_000), {
+    phase: 'adopting',
+    reason: 'unknown_state',
+    deviceState: 3,
+  });
+  assertEqual(classifyAdoption({ state: 3, adopted: true }, T0, T0 + 11 * 60_000).phase, 'offline');
 });
 
 console.log('\nconnected');
@@ -83,12 +137,13 @@ test('state 1 is connected regardless of the adopted flag', () => {
   assertEqual(classifyAdoptionPhase({ state: 1 }), 'connected');
 });
 
-test('connected is the only terminal phase', () => {
-  assertEqual(isTerminalPhase('connected'), true);
-  assertEqual(isTerminalPhase('adopting'), false);
-  assertEqual(isTerminalPhase('pending'), false);
-  assertEqual(isTerminalPhase('waiting_for_device'), false);
-  assertEqual(isTerminalPhase('offline'), false);
+test('done means connected AND WiFi applied — never one without the other', () => {
+  assertEqual(isAdoptionDone('connected', true), true);
+  assertEqual(isAdoptionDone('connected', false), false);
+  assertEqual(isAdoptionDone('adopting', true), false);
+  assertEqual(isAdoptionDone('pending', true), false);
+  assertEqual(isAdoptionDone('waiting_for_device', true), false);
+  assertEqual(isAdoptionDone('offline', true), false);
 });
 
 console.log('\nstate 0 — the reboot-versus-dead distinction');

@@ -21,6 +21,7 @@ import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostic
 import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
 import { adoptDevice } from '../services/unifi';
 import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../services/unifiAdoption';
+import { adoptionProgress } from '../services/apProvisioning';
 import { adoptionCodeStorageReady, ensureAccountCode, rotateAccountCode } from '../services/adoptionCodes';
 import { accountCodeSubsystemReady } from '../services/accountCode';
 import {
@@ -390,6 +391,31 @@ router.post('/adoption/code/rotate', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[INTERNAL adoption/code/rotate]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'rotate failed' });
+  }
+});
+
+/**
+ * A tenant's recent self-serve adoptions, classified live against the controller — powers
+ * the dashboard's "Add Access Point" progress view. Keyed by tenant (+ optional venue)
+ * because the dashboard has no MAC until the helper registers the device. No
+ * requireAdoptionCodeConfig: this reads AP documents, not codes.
+ */
+router.post('/adoption/progress', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { tenantUserId, venueId, sinceMs } = req.body || {};
+  if (!tenantUserId || typeof tenantUserId !== 'string') {
+    return res.status(400).json({ ok: false, error: 'tenantUserId is required' });
+  }
+  try {
+    const result = await adoptionProgress({
+      tenantUserId,
+      venueId: typeof venueId === 'string' && venueId ? venueId : undefined,
+      sinceMs: Number.isFinite(Number(sinceMs)) && Number(sinceMs) > 0 ? Number(sinceMs) : undefined,
+    });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[INTERNAL adoption/progress]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'progress lookup failed' });
   }
 });
 

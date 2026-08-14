@@ -17,9 +17,12 @@
  *   provision — the single worst thing to show a person standing on a ladder.
  *
  * UniFi device states seen in practice: 0 disconnected, 1 connected, 2 pending adoption,
- * 4 upgrading, 5 provisioning, 6 heartbeat missed, 11 isolated. Only 1 means "done"; the
- * mid-adoption values are treated as one 'adopting' phase because the distinction between
- * them means nothing to a venue employee.
+ * 4 upgrading, 5 provisioning, 6 heartbeat missed, 7 adopting, 10 adoption failed,
+ * 11 isolated. Only 1 means "done". Actively-working states (4/5/7) stay 'adopting' with no
+ * time limit — a slow firmware download is still progress — while the can't-reach-it states
+ * (0/6/11 and anything unknown) only count as 'adopting' inside a grace window after our
+ * adopt command; past it they are 'offline'. The wire phase stays a five-value enum for old
+ * clients; the `reason` field carries the finer distinction for clients that can use it.
  */
 
 /** Just the fields we read — the controller sends far more. */
@@ -40,42 +43,94 @@ export type AdoptionPhase =
   /** Adopted, but the controller has since lost it. */
   | 'offline';
 
-/** How long a device may sit at state 0 after an adopt before we call it offline. */
+/** How long a can't-reach-it state may persist after an adopt before we call it offline. */
 const OFFLINE_GRACE_MS = 10 * 60_000;
+
+/**
+ * Why a device is stuck in its current phase — the actionable detail underneath the
+ * five-value wire phase. Extra members beyond the classifier's own output exist for the
+ * status endpoint to report conditions the classifier cannot see (controller down, WiFi
+ * apply failing, MAC not registered).
+ */
+export type AdoptionStallReason =
+  | 'provisioning'
+  | 'upgrading'
+  | 'heartbeat_missed'
+  | 'isolated'
+  | 'adopt_failed'
+  | 'disconnected'
+  | 'unknown_state'
+  | 'controller_unreachable'
+  | 'wifi_apply_failed'
+  | 'not_registered';
+
+export interface AdoptionClassification {
+  phase: AdoptionPhase;
+  reason: AdoptionStallReason | null;
+  /** Raw controller `state`, or null when there is no row / the state is junk. */
+  deviceState: number | null;
+}
 
 /**
  * @param row              the device's `stat/device` entry, or null when absent entirely
  * @param adoptRequestedAt epoch ms of our adopt command, or null if we never sent one
  */
+export function classifyAdoption(
+  row: DeviceStateRow | null | undefined,
+  adoptRequestedAt: number | null = null,
+  now: number = Date.now(),
+): AdoptionClassification {
+  if (!row) return { phase: 'waiting_for_device', reason: null, deviceState: null };
+
+  const state = Number(row.state);
+  const adopted = row.adopted;
+  const deviceState = Number.isNaN(state) ? null : state;
+
+  if (state === 1) return { phase: 'connected', reason: null, deviceState };
+
+  // `adopted === false` is authoritative when the controller sends it; state 2 is the
+  // fallback for firmware that omits the flag. Mirrors isPendingDevice's precedence.
+  if (adopted === false) return { phase: 'pending', reason: null, deviceState };
+  if (state === 2 && adopted !== true) return { phase: 'pending', reason: null, deviceState };
+
+  // Actively working: no time cutoff. A device mid-provision or mid-upgrade is making
+  // progress however long it takes, and calling it offline would tell the person on the
+  // ladder to power-cycle at the worst possible moment.
+  if (state === 5 || state === 7) return { phase: 'adopting', reason: 'provisioning', deviceState };
+  if (state === 4) return { phase: 'adopting', reason: 'upgrading', deviceState };
+
+  // Adoption failed outright — waiting will not fix it, so no grace window.
+  if (state === 10) return { phase: 'offline', reason: 'adopt_failed', deviceState };
+
+  // Everything else means the controller cannot currently talk to the device: 0
+  // disconnected, 6 heartbeat missed, 11 isolated, or something we have never seen.
+  // Right after our adopt that is normal — the device drops while it reboots into the
+  // controller's config — so within the grace window it still counts as 'adopting'.
+  const withinGrace = adoptRequestedAt !== null && now - adoptRequestedAt < OFFLINE_GRACE_MS;
+  const reason: AdoptionStallReason =
+    state === 6 ? 'heartbeat_missed'
+    : state === 11 ? 'isolated'
+    : state === 0 || deviceState === null ? 'disconnected'
+    : 'unknown_state';
+
+  if (withinGrace) return { phase: 'adopting', reason, deviceState };
+
+  // With no adopt on record, a disconnected-looking row is indistinguishable from a device
+  // that simply hasn't checked in yet — keep the pre-adopt phase for 0/NaN. States 6/11
+  // can only exist for a device the controller once held, so those are offline regardless.
+  if ((state === 0 || deviceState === null) && adoptRequestedAt === null) {
+    return { phase: 'waiting_for_device', reason: null, deviceState };
+  }
+  return { phase: 'offline', reason, deviceState };
+}
+
+/** Back-compat wrapper for callers that only need the wire phase. */
 export function classifyAdoptionPhase(
   row: DeviceStateRow | null | undefined,
   adoptRequestedAt: number | null = null,
   now: number = Date.now(),
 ): AdoptionPhase {
-  if (!row) return 'waiting_for_device';
-
-  const state = Number(row.state);
-  const adopted = row.adopted;
-
-  if (state === 1) return 'connected';
-
-  // `adopted === false` is authoritative when the controller sends it; state 2 is the
-  // fallback for firmware that omits the flag. Mirrors isPendingDevice's precedence.
-  if (adopted === false) return 'pending';
-  if (state === 2 && adopted !== true) return 'pending';
-
-  // Adopted but not yet connected: provisioning (5), upgrading (4), or anything else
-  // transient. Grouped, because "upgrading firmware" vs "provisioning" is not a
-  // distinction the person on site can act on.
-  if (state === 0 || Number.isNaN(state)) {
-    // A device that has gone quiet. Only call it offline once our adopt has had time to
-    // land — immediately after the command it is normal for the device to drop while it
-    // reboots into the controller's config.
-    if (adoptRequestedAt !== null && now - adoptRequestedAt < OFFLINE_GRACE_MS) return 'adopting';
-    return adoptRequestedAt === null ? 'waiting_for_device' : 'offline';
-  }
-
-  return 'adopting';
+  return classifyAdoption(row, adoptRequestedAt, now).phase;
 }
 
 /**
@@ -89,9 +144,79 @@ export function retryAfterSeconds(elapsedMs: number): number {
   return 10;
 }
 
-/** Terminal phases — the client stops polling on these. */
-export function isTerminalPhase(phase: AdoptionPhase): boolean {
-  return phase === 'connected';
+/**
+ * The single definition of "adoption finished": connected AND the guest WiFi applied.
+ * Clients stop polling on this, not on the bare phase.
+ */
+export function isAdoptionDone(phase: AdoptionPhase, wifiApplied: boolean): boolean {
+  return phase === 'connected' && wifiApplied;
+}
+
+/** An AP document's adoption-relevant fields, flattened for {@link summarizeAdoptionProgress}. */
+export interface AdoptionProgressInput {
+  apId: string;
+  apName?: string;
+  venueId?: string;
+  /** Canonical MAC as produced by canonMac — must match the device-row map's keys. */
+  mac: string;
+  adoptionState?: string;
+  adoptionRequestedAt: number | null;
+  createdAt: number | null;
+  wifiApplied: boolean;
+  lastError?: string | null;
+}
+
+/** One access point's row in the dashboard's live adoption view. */
+export interface AdoptionProgressEntry {
+  apId: string;
+  apName: string | null;
+  venueId: string | null;
+  mac: string;
+  adoptionState: string | null;
+  phase: AdoptionPhase;
+  reason: AdoptionStallReason | null;
+  wifiApplied: boolean;
+  done: boolean;
+  createdAt: string | null;
+  adoptionRequestedAt: string | null;
+  deviceState: number | null;
+  lastError: string | null;
+}
+
+/**
+ * Classify a tenant's self-serve APs against the controller's device list, newest first.
+ * Pure, like the classifier — the caller supplies the Firestore rows and the device map.
+ */
+export function summarizeAdoptionProgress(
+  aps: AdoptionProgressInput[],
+  deviceRows: Map<string, DeviceStateRow>,
+  now: number = Date.now(),
+): AdoptionProgressEntry[] {
+  const toIso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
+  return aps
+    .map((ap) => {
+      const cls = classifyAdoption(deviceRows.get(ap.mac) ?? null, ap.adoptionRequestedAt, now);
+      // Connected but the WiFi step keeps failing — that detail lives on the AP doc, not
+      // in the controller row, so the classifier can't see it.
+      const reason: AdoptionStallReason | null =
+        cls.phase === 'connected' && !ap.wifiApplied && ap.lastError ? 'wifi_apply_failed' : cls.reason;
+      return {
+        apId: ap.apId,
+        apName: ap.apName?.trim() || null,
+        venueId: ap.venueId || null,
+        mac: ap.mac,
+        adoptionState: ap.adoptionState || null,
+        phase: cls.phase,
+        reason,
+        wifiApplied: ap.wifiApplied,
+        done: isAdoptionDone(cls.phase, ap.wifiApplied),
+        createdAt: toIso(ap.createdAt),
+        adoptionRequestedAt: toIso(ap.adoptionRequestedAt),
+        deviceState: cls.deviceState,
+        lastError: ap.lastError || null,
+      };
+    })
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
 /** UniFi truncates long aliases in the Devices list; keep the useful part visible. */
