@@ -634,6 +634,10 @@
       if (res.code === 'RATE_LIMITED') {
         wait = Math.min(res.retryAfterSeconds ?? 5, 15);
         claimStartedAt += wait * 1000;
+        // Say so — otherwise the screen silently shows the last successful status for as
+        // long as the cooldown lasts, which reads as "stuck".
+        claimingDetail.textContent =
+          'Checking a little less often for a moment — still watching your access point.';
       }
       schedulePoll(wait);
       return;
