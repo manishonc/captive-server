@@ -15,6 +15,7 @@
 
 import {
   classifyAdoptionPhase,
+  controllerDeviceName,
   isTerminalPhase,
   retryAfterSeconds,
 } from '../src/services/adoptionStatus';
@@ -122,6 +123,49 @@ test('backs off as the wait lengthens', () => {
   assertEqual(retryAfterSeconds(59_000), 3);
   assertEqual(retryAfterSeconds(60_000), 10);
   assertEqual(retryAfterSeconds(10 * 60_000), 10);
+});
+
+console.log('\ncontrollerDeviceName — telling one tenant\'s U6 Pro from another\'s');
+
+test('combines venue and access point name with a venue-id tag', () => {
+  assertEqual(
+    controllerDeviceName({ venueName: 'Cafe Rosa', apName: 'Main access point', venueId: 'Wy5nKlFXEW5bTFZ9JmIP' }),
+    'Cafe Rosa · Main access point (Wy5nKl)',
+  );
+});
+
+test('the tag matches the AP group name, so an admin can cross-reference', () => {
+  // AP groups are named venue-<venueId>; the tag is that id's prefix, which is how you get
+  // from a device row to the right group and WLAN without a database lookup.
+  const venueId = 'Wy5nKlFXEW5bTFZ9JmIP';
+  const name = controllerDeviceName({ venueName: 'X', apName: 'Y', venueId });
+  assertEqual(name.includes(venueId.slice(0, 6)), true);
+});
+
+test('two identically named venues still produce different aliases', () => {
+  // Venue display names are NOT unique across tenants — that is the whole reason the tag
+  // exists rather than just using the venue name.
+  const a = controllerDeviceName({ venueName: 'The Coffee House', apName: 'Main', venueId: 'aaaaaa1111' });
+  const b = controllerDeviceName({ venueName: 'The Coffee House', apName: 'Main', venueId: 'bbbbbb2222' });
+  if (a === b) throw new Error(`collision: ${a}`);
+});
+
+test('copes with missing pieces rather than rendering blanks', () => {
+  assertEqual(controllerDeviceName({ venueId: 'abc123xyz' }), 'HeidiFi access point (abc123)');
+  assertEqual(controllerDeviceName({ venueName: 'Cafe Rosa', venueId: 'abc123xyz' }), 'Cafe Rosa (abc123)');
+  assertEqual(controllerDeviceName({ apName: 'Lobby', venueId: 'abc123xyz' }), 'Lobby (abc123)');
+});
+
+test('truncates the label, never the tag', () => {
+  const name = controllerDeviceName({
+    venueName: 'A Very Long Venue Name That Goes On And On Forever',
+    apName: 'And An Equally Long Access Point Name',
+    venueId: 'abc123xyz',
+  });
+  assertEqual(name.length <= 64, true, 'length');
+  // The tag is what disambiguates, so it must survive.
+  assertEqual(name.endsWith('(abc123)'), true, 'tag preserved');
+  assertEqual(name.includes('…'), true, 'ellipsis marks the trim');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

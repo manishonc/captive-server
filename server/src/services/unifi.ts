@@ -13,6 +13,8 @@ const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 55 * 60 * 1000; // 55 min (controller sessions last ~1h)
 
 export interface UnifiDevice {
+  /** Controller-side document id — required to rename the device (`rest/device/{id}`). */
+  id?: string;
   mac: string;
   state: number;
   name?: string;
@@ -316,6 +318,7 @@ export async function authorizeGuest(config: UnifiConfig, clientMac: string, min
 export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
   const rows = ensureOk(await siteRequest(config, 'GET', 'stat/device'), 'stat/device');
   return rows.map((d: any) => ({
+    id: d._id,
     mac: normalizeMac(d.mac),
     state: Number(d.state),
     name: d.name,
@@ -391,6 +394,23 @@ export async function adoptDevice(config: UnifiConfig, mac: string): Promise<voi
     throw new Error(`UniFi adopt failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
   }
   console.log('[UNIFI] Adopt requested for', normalizeMac(mac), 'via', config.controllerUrl);
+}
+
+/**
+ * Set a device's controller-side alias (what the Devices list shows under Name).
+ *
+ * Without this every adopted access point displays as its model — "U6 Pro", "U6 Pro",
+ * "U6 Pro" — across every tenant on the shared site, so nobody looking at the controller can
+ * tell whose hardware they are looking at. That was survivable when adoption was a manual
+ * step performed by someone who already knew; it is not once tenants adopt their own.
+ *
+ * Best-effort by contract: a failure here is cosmetic and must never fail an adoption.
+ */
+export async function setDeviceName(config: UnifiConfig, deviceId: string, name: string): Promise<void> {
+  const res = await siteRequest(config, 'PUT', `rest/device/${deviceId}`, { name });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`UniFi rename failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  }
 }
 
 export async function getApGroups(config: UnifiConfig): Promise<UnifiApGroup[]> {

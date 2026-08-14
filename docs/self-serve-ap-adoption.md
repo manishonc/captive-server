@@ -51,6 +51,9 @@ scan LAN (UDP 10001)
                                                   ...then applyVenueWifi()
 ```
 
+Once the device reports `connected`, two things happen together: the venue's WiFi is applied,
+and the device is given a **controller-side alias** so it stops showing as its bare model.
+
 Backstop: `reconcilePendingWifi()` runs on the existing 5-minute `apMonitor` cron and finishes
 the WiFi step for any self-serve AP that reached `connected` without it — which is what covers
 the installer closing their laptop mid-provision.
@@ -65,6 +68,29 @@ nothing logged anywhere.
 
 So the WiFi is applied only once the device reports `state === 1`. The cron backstop is what
 makes that safe rather than merely optimistic.
+
+### Device naming on the controller
+
+Every adopted access point otherwise displays in the controller's Devices list as its model —
+a shared site full of rows all reading "U6 Pro", across every tenant, with no way to tell whose
+hardware is whose. Tolerable when a human adopted each device and already knew; not once
+tenants adopt their own.
+
+So on `connected` the device gets the alias:
+
+```
+Cafe Rosa · Main access point (Wy5nKl)
+```
+
+`Venue · AP name (venueId prefix)`. The tag is not decoration: venue display names are **not**
+unique across tenants — two tenants may both have "The Coffee House" — and it matches the
+`venue-<venueId>` AP group, so an admin can get from a device row to the right group and WLAN
+without a database lookup. When the label is too long the label is trimmed, never the tag.
+
+Best-effort and never throws: nothing in the product reads this alias, and an adoption must
+not fail because a rename did. It is skipped when already correct, so the cron does not rewrite
+the same value every five minutes. Renaming an access point in the CMS still does **not** push
+to the controller — that remains Firestore-only, as recorded in the multi-tenancy decision.
 
 ### Why a leaked code is not enough
 
