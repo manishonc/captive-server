@@ -4,62 +4,132 @@
       "collectionGroup": "CaptivePortal_Users",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "email", "order": "ASCENDING" },
-        { "fieldPath": "captivePortalAccessPointId", "order": "ASCENDING" }
+        {
+          "fieldPath": "email",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "captivePortalAccessPointId",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "CaptivePortal_Documents",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "scope", "order": "ASCENDING" },
-        { "fieldPath": "entityId", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "type", "order": "ASCENDING" }
+        {
+          "fieldPath": "scope",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "entityId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "type",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "CaptivePortal_Documents",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "scope", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "type", "order": "ASCENDING" }
-      ]
-    },
-
-    {
-      "collectionGroup": "CaptivePortal_Marketing",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "accessPointId", "order": "ASCENDING" },
-        { "fieldPath": "channel", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "CaptivePortal_Marketing",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "accessPointId", "order": "ASCENDING" },
-        { "fieldPath": "channel", "order": "ASCENDING" },
-        { "fieldPath": "deliveryStatus", "order": "ASCENDING" }
+        {
+          "fieldPath": "scope",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "type",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "CaptivePortal_Marketing",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "accessPointId", "order": "ASCENDING" },
-        { "fieldPath": "channel", "order": "ASCENDING" },
-        { "fieldPath": "templateMessageId", "order": "ASCENDING" }
+        {
+          "fieldPath": "accessPointId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "channel",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_Marketing",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "accessPointId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "channel",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "deliveryStatus",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_Marketing",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "accessPointId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "channel",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "templateMessageId",
+          "order": "ASCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "CaptivePortal_Sessions",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "accessPointId", "order": "ASCENDING" },
-        { "fieldPath": "wifiEvent", "order": "ASCENDING" }
+        {
+          "fieldPath": "accessPointId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "wifiEvent",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_AccessPoints",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "adoptionSource",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "wifiAppliedAt",
+          "order": "ASCENDING"
+        }
       ]
     }
   ],

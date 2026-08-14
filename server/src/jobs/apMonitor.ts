@@ -3,6 +3,7 @@ import { db } from '../firebase';
 import { FieldValue } from 'firebase-admin/firestore';
 import { sendApOfflineAlert, sendApRecoveryAlert } from '../services/brevo';
 import { adoptRegisteredPendingDevices } from '../services/unifiAdoption';
+import { reconcilePendingWifi } from '../services/apProvisioning';
 
 const BACK_ONLINE_GRACE_MS = 5 * 60_000;
 const ALERT_COOLDOWN_MS = 12 * 60 * 60_000; // 12 hours between offline alerts
@@ -81,6 +82,19 @@ export function startApMonitor(): void {
       }
     } catch (err) {
       console.error('[AP ADOPT] sweep error:', err);
+    }
+
+    // Finish the WiFi step for self-serve access points that were adopted but never had it
+    // applied. The WiFi apply is deliberately deferred until the device reports connected
+    // (an AP group written with a not-yet-adopted MAC can be silently dropped by the
+    // controller, leaving an SSID that broadcasts nowhere), and the installer's app polls
+    // for that — but only while it is open. This is what covers the laptop being closed
+    // mid-provision, and without it that venue's WiFi never comes up at all.
+    try {
+      const wifi = await reconcilePendingWifi();
+      if (wifi.applied > 0) console.log('[AP RECONCILE]', JSON.stringify(wifi));
+    } catch (err) {
+      console.error('[AP RECONCILE] error:', err);
     }
   });
   console.log('[AP MONITOR] Started — checking every 5 minutes');

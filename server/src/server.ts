@@ -18,6 +18,7 @@ import { startCampaignScheduler } from './jobs/campaignScheduler';
 import { channelConfigured, VERIFICATION_CHANNELS } from './services/verificationConfig';
 import { verificationSubsystemReady } from './services/verificationToken';
 import { portalSecretConfigured } from './services/clientIp';
+import adoptionRoutes from './routes/adoption';
 import { accountCodeSubsystemReady } from './services/accountCode';
 import { adoptionCodeStorageReady } from './services/adoptionCodes';
 
@@ -38,6 +39,8 @@ app.use('/t', trackingRoutes);
 app.use('/u', unsubscribeRoutes);
 app.use('/internal', internalRoutes);
 app.use('/verify', verifyRoutes);
+// Public, authenticated by the tenant's setup code rather than a session — see the router.
+app.use('/adoption', adoptionRoutes);
 // Public, unauthenticated pricing feed for the marketing site (api.heidifi.ai).
 app.use('/public', publicPricingRoutes);
 
