@@ -12,8 +12,12 @@ const SCAN_WINDOW_MS = 4000;
 
 /** The claim does controller work end to end, so it gets a longer leash than a read. */
 const CLAIM_TIMEOUT_MS = 45_000;
-/** Polled every 2-3s — a short timeout keeps slow polls from stacking up. */
-const STATUS_TIMEOUT_MS = 8_000;
+/**
+ * Polled every 2-3s. Generous rather than tight: each status call may dial the controller,
+ * whose own client allows 20s, and 8s here meant a merely slow controller produced a run of
+ * client-side timeouts that the UI reported as a server failure mid-provision.
+ */
+const STATUS_TIMEOUT_MS = 25_000;
 
 export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const send = (channel: string, payload: unknown) => {

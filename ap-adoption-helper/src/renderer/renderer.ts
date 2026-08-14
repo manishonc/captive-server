@@ -595,12 +595,17 @@
 
     const res = await api.adoptionStatus({ code: accountCode, mac: selectedMac });
     if (!res.ok) {
-      // Venue WiFi is unreliable; only a sustained run of failures is worth surfacing.
-      if (++pollFailures >= MAX_POLL_FAILURES) {
-        showAdoptionError({ ok: false, code: res.code === 'OFFLINE' ? 'OFFLINE' : 'SERVER_ERROR' });
+      // A slow or briefly unreachable server during provisioning is NOT a failure — the
+      // access point is already registered and adopting. Keep waiting and let the overall
+      // three-minute deadline decide, which lands on "this is taking longer than usual"
+      // rather than "something went wrong at our end". Only a genuinely unexpected reply
+      // counts toward giving up early.
+      const transient = res.code === 'OFFLINE' || res.code === 'TIMEOUT' || res.code === 'RATE_LIMITED';
+      if (!transient && ++pollFailures >= MAX_POLL_FAILURES) {
+        showAdoptionError(res);
         return;
       }
-      schedulePoll(3);
+      schedulePoll(transient ? 5 : 3);
       return;
     }
 
@@ -780,9 +785,9 @@
     CLAIM_TIMEOUT: {
       title: 'This is taking longer than usual',
       message:
-        'Your access point is registered — it just hasn’t finished connecting yet. Leave it ' +
-        'plugged in; it usually finishes on its own within ten minutes, and you can check on ' +
-        'your dashboard.',
+        'Your access point is registered and still finishing up — nothing has gone wrong. ' +
+        'Leave it plugged in; it completes on its own, usually within ten minutes, and your ' +
+        'WiFi will appear on your dashboard. A first-time firmware update can take longer.',
       primary: 'keep-waiting',
       secondary: 'dashboard',
     },

@@ -315,9 +315,37 @@ export async function authorizeGuest(config: UnifiConfig, clientMac: string, min
 
 // ── Reads ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Short-lived cache of `stat/device`.
+ *
+ * The adoption status endpoint is POLLED — every 2-3 seconds per installer, for up to three
+ * minutes, and a venue rollout means several at once. Without this, each poll is a full
+ * controller round trip, which both loads the controller during the provisioning it is busy
+ * doing and makes the client's own timeout more likely to fire.
+ *
+ * Deliberately tiny: adoption state changes over tens of seconds, so 5 seconds of staleness
+ * is invisible to the installer while removing most of the traffic.
+ */
+const deviceCache = new Map<string, { rows: UnifiDevice[]; at: number }>();
+const DEVICE_CACHE_TTL_MS = 5_000;
+
+function deviceCacheKey(config: UnifiConfig): string {
+  return `${config.controllerType}|${config.controllerUrl}|${config.site}`;
+}
+
+/** Drop the cache — call after anything that changes device state, e.g. an adopt. */
+export function invalidateDeviceCache(config?: UnifiConfig): void {
+  if (config) deviceCache.delete(deviceCacheKey(config));
+  else deviceCache.clear();
+}
+
 export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
+  const key = deviceCacheKey(config);
+  const hit = deviceCache.get(key);
+  if (hit && Date.now() - hit.at < DEVICE_CACHE_TTL_MS) return hit.rows;
+
   const rows = ensureOk(await siteRequest(config, 'GET', 'stat/device'), 'stat/device');
-  return rows.map((d: any) => ({
+  const mapped: UnifiDevice[] = rows.map((d: any) => ({
     id: d._id,
     mac: normalizeMac(d.mac),
     state: Number(d.state),
@@ -327,6 +355,8 @@ export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
     uptime: d.uptime,
     lastSeen: d.last_seen,
   }));
+  deviceCache.set(key, { rows: mapped, at: Date.now() });
+  return mapped;
 }
 
 // ── Device adoption ───────────────────────────────────────────────────────────
@@ -393,6 +423,7 @@ export async function adoptDevice(config: UnifiConfig, mac: string): Promise<voi
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`UniFi adopt failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
   }
+  invalidateDeviceCache(config);
   console.log('[UNIFI] Adopt requested for', normalizeMac(mac), 'via', config.controllerUrl);
 }
 
