@@ -259,6 +259,26 @@ An unreadable settings document fails **closed** — limits stay enforced.
 
 ---
 
+## Installer distribution
+
+**The permanent download URLs — link these and nothing else:**
+
+- macOS: `https://askheidi.b-cdn.net/heidifi/HeidiFi-AP-Adoption-Helper-mac.dmg`
+- Windows: `https://askheidi.b-cdn.net/heidifi/HeidiFi-AP-Adoption-Helper-win.exe`
+
+They are version-independent aliases. `.github/workflows/ap-adoption-helper-publish.yml`
+rebuilds both installers on every push to `main` that touches `ap-adoption-helper/`, runs
+the tests, and uploads to Bunny storage under the alias names *and* versioned names
+(`…-<version>-mac-universal.dmg` / `…-<version>-win-x64.exe`, kept as an archive). The CMS
+download buttons point at the aliases, so shipping a new helper needs no CMS change — just
+bump `ap-adoption-helper/package.json`'s version and merge.
+
+The workflow needs repository secrets `BUNNY_STORAGE_ZONE` and `BUNNY_STORAGE_KEY`
+(Bunny → Storage → FTP & API Access), plus optionally `BUNNY_API_KEY` (account key) to
+purge the alias URLs from the CDN cache on publish — without it the aliases serve the
+previous build until the cache expires. The tag-driven
+`ap-adoption-helper-release.yml` still attaches installers to GitHub releases.
+
 ## Troubleshooting
 
 | Symptom | Cause |

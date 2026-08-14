@@ -1,0 +1,106 @@
+# Publishes the AP Adoption Helper installers to the CDN on every change.
+#
+# Any push to main touching ap-adoption-helper/ builds both installers (tests first),
+# then uploads them to Bunny storage under FOUR names:
+#
+#   heidifi/HeidiFi-AP-Adoption-Helper-<version>-mac-universal.dmg   (archive)
+#   heidifi/HeidiFi-AP-Adoption-Helper-<version>-win-x64.exe         (archive)
+#   heidifi/HeidiFi-AP-Adoption-Helper-mac.dmg                       (STABLE — linked by the dashboard)
+#   heidifi/HeidiFi-AP-Adoption-Helper-win.exe                       (STABLE — linked by the dashboard)
+#
+# The two stable names are the whole point: the dashboard's download buttons and the docs
+# link only those, so shipping a new helper never needs a CMS deploy again.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   BUNNY_STORAGE_ZONE  - the Bunny storage zone name
+#   BUNNY_STORAGE_KEY   - that zone's password (Bunny -> Storage -> FTP & API Access)
+# Optional:
+#   BUNNY_API_KEY       - account API key; enables the cache purge of the stable URLs.
+#                         Without it the CDN serves the old build until its cache expires.
+#
+# The tag-driven ap-adoption-helper-release.yml still handles GitHub releases; this one
+# owns the CDN. Both build the same way.
+
+name: Publish AP Adoption Helper to CDN
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ap-adoption-helper/**'
+      - '.github/workflows/ap-adoption-helper-publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ap-adoption-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ap-adoption-helper/package-lock.json
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run dist:mac
+
+      - run: npm run dist:win
+
+      - name: Upload installers to Bunny storage
+        env:
+          ZONE: ${{ secrets.BUNNY_STORAGE_ZONE }}
+          KEY: ${{ secrets.BUNNY_STORAGE_KEY }}
+        run: |
+          if [ -z "$ZONE" ] || [ -z "$KEY" ]; then
+            echo "::error::BUNNY_STORAGE_ZONE / BUNNY_STORAGE_KEY secrets are not set — nothing uploaded."
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          DMG="release/HeidiFi-AP-Adoption-Helper-${VERSION}-mac-universal.dmg"
+          EXE="release/HeidiFi-AP-Adoption-Helper-${VERSION}-win-x64.exe"
+          test -f "$DMG" && test -f "$EXE"
+
+          put() {
+            curl -sf -X PUT "https://storage.bunnycdn.com/${ZONE}/heidifi/$2" \
+              -H "AccessKey: ${KEY}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$1" > /dev/null
+            echo "uploaded heidifi/$2"
+          }
+
+          put "$DMG" "HeidiFi-AP-Adoption-Helper-${VERSION}-mac-universal.dmg"
+          put "$EXE" "HeidiFi-AP-Adoption-Helper-${VERSION}-win-x64.exe"
+          put "$DMG" "HeidiFi-AP-Adoption-Helper-mac.dmg"
+          put "$EXE" "HeidiFi-AP-Adoption-Helper-win.exe"
+
+      - name: Purge the stable URLs from the CDN cache
+        env:
+          API_KEY: ${{ secrets.BUNNY_API_KEY }}
+        run: |
+          if [ -z "$API_KEY" ]; then
+            echo "BUNNY_API_KEY not set — skipping purge. The stable URLs serve the old build until the CDN cache expires."
+            exit 0
+          fi
+          for f in HeidiFi-AP-Adoption-Helper-mac.dmg HeidiFi-AP-Adoption-Helper-win.exe; do
+            curl -sf -X POST "https://api.bunny.net/purge?url=https%3A%2F%2Faskheidi.b-cdn.net%2Fheidifi%2F${f}&async=false" \
+              -H "AccessKey: ${API_KEY}" > /dev/null && echo "purged ${f}"
+          done
+
+      - name: Verify the stable URLs serve the new version
+        run: |
+          for f in HeidiFi-AP-Adoption-Helper-mac.dmg HeidiFi-AP-Adoption-Helper-win.exe; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://askheidi.b-cdn.net/heidifi/${f}")
+            echo "${f} -> HTTP ${code}"
+            [ "$code" = "200" ] || exit 1
+          done
