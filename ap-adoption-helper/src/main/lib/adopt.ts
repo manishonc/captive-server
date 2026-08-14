@@ -13,7 +13,9 @@ import { log } from './log';
 
 const SSH_USER = 'ubnt';
 const DEFAULT_PASSWORD = 'ubnt';
-const READY_TIMEOUT_MS = 10000;
+// 20s, not 10: venue APs are routinely reached across a laptop's shared-internet bridge or
+// a congested guest LAN, where the SSH banner exchange alone can eat several seconds.
+const READY_TIMEOUT_MS = 20000;
 const EXEC_TIMEOUT_MS = 15000;
 
 interface ExecResult {

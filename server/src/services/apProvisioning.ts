@@ -651,7 +651,15 @@ export async function adoptionProgress(args: {
   };
   const docs = snap.docs
     .map((d) => ({ id: d.id, data: d.data() as ApRow }))
-    .filter((d) => (d.data.createdAt?.toMillis?.() ?? 0) >= since);
+    // Fresh by creation OR by re-adoption: re-running the helper on an existing AP resets
+    // adoptionRequestedAt but not createdAt, and that sitting deserves live status too.
+    .filter(
+      (d) =>
+        Math.max(
+          d.data.createdAt?.toMillis?.() ?? 0,
+          d.data.adoptionRequestedAt?.toMillis?.() ?? 0,
+        ) >= since,
+    );
 
   const inputs = docs.map((d) => ({
     apId: d.id,
