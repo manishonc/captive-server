@@ -93,3 +93,38 @@ export function retryAfterSeconds(elapsedMs: number): number {
 export function isTerminalPhase(phase: AdoptionPhase): boolean {
   return phase === 'connected';
 }
+
+/** UniFi truncates long aliases in the Devices list; keep the useful part visible. */
+const MAX_DEVICE_NAME = 64;
+
+/**
+ * The alias to give a device on the controller.
+ *
+ * Every access point otherwise displays as its model — a shared site full of rows all
+ * reading "U6 Pro", across every tenant, with no way to tell whose hardware is whose. That
+ * was tolerable when a human adopted each device and already knew; it is not once tenants
+ * adopt their own.
+ *
+ * Format: `Venue · AP name (venueId prefix)`. The venue id prefix is not decoration — venue
+ * display names are NOT unique across tenants (two tenants may both have "The Coffee
+ * House"), and it matches the `venue-<venueId>` AP group, so an admin can get from a device
+ * row to the right group and WLAN without a database lookup.
+ */
+export function controllerDeviceName(args: {
+  venueName?: string;
+  apName?: string;
+  venueId: string;
+}): string {
+  const venue = String(args.venueName || '').trim();
+  const ap = String(args.apName || '').trim();
+  const tag = `(${args.venueId.slice(0, 6)})`;
+
+  const parts = [venue, ap].filter(Boolean).join(' · ');
+  const label = parts || 'HeidiFi access point';
+
+  // Trim the label rather than the tag: the tag is what disambiguates two identically
+  // named venues, so it is the last thing that should be lost.
+  const room = MAX_DEVICE_NAME - tag.length - 1;
+  const trimmed = label.length > room ? `${label.slice(0, Math.max(0, room - 1)).trimEnd()}…` : label;
+  return `${trimmed} ${tag}`;
+}
