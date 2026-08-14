@@ -27,6 +27,7 @@ import { db } from '../firebase';
 import { accountCodeSubsystemReady, checkAccountCode, maskAccountCode } from '../services/accountCode';
 import { adoptionCodeStorageReady, resolveAccountCode } from '../services/adoptionCodes';
 import { adoptionRateLimited, claimCapExceeded } from '../services/adoptionRateLimit';
+import { getPauseState, rateLimitsPaused } from '../services/adoptionSettings';
 import {
   adoptionStatus,
   claimAccessPoint,
@@ -65,6 +66,8 @@ function selfServeEnabled(): boolean {
 interface Caller {
   tenantUserId: string;
   code: string;
+  /** True when an admin has temporarily paused the limits — see services/adoptionSettings. */
+  paused: boolean;
 }
 
 /**
@@ -81,25 +84,30 @@ async function authenticate(req: Request, res: Response): Promise<Caller | null>
     return null;
   }
 
+  // Resolved once per request and threaded through, rather than re-read per limit check.
+  const paused = await rateLimitsPaused();
+
   const check = checkAccountCode(req.body?.code);
   const key = codeKey(check.value || 'empty');
 
   // Malformed input is charged too — otherwise it is a free oracle for the alphabet.
   if (!check.ok) {
-    chargeFailure(key);
+    if (!paused) chargeFailure(key);
     fail(res, 400, 'invalid_code');
     return null;
   }
 
-  const failLimit = adoptionRateLimited('code_fail', key);
-  if (failLimit.limited) {
-    limited(res, failLimit.retryAfterSeconds);
-    return null;
+  if (!paused) {
+    const failLimit = adoptionRateLimited('code_fail', key);
+    if (failLimit.limited) {
+      limited(res, failLimit.retryAfterSeconds);
+      return null;
+    }
   }
 
   const resolved = await resolveAccountCode(check.value);
   if (!resolved) {
-    chargeFailure(key);
+    if (!paused) chargeFailure(key);
     console.warn('[ADOPTION] Unknown setup code', maskAccountCode(check.value));
     // Same status, same body, and no branch on WHY — an unknown code and a revoked one must
     // be indistinguishable from outside.
@@ -107,7 +115,7 @@ async function authenticate(req: Request, res: Response): Promise<Caller | null>
     return null;
   }
 
-  return { tenantUserId: resolved.tenantUserId, code: check.value };
+  return { tenantUserId: resolved.tenantUserId, code: check.value, paused };
 }
 
 function chargeFailure(key: string): void {
@@ -120,7 +128,9 @@ function throttle(
   res: Response,
   kind: Parameters<typeof adoptionRateLimited>[0],
   key: string,
+  paused = false,
 ): boolean {
+  if (paused) return false;
   const verdict = adoptionRateLimited(kind, key);
   if (verdict.limited) {
     limited(res, verdict.retryAfterSeconds);
@@ -132,8 +142,15 @@ function throttle(
 // ── Health ────────────────────────────────────────────────────────────────────
 
 /** Unauthenticated. Lets the helper tell "wrong code" from "feature is off here". */
-router.get('/health', (_req: Request, res: Response) => {
-  res.json({ success: true, enabled: selfServeEnabled() });
+router.get('/health', async (_req: Request, res: Response) => {
+  const pause = await getPauseState().catch(() => null);
+  res.json({
+    success: true,
+    enabled: selfServeEnabled(),
+    rateLimits: pause?.paused
+      ? { paused: true, until: pause.pausedUntil, secondsRemaining: pause.secondsRemaining }
+      : { paused: false },
+  });
 });
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -149,7 +166,7 @@ router.get('/health', (_req: Request, res: Response) => {
 router.post('/session', async (req: Request, res: Response) => {
   const caller = await authenticate(req, res);
   if (!caller) return;
-  if (throttle(res, 'session', codeKey(caller.code))) return;
+  if (throttle(res, 'session', codeKey(caller.code), caller.paused)) return;
 
   try {
     const snap = await db
@@ -174,7 +191,7 @@ router.post('/session', async (req: Request, res: Response) => {
 router.post('/venue', async (req: Request, res: Response) => {
   const caller = await authenticate(req, res);
   if (!caller) return;
-  if (throttle(res, 'session', codeKey(caller.code))) return;
+  if (throttle(res, 'session', codeKey(caller.code), caller.paused)) return;
 
   const venueId = String(req.body?.venueId || '').trim();
   if (!venueId) return fail(res, 400, 'venue_required');
@@ -223,7 +240,7 @@ type PrecheckState =
 router.post('/precheck', async (req: Request, res: Response) => {
   const caller = await authenticate(req, res);
   if (!caller) return;
-  if (throttle(res, 'precheck', codeKey(caller.code))) return;
+  if (throttle(res, 'precheck', codeKey(caller.code), caller.paused)) return;
 
   const raw: unknown[] = Array.isArray(req.body?.macs) ? req.body.macs : [req.body?.mac];
   const macs: string[] = [...new Set(raw.map((m) => canonMac(String(m ?? ''))))].filter(
@@ -296,15 +313,16 @@ router.post('/claim', async (req: Request, res: Response) => {
   if (!caller) return;
 
   const key = codeKey(caller.code);
-  if (throttle(res, 'claim', key)) return;
+  if (throttle(res, 'claim', key, caller.paused)) return;
 
   const mac = String(req.body?.mac || '').trim();
   const canon = canonMac(mac);
   if (canon.length !== 12) return fail(res, 400, 'mac_required');
-  if (throttle(res, 'claim_mac', canon)) return;
+  if (throttle(res, 'claim_mac', canon, caller.paused)) return;
 
-  // The durable cap, unlike the in-memory windows above: survives a restart, and is what
-  // actually bounds a compromised code's spend.
+  // NOT pausable, deliberately, unlike the in-memory windows above. This is the durable
+  // bound on what a compromised code can actually do — it survives a restart, and no amount
+  // of testing convenience justifies switching it off.
   if (await claimCapExceeded(caller.tenantUserId)) {
     return fail(res, 429, 'daily_limit_reached');
   }
@@ -348,7 +366,7 @@ router.post('/status', async (req: Request, res: Response) => {
   const mac = String(req.body?.mac || '').trim();
   const canon = canonMac(mac);
   if (canon.length !== 12) return fail(res, 400, 'mac_required');
-  if (throttle(res, 'status', `${codeKey(caller.code)}:${canon}`)) return;
+  if (throttle(res, 'status', `${codeKey(caller.code)}:${canon}`, caller.paused)) return;
 
   try {
     const status = await adoptionStatus({ tenantUserId: caller.tenantUserId, mac });

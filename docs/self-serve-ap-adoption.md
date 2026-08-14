@@ -230,6 +230,33 @@ anyone could disable a tenant's setup by spamming bad codes at it.
 | `claim` (per code / per MAC) | 10 / 5 | 60 min |
 | `claim_daily` (per tenant, Firestore) | 20 | 24h UTC |
 
+### Pausing the limits
+
+Ten wrong codes in ten minutes blocks further attempts, which is the right default and the
+wrong one when you are testing, or on a call talking someone through their first install and
+they mistype the code twice.
+
+A **super admin** can pause them from the CMS — the "Code limits" button beside the other
+UniFi tools on the Access Points tab. It is a countdown, not a toggle:
+
+- capped at **120 minutes** server-side, whatever duration is requested;
+- expires on its own, so there is no "off" state to forget;
+- the button turns amber and shows the remaining time while active;
+- every bypass is logged (throttled to once a minute) and `GET /adoption/health` reports it,
+  so "are the limits on right now" is answerable without database access;
+- writes an admin-log entry, which is the only record of who paused them and when.
+
+The **per-tenant daily claim cap is never paused.** That one is the durable bound on what a
+compromised code can actually do, and no amount of testing convenience justifies removing it.
+
+For local development there is also `ADOPTION_RATE_LIMIT_DISABLED=true`, which does not expire
+and must not be set in production. When it is set the CMS panel says so and refuses to manage
+the pause, since the env var overrides it.
+
+State lives on `CaptivePortal_Settings/global.adoptionRateLimitPausedUntil`, cached for 15
+seconds so pausing and resuming take effect while the admin is still looking at the screen.
+An unreadable settings document fails **closed** — limits stay enforced.
+
 ---
 
 ## Troubleshooting

@@ -24,6 +24,12 @@ import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../
 import { adoptionCodeStorageReady, ensureAccountCode, rotateAccountCode } from '../services/adoptionCodes';
 import { accountCodeSubsystemReady } from '../services/accountCode';
 import {
+  getPauseState,
+  MAX_PAUSE_MINUTES,
+  pauseRateLimits,
+  resumeRateLimits,
+} from '../services/adoptionSettings';
+import {
   sendBroadcast,
   pauseCampaign,
   resumeCampaign,
@@ -384,6 +390,40 @@ router.post('/adoption/code/rotate', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[INTERNAL adoption/code/rotate]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'rotate failed' });
+  }
+});
+
+/**
+ * Temporarily pause the /adoption rate limits — for testing, and for walking a customer
+ * through setup on a call without a mistyped code locking them out for ten minutes.
+ *
+ * A DEADLINE, not an on/off switch. There is no state to forget about: the pause expires by
+ * itself, is capped server-side at MAX_PAUSE_MINUTES however long the caller asks for, and is
+ * reported by the public GET /adoption/health so "are the limits on" is answerable without
+ * database access. The daily per-tenant claim cap is never paused.
+ */
+router.get('/adoption/rate-limit', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  try {
+    return res.json({ ok: true, maxMinutes: MAX_PAUSE_MINUTES, ...(await getPauseState()) });
+  } catch (err) {
+    console.error('[INTERNAL adoption/rate-limit]', err);
+    return res.status(502).json({ ok: false, error: 'could not read pause state' });
+  }
+});
+
+router.post('/adoption/rate-limit', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { action, minutes } = req.body || {};
+  if (action !== 'pause' && action !== 'resume') {
+    return res.status(400).json({ ok: false, error: "action must be 'pause' or 'resume'" });
+  }
+  try {
+    const state = action === 'pause' ? await pauseRateLimits(minutes) : await resumeRateLimits();
+    return res.json({ ok: true, maxMinutes: MAX_PAUSE_MINUTES, ...state });
+  } catch (err) {
+    console.error('[INTERNAL adoption/rate-limit]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'failed' });
   }
 });
 
