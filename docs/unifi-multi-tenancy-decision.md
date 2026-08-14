@@ -1,6 +1,6 @@
 # UniFi Multi-Tenancy: Single Shared Site (Decision Record)
 
-**Status:** Accepted · 2026-07-15
+**Status:** Accepted · 2026-07-15 · revised 2026-08-14 (SSID uniqueness removed — see limitation 3)
 **Decision:** All tenants' access points are adopted into **one controller site (`default`)**. Tenant/venue isolation is implemented one level down, via per-venue AP groups and per-venue WLANs — not via controller sites.
 
 ---
@@ -47,8 +47,19 @@ Site-per-tenant was rejected **for now** because it makes every workflow two-hop
 
 1. **Guest authorization is site-wide.** `authorize-guest` authorizes a client MAC for the whole site. A guest authorized at venue A whose phone auto-joins an identically-named SSID at venue B skips venue B's splash page until the session expires. Acceptable today; becomes a migration trigger if a tenant complains.
 2. **Site-wide settings are shared** — wireless meshing on/off, country/regulatory domain, guest-control policy. All tenants get the same values. A tenant in a different regulatory country cannot be served from this site.
-3. **SSID names are globally unique across the controller** — enforced in code, not by UniFi: `ensureWlan` rejects any SSID already used by another WLAN (`server/src/services/unifi.ts:371-372`, error: *"The WiFi name … is already in use on this controller."*). Consequence: **two venues currently cannot share the same WiFi name**, even for the same tenant. UniFi itself would allow duplicate names on disjoint AP groups, so if "one brand SSID across all my venues" becomes a requested feature, the decision is to relax this check to *"reject only if the clash is with a different tenant's venue"* — do not remove it entirely (cross-tenant SSID spoofing/confusion). Note the site-wide auth behavior in (1) then applies across those venues.
+3. **SSID names are NOT unique — duplicates are allowed** (revised 2026-08-14; see below). Any two venues, same tenant or not, may broadcast the same WiFi name. The consequence is that the site-wide guest authorization in (1) now applies *across tenants* whenever two of them pick the same obvious name ("Free WiFi", "Guest"): a guest authorized at venue A whose phone auto-joins an identically named SSID at venue B skips B's splash page until the session expires, so B loses that capture. Venue identification is unaffected — the portal keys on AP MAC, never SSID.
 4. **Blast radius.** One compromised `captive-service` credential or one bad site-level change touches all tenants.
+
+### Revision 2026-08-14 — SSID uniqueness removed
+
+The original decision kept a code-level uniqueness check and said explicitly *"do not remove it entirely."* That is reversed. Rationale: we are a multi-tenant product, and the check meant the *first* tenant to register "Free WiFi" permanently denied that name to everyone else, with an error message ("already in use on this controller") that reveals another tenant exists and is unfixable by the person reading it. UniFi has no such restriction — disjoint AP groups may share a name.
+
+Two invariants replace it, both in `server/src/services/unifi.ts`:
+
+- **A venue's WLAN is identified by its AP group, never by its name.** `ensureWlan` looks up `unifiWlanId`, then falls back to the WLAN whose `ap_group_ids` is exactly `[apGroupId]`. Without that fallback, a lost `unifiWlanId` write would create a second same-named WLAN on the same group that nothing tracks or tears down — the uniqueness check had been accidentally masking this.
+- **AP groups are named `venue-<venueId>`** (`venueApGroupName`), not by venue display name. Name-based matching previously let a venue adopt a *different tenant's* identically named group and overwrite its `device_macs`, killing that tenant's guest WiFi. Pre-existing groups are adopted and renamed on next apply, but only when their members are already a subset of the venue's own APs.
+
+The accepted cost is the cross-tenant session bleed described in limitation 3. Trigger to revisit: a tenant reports guests bypassing their splash page. The fix is not to restore the check — it is the site-per-tenant migration sketched below.
 
 ## Rename / lifecycle handling
 
@@ -56,8 +67,8 @@ How each rename or lifecycle event propagates today, and the procedure where pro
 
 | Event | What happens | Procedure / gap |
 |---|---|---|
-| **Change venue WiFi name (SSID)** | CMS → `POST /internal/unifi/apply-wifi` → `ensureWlan` PUTs the existing WLAN with the new name. Instant, id-stable (`unifiWlanId` unchanged). | Self-serve in CMS. Fails if the new name clashes with any existing WLAN (see limitation 3). |
-| **Rename a venue** | AP group name is derived from `venue_name` at apply time (`applyVenueWifi` → `ensureApGroup` PUTs `name`). It does **not** update on venue rename alone. | Cosmetic only (group name is internal bookkeeping). To sync: re-save the venue's WiFi name in the CMS, which re-runs apply-wifi. Future nicety: have the CMS call apply-wifi after a venue rename. |
+| **Change venue WiFi name (SSID)** | CMS → `POST /internal/unifi/apply-wifi` → `ensureWlan` PUTs the existing WLAN with the new name. Instant, id-stable (`unifiWlanId` unchanged). | Self-serve in CMS. Any name is accepted, including one another venue already uses (see the 2026-08-14 revision). Renaming drops every guest currently connected. |
+| **Rename a venue** | Nothing. Since the 2026-08-14 revision the AP group is named `venue-<venueId>`, so it no longer tracks the display name. | No action needed. To find a venue's group in the controller UI, search its venue id. |
 | **Rename an AP in the CMS** | CMS-only label in Firestore. The controller's device alias is untouched, and nothing depends on it. | No action needed. |
 | **Add an AP to a venue** | AP doc created (credentials stamped from CMS env, ownership inherited from venue), MAC uniqueness enforced globally. Next apply-wifi syncs the AP group's `device_macs`. | Adopt the device (Adoption Helper for wired; controller-adopt for pending mesh units), then set/re-save the WiFi name if the group didn't pick it up. |
 | **Remove an AP from a venue** | `detachApFromVenueWifi`: MAC removed from the AP group. If it was the **last** AP: WLAN and AP group are deleted (best-effort) and the venue's `unifiApGroupId` / `unifiWlanId` / `wifiSsid` are cleared. | Automatic. The device itself stays adopted in the site; forget it in the controller if it is leaving the fleet. |

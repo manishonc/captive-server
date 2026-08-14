@@ -430,29 +430,73 @@ export async function findGuestWlanTemplate(
   return portal || wlans[0] || null;
 }
 
+/**
+ * Validate an SSID. The 32 limit is a BYTE limit in 802.11, not a character one — "Café
+ * Rosa Guest Wireless Network!!" fits in 32 characters but not in 32 UTF-8 bytes, and the
+ * controller would reject it after we had already created the AP group. Control characters
+ * are rejected because they render as invisible junk on a phone's WiFi list.
+ *
+ * Duplicate names are allowed: uniqueness is not checked here or anywhere (see `ensureWlan`).
+ */
+export function validateSsid(ssid: unknown): string {
+  const s = String(ssid ?? '').trim();
+  if (s.length < 1) throw new Error('WiFi name is required.');
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F]/.test(s)) throw new Error('WiFi name cannot contain control characters.');
+  if (Buffer.byteLength(s, 'utf8') > 32) throw new Error('WiFi name is too long (max 32 bytes).');
+  return s;
+}
+
+/** The controller-side name of a venue's AP group. Derived from the venue id, never the
+ *  venue's display name: two tenants can both call a venue "The Coffee House", and matching
+ *  on that name let one of them adopt the other's group and overwrite its members. */
+export function venueApGroupName(venueId: string): string {
+  return `venue-${venueId}`;
+}
+
 /** Find-or-create/update an AP group whose members are exactly `memberMacs`. Returns its id. */
 export async function ensureApGroup(
   config: UnifiConfig,
-  args: { groupId?: string | null; name: string; memberMacs: string[] },
+  args: { groupId?: string | null; venueId: string; legacyName?: string; memberMacs: string[] },
 ): Promise<string> {
   const macs = Array.from(new Set(args.memberMacs.map(normalizeMac).filter(Boolean)));
+  const name = venueApGroupName(args.venueId);
   const groups = await getApGroups(config);
   console.log('[UNIFI DEBUG] v2 apgroups:', JSON.stringify(groups.map((g) => ({ _id: g._id, name: g.name, attr_no_delete: g.attr_no_delete }))));
 
+  // Groups created before the id-based naming carry the venue's display name. Adopt one only
+  // when its members are a NON-EMPTY subset of this venue's APs — another tenant's same-named
+  // group holds THEIR MACs, so that is what keeps them apart, and an empty group is evidence
+  // of nothing (it may be another tenant's, whose venue doc still points at it by id and
+  // would take it straight back). Leaving an empty stray behind is harmless; stealing a live
+  // one is not. Adopting renames it, so each venue migrates itself on its next apply.
+  // canonMac on both sides: legacy AP docs store hyphenated or bare-hex MACs, which would
+  // never match the controller's colon format under normalizeMac alone.
+  const mine = new Set(macs.map(canonMac));
+  const legacy =
+    args.legacyName && args.legacyName !== name
+      ? groups.find((g) => {
+          if (g.name !== args.legacyName || g.attr_no_delete) return false;
+          const members = g.device_macs || [];
+          return members.length > 0 && members.every((m) => mine.has(canonMac(m)));
+        })
+      : undefined;
+
   const existing =
     (args.groupId && groups.find((g) => g._id === args.groupId)) ||
-    groups.find((g) => g.name === args.name && !g.attr_no_delete) ||
+    groups.find((g) => g.name === name && !g.attr_no_delete) ||
+    legacy ||
     null;
 
   if (existing) {
     v2Data(
-      await siteRequestV2(config, 'PUT', `apgroups/${existing._id}`, { ...existing, name: args.name, device_macs: macs }),
+      await siteRequestV2(config, 'PUT', `apgroups/${existing._id}`, { ...existing, name, device_macs: macs }),
       'update apgroup',
     );
     return existing._id;
   }
 
-  const created = v2Data(await siteRequestV2(config, 'POST', 'apgroups', { name: args.name, device_macs: macs }), 'create apgroup');
+  const created = v2Data(await siteRequestV2(config, 'POST', 'apgroups', { name, device_macs: macs }), 'create apgroup');
   const id = Array.isArray(created) ? created[0]?._id : created?._id;
   if (!id) throw new Error('UniFi v2 did not return the created AP group id.');
   console.log('[UNIFI DEBUG] created apgroup id:', id, 'raw:', JSON.stringify(created));
@@ -462,7 +506,14 @@ export async function ensureApGroup(
 /**
  * Find-or-create/update a WLAN scoped to a single AP group and set its SSID (`name`).
  * On create, clones `template` so captive-portal/hotspot config is preserved.
- * Enforces SSID uniqueness per site. Returns the WLAN id.
+ * Returns the WLAN id.
+ *
+ * SSID names are deliberately NOT unique across the site. We are multi-tenant on one shared
+ * controller, and UniFi is happy to broadcast the same name from disjoint AP groups — so two
+ * tenants may both run "Free WiFi". A venue's WLAN is identified by its AP GROUP, never by
+ * its name: the group is per-venue and unique, the name is not. (Consequence, tracked in
+ * docs/unifi-multi-tenancy-decision.md: guest authorization is site-wide, so a phone
+ * auto-joining an identically named SSID at another venue can skip that venue's splash page.)
  */
 export async function ensureWlan(
   config: UnifiConfig,
@@ -470,13 +521,18 @@ export async function ensureWlan(
 ): Promise<string> {
   const wlans = await getWlans(config);
 
-  const clash = wlans.find((w) => w.name === args.ssid && w._id !== args.wlanId);
-  if (clash) throw new Error(`The WiFi name "${args.ssid}" is already in use on this controller.`);
-
   // Controller validates ap_group_mode against "all|groups|devices" — 'groups' scopes
   // the WLAN to the ap_group_ids list.
   const scope = { ap_group_ids: [args.apGroupId], ap_group_mode: 'groups' as const };
-  const existing = (args.wlanId && wlans.find((w) => w._id === args.wlanId)) || null;
+
+  // Falling back to the AP group is what makes this idempotent. applyVenueWifi creates the
+  // WLAN and only then persists `unifiWlanId`; if that write is lost, `wlanId` comes back
+  // null while the WLAN still exists, and creating blindly would leave a second WLAN with
+  // the same SSID on the same group that nothing tracks or tears down.
+  const byGroup = (w: UnifiWlan) =>
+    Array.isArray(w.ap_group_ids) && w.ap_group_ids.length === 1 && w.ap_group_ids[0] === args.apGroupId;
+  const existing =
+    (args.wlanId && wlans.find((w) => w._id === args.wlanId)) || wlans.find(byGroup) || null;
 
   if (existing) {
     ensureOk(await siteRequest(config, 'PUT', `rest/wlanconf/${existing._id}`, { ...existing, name: args.ssid, enabled: true, ...scope }), 'update wlanconf');

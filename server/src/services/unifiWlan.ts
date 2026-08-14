@@ -29,6 +29,7 @@ import {
   removeMacFromApGroup,
   deleteApGroup,
   deleteWlan,
+  validateSsid,
 } from './unifi';
 
 const AP_COLLECTION = 'CaptivePortal_AccessPoints';
@@ -80,10 +81,36 @@ function resolveVenueController(aps: VenueUnifiAp[]): UnifiConfig {
   return resolveConfig(withCfg?.unifiConfig || undefined);
 }
 
-export function validateSsid(ssid: unknown): string {
-  const s = String(ssid ?? '').trim();
-  if (s.length < 1 || s.length > 32) throw new Error('WiFi name must be 1–32 characters.');
-  return s;
+// Re-exported from ./unifi, which is Firestore-free and therefore unit-testable.
+// Callers and the CMS-facing routes keep importing it from here.
+export { validateSsid };
+
+/**
+ * Serialize controller work per venue. `ensureApGroup` read-modify-OVERWRITES `device_macs`,
+ * so two concurrent applies at one venue (a claim racing the CMS, or two claims) each read
+ * the member list before the other writes, and the loser's AP silently disappears from the
+ * group and stops broadcasting.
+ *
+ * In-process only, like the OTP rate limiter — correct while captive-server runs as a single
+ * container. If it is ever horizontally scaled this degrades to per-replica and needs a real
+ * lock.
+ */
+const venueLocks = new Map<string, Promise<void>>();
+function withVenueLock<T>(venueId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = venueLocks.get(venueId) ?? Promise.resolve();
+  // `prev.then(fn, fn)` runs fn whether the previous holder resolved or threw — one
+  // caller's failure must not wedge the queue behind it.
+  const result = prev.then(fn, fn);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  venueLocks.set(venueId, tail);
+  void tail.then(() => {
+    // Only the last waiter clears the entry, so a queue still forming isn't dropped.
+    if (venueLocks.get(venueId) === tail) venueLocks.delete(venueId);
+  });
+  return result;
 }
 
 export interface VenueWifiResult {
@@ -92,69 +119,87 @@ export interface VenueWifiResult {
   unifiWlanId: string;
 }
 
-/** Create/update the venue's guest WLAN scoped to a venue AP group; persist ids on the venue. */
+/**
+ * Create/update the venue's guest WLAN scoped to a venue AP group; persist ids on the venue.
+ * Serialized per venue — see `withVenueLock`. Idempotent: safe to re-run, and re-running is
+ * how a venue picks up an access point added after its WLAN already existed.
+ */
 export async function applyVenueWifi(venueId: string, ssidInput: string): Promise<VenueWifiResult> {
   const ssid = validateSsid(ssidInput);
 
-  const venueSnap = await db.collection(VENUE_COLLECTION).doc(venueId).get();
-  if (!venueSnap.exists) throw new Error('Venue not found');
-  const venue = venueSnap.data() as any;
+  return withVenueLock(venueId, async () => {
+    const venueSnap = await db.collection(VENUE_COLLECTION).doc(venueId).get();
+    if (!venueSnap.exists) throw new Error('Venue not found');
+    const venue = venueSnap.data() as any;
 
-  const aps = await getVenueUnifiAps(venueId);
-  if (aps.length === 0) throw new Error('Add a UniFi access point to this venue before setting a WiFi name.');
+    const aps = await getVenueUnifiAps(venueId);
+    if (aps.length === 0) throw new Error('Add a UniFi access point to this venue before setting a WiFi name.');
 
-  const config = resolveVenueController(aps);
-  const memberMacs = aps.map((a) => a.mac).filter(Boolean);
-  const groupName = String(venue.venue_name || `Venue ${venueId}`).slice(0, 64);
-  const templateName = process.env.UNIFI_TEMPLATE_SSID || undefined;
+    const config = resolveVenueController(aps);
+    const memberMacs = aps.map((a) => a.mac).filter(Boolean);
+    // Only used to adopt a pre-rename group; the live name comes from the venue id.
+    const legacyName = String(venue.venue_name || `Venue ${venueId}`).slice(0, 64);
+    const templateName = process.env.UNIFI_TEMPLATE_SSID || undefined;
 
-  const template = await findGuestWlanTemplate(config, templateName);
-  const apGroupId = await ensureApGroup(config, { groupId: venue.unifiApGroupId || null, name: groupName, memberMacs });
-  const wlanId = await ensureWlan(config, { wlanId: venue.unifiWlanId || null, ssid, apGroupId, template });
+    const template = await findGuestWlanTemplate(config, templateName);
+    const apGroupId = await ensureApGroup(config, {
+      groupId: venue.unifiApGroupId || null,
+      venueId,
+      legacyName,
+      memberMacs,
+    });
+    const wlanId = await ensureWlan(config, { wlanId: venue.unifiWlanId || null, ssid, apGroupId, template });
 
-  await db.collection(VENUE_COLLECTION).doc(venueId).update({
-    wifiSsid: ssid,
-    unifiApGroupId: apGroupId,
-    unifiWlanId: wlanId,
-    updatedAt: FieldValue.serverTimestamp(),
+    await db.collection(VENUE_COLLECTION).doc(venueId).update({
+      wifiSsid: ssid,
+      unifiApGroupId: apGroupId,
+      unifiWlanId: wlanId,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    return { wifiSsid: ssid, unifiApGroupId: apGroupId, unifiWlanId: wlanId };
   });
-
-  return { wifiSsid: ssid, unifiApGroupId: apGroupId, unifiWlanId: wlanId };
 }
 
-/** Remove one AP's MAC from its venue group; tear down WLAN+group + clear venue fields if last. */
+/**
+ * Remove one AP's MAC from its venue group; tear down WLAN+group + clear venue fields if last.
+ * Shares `applyVenueWifi`'s per-venue lock — both rewrite the group's member list, and a
+ * detach interleaved with an apply can resurrect the MAC it just removed.
+ */
 export async function detachApFromVenueWifi(venueId: string, mac: string): Promise<void> {
-  const venueSnap = await db.collection(VENUE_COLLECTION).doc(venueId).get();
-  if (!venueSnap.exists) return;
-  const venue = venueSnap.data() as any;
-  const apGroupId: string | undefined = venue.unifiApGroupId;
-  const wlanId: string | undefined = venue.unifiWlanId;
-  if (!apGroupId) return;
+  return withVenueLock(venueId, async () => {
+    const venueSnap = await db.collection(VENUE_COLLECTION).doc(venueId).get();
+    if (!venueSnap.exists) return;
+    const venue = venueSnap.data() as any;
+    const apGroupId: string | undefined = venue.unifiApGroupId;
+    const wlanId: string | undefined = venue.unifiWlanId;
+    if (!apGroupId) return;
 
-  const aps = await getVenueUnifiAps(venueId);
-  const config = resolveVenueController(aps);
+    const aps = await getVenueUnifiAps(venueId);
+    const config = resolveVenueController(aps);
 
-  const remaining = await removeMacFromApGroup(config, apGroupId, mac);
-  if (remaining === 0) {
-    if (wlanId) {
+    const remaining = await removeMacFromApGroup(config, apGroupId, mac);
+    if (remaining === 0) {
+      if (wlanId) {
+        try {
+          await deleteWlan(config, wlanId);
+        } catch {
+          /* best-effort */
+        }
+      }
       try {
-        await deleteWlan(config, wlanId);
+        await deleteApGroup(config, apGroupId);
       } catch {
         /* best-effort */
       }
+      await db.collection(VENUE_COLLECTION).doc(venueId).update({
+        unifiApGroupId: null,
+        unifiWlanId: null,
+        wifiSsid: null,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
     }
-    try {
-      await deleteApGroup(config, apGroupId);
-    } catch {
-      /* best-effort */
-    }
-    await db.collection(VENUE_COLLECTION).doc(venueId).update({
-      unifiApGroupId: null,
-      unifiWlanId: null,
-      wifiSsid: null,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-  }
+  });
 }
 
 // ── Live device status ────────────────────────────────────────────────────────
@@ -248,8 +293,18 @@ function redactArray(data: unknown): unknown {
   return data.map((o) => (o && typeof o === 'object' ? redact(o as Record<string, unknown>) : o));
 }
 
-/** Resolve a controller config from any UniFi AP doc (env fallback) for controller-wide operations. */
+/**
+ * Resolve a controller config for controller-wide operations (adoption sweep, pending-device
+ * list, diagnostics).
+ *
+ * Env first, deliberately. The AP-doc scan below is an UNORDERED `limit(10)` window: once ten
+ * credential-less UniFi AP docs exist, it can return nothing usable, `resolveConfig` throws,
+ * and the 5-minute auto-adopt cron dies estate-wide and silently. Env credentials are also
+ * the fresh ones — per-AP configs are snapshots stamped at creation and go stale on rotation.
+ */
 export async function resolveAnyController(): Promise<UnifiConfig> {
+  if (process.env.UNIFI_USERNAME && process.env.UNIFI_PASSWORD) return resolveConfig(undefined);
+
   const snap = await db.collection(AP_COLLECTION).where('vendor', '==', 'unifi').limit(10).get();
   let stored: StoredUnifiConfig | undefined;
   snap.forEach((d) => {
