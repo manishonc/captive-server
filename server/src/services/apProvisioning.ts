@@ -331,6 +331,7 @@ export async function claimAccessPoint(args: ClaimArgs): Promise<ClaimResult> {
       venueName,
       tenantUserId: owner,
       apName,
+      ssid,
       unifiConfig: stampConfig,
     });
   } catch (err) {
@@ -399,6 +400,7 @@ async function createApDocument(args: {
   venueName: string;
   tenantUserId: string;
   apName: string;
+  ssid: string;
   unifiConfig: StoredUnifiConfig;
 }): Promise<string> {
   const ref = db.collection(AP_COLLECTION).doc();
@@ -436,6 +438,11 @@ async function createApDocument(args: {
       // captive-server only — the CMS create path does not set these.
       adoptionState: 'registered',
       adoptionSource: 'self_serve',
+      // The SSID the installer typed, kept because the WiFi is applied LATER — from a poll
+      // or from the cron — and neither of those carries it. Without this a venue's FIRST
+      // access point can never have its WiFi applied automatically: the venue has no
+      // wifiSsid yet, so there is nothing to fall back to and the apply silently no-ops.
+      pendingSsid: args.ssid,
       adoptionRequestedAt: null,
       wifiAppliedAt: null,
       createdAt: FieldValue.serverTimestamp(),
@@ -581,9 +588,20 @@ async function nameDeviceOnController(args: {
  */
 async function applyWifiForAp(apId: string, venueId: string, ssidHint?: string): Promise<boolean> {
   try {
-    const venueSnap = await db.collection(VENUE_COLLECTION).doc(venueId).get();
-    const ssid = String(venueSnap.data()?.wifiSsid || ssidHint || '').trim();
-    if (!ssid) return false; // nothing to apply yet
+    const [venueSnap, apSnap] = await Promise.all([
+      db.collection(VENUE_COLLECTION).doc(venueId).get(),
+      db.collection(AP_COLLECTION).doc(apId).get(),
+    ]);
+    // The venue's existing name wins (a second access point joins what is already there);
+    // otherwise the SSID the installer typed, which was stored at claim time precisely
+    // because this runs long after the request that carried it.
+    const ssid = String(
+      venueSnap.data()?.wifiSsid || apSnap.data()?.pendingSsid || ssidHint || '',
+    ).trim();
+    if (!ssid) {
+      console.warn('[AP CLAIM] No SSID to apply for', apId, '— venue and pendingSsid are both empty');
+      return false;
+    }
 
     await applyVenueWifi(venueId, ssid);
     await db
