@@ -85,7 +85,7 @@ who is connected, so it takes an explicit **Change the name** click.
 | App shows nothing / scan instantly empty | The OS blocked UDP broadcast — see the Local Network / Firewall notes above. |
 | "We don't recognise that code" | Codes never contain the letters **I**, **L** or **O**, or the numbers **0** or **1** — a mis-read `O` for `Q` is the usual cause. Copy it from the dashboard rather than typing it. |
 | "This access point is already in HeidiFi" | It is already registered to this account. If its WiFi never appeared, use **It's not working — set it up again**, which is safe to re-run. |
-| "This access point belongs to another account" | Registered to a different HeidiFi account. Email `hello@swissopenai.com` to have it released. |
+| "This access point belongs to another account" | Registered to a different HeidiFi account. Email `hello@heidifi.ai` to have it released. |
 | "This is taking longer than usual" | Not a failure — the access point is registered and still provisioning. A firmware upgrade on first adoption can take 5–15 minutes. Leave it plugged in; it finishes on its own and the dashboard will show it. |
 | "This app isn't set up safely" | The API address under **Advanced** is not `https://`. The setup code is a credential and the app refuses to send it in the clear. |
 

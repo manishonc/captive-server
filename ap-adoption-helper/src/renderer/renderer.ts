@@ -117,7 +117,7 @@
   let selectedMac: string | null = null;
   let homeUrl = 'https://heidifi.ai/';
   let dashboardUrl = 'https://heidifi.ai/';
-  let supportEmail = 'hello@swissopenai.com';
+  let supportEmail = 'hello@heidifi.ai';
 
   // Held in memory only, never persisted: settings.json is plaintext, and the log buffer
   // gets emailed to support by the "Copy log" button.
