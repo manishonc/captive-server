@@ -12,7 +12,7 @@ const FALLBACK_CONFIG: AppConfig = {
   homeUrl: 'https://heidifi.ai/',
   apiBaseUrl: 'https://api.heidifi.ai',
   dashboardUrl: 'https://portal.heidifi.ai/captive-venue',
-  supportEmail: 'hello@swissopenai.com',
+  supportEmail: 'hello@heidifi.ai',
   brand: { primary: '#1c2b4a', surface: '#f4f5f7', background: '#ffffff' },
 };
 
