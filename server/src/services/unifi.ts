@@ -428,6 +428,86 @@ export async function adoptDevice(config: UnifiConfig, mac: string): Promise<voi
 }
 
 /**
+ * Whether a failed forget/delete-device response means "that device is already gone".
+ *
+ * The controller has no single vocabulary for it: depending on version it answers
+ * `api.err.UnknownDevice`, `api.err.NoSuchDevice`, a bare 404, or a 400 whose message
+ * merely says the device was not found. Forgetting is only ever called to reach a state
+ * — the device is not on this controller — so every one of those IS that state, and
+ * treating them as failures would turn a finished job into a permanent warning.
+ */
+export function isDeviceAlreadyGone(res: UnifiResponse): boolean {
+  if (res.status === 404) return true;
+  const msg = String(res.body?.meta?.msg ?? res.body?.message ?? '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('unknowndevice') ||
+    msg.includes('nosuchdevice') ||
+    msg.includes('not found') ||
+    msg.includes('no such device')
+  );
+}
+
+/**
+ * Forget (un-adopt) a device so the controller releases it and the hardware can be
+ * factory-reset, re-sold, or adopted by someone else.
+ *
+ * This is the last step of tenant offboarding. `detachApFromVenueWifi` removes an AP
+ * from its venue's group and tears the WLAN down, but the device itself stays adopted
+ * on the shared site — carrying the previous tenant's alias, and counted against the
+ * controller forever. Nothing else in the codebase releases it.
+ *
+ * Two commands are tried because the endpoint moved: Network 7.x+ takes a batch
+ * `delete-device` on `cmd/sitemgr`, older controllers a single-MAC `delete-device` on
+ * `cmd/devmgr`. The fallback only runs when the first call fails outright, so a
+ * controller that accepts sitemgr never sees the second.
+ *
+ * Idempotent by contract: a device the controller does not know is a success, not an
+ * error. Callers delete tenants with this and must be able to re-run a partial job.
+ */
+export async function forgetDevice(
+  config: UnifiConfig,
+  mac: string,
+  request: typeof siteRequest = siteRequest,
+): Promise<void> {
+  const normalized = normalizeMac(mac);
+  if (!normalized) throw new Error('forgetDevice requires a MAC address');
+
+  const sitemgr = await request(config, 'POST', 'cmd/sitemgr', {
+    cmd: 'delete-device',
+    macs: [normalized],
+  });
+  if (sitemgr.status >= 200 && sitemgr.status < 300) {
+    invalidateDeviceCache(config);
+    console.log('[UNIFI] Forgot device', normalized, 'via', config.controllerUrl);
+    return;
+  }
+  if (isDeviceAlreadyGone(sitemgr)) {
+    console.log('[UNIFI] Forget skipped — device already gone:', normalized);
+    return;
+  }
+
+  const devmgr = await request(config, 'POST', 'cmd/devmgr', {
+    cmd: 'delete-device',
+    mac: normalized,
+  });
+  if (devmgr.status >= 200 && devmgr.status < 300) {
+    invalidateDeviceCache(config);
+    console.log('[UNIFI] Forgot device', normalized, '(devmgr fallback) via', config.controllerUrl);
+    return;
+  }
+  if (isDeviceAlreadyGone(devmgr)) {
+    console.log('[UNIFI] Forget skipped — device already gone:', normalized);
+    return;
+  }
+
+  throw new Error(
+    `UniFi forget-device failed: sitemgr HTTP ${sitemgr.status} ${JSON.stringify(sitemgr.body)}; ` +
+      `devmgr HTTP ${devmgr.status} ${JSON.stringify(devmgr.body)}`,
+  );
+}
+
+/**
  * Set a device's controller-side alias (what the Devices list shows under Name).
  *
  * Without this every adopted access point displays as its model — "U6 Pro", "U6 Pro",

@@ -19,7 +19,7 @@ import { createShortLink, VISITOR_BASE_URL } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
 import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics, resolveAnyController } from '../services/unifiWlan';
 import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
-import { adoptDevice } from '../services/unifi';
+import { adoptDevice, forgetDevice } from '../services/unifi';
 import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../services/unifiAdoption';
 import { adoptionProgress } from '../services/apProvisioning';
 import { adoptionCodeStorageReady, ensureAccountCode, rotateAccountCode } from '../services/adoptionCodes';
@@ -250,6 +250,33 @@ router.post('/unifi/detach', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[INTERNAL UNIFI detach]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'detach failed' });
+  }
+});
+
+/**
+ * Forget (un-adopt) a device — the last step of tenant offboarding.
+ *
+ * `/unifi/detach` removes an AP from its venue group and tears down the WLAN, but leaves
+ * the hardware adopted on the shared site under the departing tenant's alias. This
+ * releases it so it can be factory-reset or re-adopted elsewhere.
+ *
+ * Answers 200 for a device the controller has never heard of: the caller (CMS tenant
+ * deletion) is resumable and re-runs partial jobs, so "already gone" is the goal state,
+ * not a failure.
+ */
+router.post('/unifi/forget-device', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { mac } = req.body || {};
+  if (!mac || typeof mac !== 'string' || !mac.trim()) {
+    return res.status(400).json({ ok: false, error: 'mac is required' });
+  }
+  try {
+    const config = await resolveAnyController();
+    await forgetDevice(config, mac.trim());
+    return res.json({ ok: true, forgotten: mac.trim().toLowerCase() });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI forget-device]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'forget-device failed' });
   }
 });
 
