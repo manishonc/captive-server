@@ -18,15 +18,22 @@
  * every pre-billing tenant. This must match the CMS's classification in
  * _lib/entitlements.js: the two repos gate the same sends.
  *
- * The surrounding gate conditions (requireCardForTrial kill-switch,
- * `trialActivatedAt` grandfathering, fail-open on lookup errors) live in
- * entitlements.ts `isLapsedForSending` and need Firestore; they are exercised
- * against real data, not here.
+ * `past_due` is our own grace window, written by the CMS expiry sweep when a
+ * trial or manual period runs out and by the Stripe webhook when a card fails.
+ * Also RETAINED ACCESS, for the same reason: the point of the window is that
+ * the tenant keeps working while we warn them.
+ *
+ * `isLapsedForSending` in entitlements.ts now reduces to `entitlements.
+ * suspended`, i.e. exactly the 'lapsed' classification tested here — the
+ * requireCardForTrial kill-switch and `trialActivatedAt` grandfathering are
+ * gone, because together they made the gate inert for the entire card-free
+ * cohort whose trials silently expired.
  */
 
 import {
   classifySubscriptionState,
   isLapsedTrial,
+  retainsAccess,
   type SubscriptionState,
 } from '../src/services/subscriptionState';
 
@@ -145,6 +152,33 @@ test('isLapsedTrial flips exactly at trialEndsAt', () => {
     true,
     'boundary counts as expired',
   );
+});
+
+test('past_due is retained access, not lapsed — the grace window is usable', () => {
+  // The whole point of grace: the tenant keeps sending while we warn them.
+  assertEqual(classify([{ status: 'past_due' }]), 'past_due');
+});
+
+test('an entitling past_due doc still reports the live state it carries', () => {
+  // getEntitlements keeps past_due in ACTIVE_SUBSCRIPTION_STATUSES, so a
+  // subscription in grace is still the entitling doc and still reports active.
+  assertEqual(classify([{ status: 'active' }, { status: 'past_due' }]), 'active');
+});
+
+test('grace that ran out is lapsed — expired is what the sweep writes at the end', () => {
+  assertEqual(classify([{ status: 'expired' }]), 'lapsed');
+});
+
+test('dunning is reported ahead of grace when a tenant has both', () => {
+  // payment_failed is the one the tenant can fix themselves, in the portal.
+  assertEqual(classify([{ status: 'payment_failed' }, { status: 'past_due' }]), 'payment_failed');
+});
+
+test('retainsAccess is true for everything except lapsed', () => {
+  for (const state of ['active', 'trialing', 'payment_failed', 'past_due', 'none'] as const) {
+    assertEqual(retainsAccess(state), true, state);
+  }
+  assertEqual(retainsAccess('lapsed'), false, 'lapsed');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

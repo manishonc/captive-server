@@ -16,6 +16,7 @@ import { getVenueName } from '../services/venue';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
+import { venueMarketingLapsed } from '../services/entitlements';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
 import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 
@@ -175,6 +176,8 @@ async function scheduleSmsForVenue(
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/SMS] AP has no venueId:', accessPointId); return; }
 
+  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/SMS]')) return;
+
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/SMS] No EntityMarketing for venue:', venueId); return; }
 
@@ -228,6 +231,8 @@ async function scheduleWhatsAppForVenue(
   if (!apDoc.exists) { console.warn('[SOCIAL_WIFI/WA] AP not found:', accessPointId); return; }
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/WA] AP has no venueId:', accessPointId); return; }
+
+  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/WA]')) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/WA] No EntityMarketing for venue:', venueId); return; }
@@ -319,6 +324,8 @@ async function scheduleEmailForVenue(
   if (!apDoc.exists) { console.warn('[SOCIAL_WIFI/EMAIL] AP not found:', accessPointId); return; }
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/EMAIL] AP has no venueId:', accessPointId); return; }
+
+  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/EMAIL]')) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/EMAIL] No EntityMarketing for venue:', venueId); return; }

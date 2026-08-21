@@ -26,7 +26,27 @@ export const CREDITS_COLLECTION = 'CaptivePortal_TenantCredits';
 export const WALLETS_COLLECTION = 'CaptivePortal_CreditWallets';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const ACTIVE_SUBSCRIPTION_STATUSES = ['active', 'trialing'];
+// `past_due` is our grace window — the tenant keeps sending while we warn them,
+// until the sweep flips the doc to `expired`. See GRACE_STATUS in
+// services/subscriptionState.ts.
+const ACTIVE_SUBSCRIPTION_STATUSES = ['active', 'trialing', 'past_due'];
+
+// Zero on every channel, no unlimited nulls: what a tenant whose billing has
+// genuinely lapsed resolves to. Mirrors SUSPENDED_QUOTAS in the CMS's
+// _lib/entitlements.js.
+const SUSPENDED_QUOTAS: Record<string, number | null> = {
+  emailsPerMonth: 0,
+  smsPerMonth: 0,
+  whatsappPerMonth: 0,
+};
+
+const SUSPENDED_FLAGS: PlanFlags = {
+  aiEnabled: false,
+  hidePoweredBy: false,
+  mcpEnabled: false,
+  analyticsEnabled: false,
+  customBrandingEnabled: false,
+};
 
 export type Channel = 'email' | 'sms' | 'whatsapp';
 
@@ -149,6 +169,13 @@ export interface Entitlements {
    * same name (_lib/entitlements.js).
    */
   subscriptionState: SubscriptionState;
+  /**
+   * May this tenant send anything at all? True once billing has genuinely
+   * lapsed, at which point quotas are zero and flags are off. Callers should
+   * check this rather than re-deriving it from subscriptionState, so the rule
+   * lives in one place. Mirrors the CMS field of the same name.
+   */
+  suspended: boolean;
   quotas: Record<string, number | null>;
   flags: PlanFlags;
   /** -1 = unlimited. Enforced in the CMS at venue / access-point creation. */
@@ -216,19 +243,35 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
     if (planSnap.exists) plan = planSnap.data() as Raw;
   }
 
-  const quotas: Record<string, number | null> = {
-    ...DEFAULT_QUOTAS,
-    ...((plan?.quotas as Record<string, number | null>) ?? {}),
-  };
-  const flags = resolvePlanFlags(plan);
+  // Losing your subscription must not grant unlimited quota. `lapsed` means
+  // subscription history exists but every doc is dead — the trial ran out, the
+  // grace window closed, or it was cancelled — and that now resolves to zero
+  // rather than falling through to DEFAULT_QUOTAS (null = unlimited).
+  //
+  // `none` keeps the fail-open defaults: that state is the pre-billing cohort,
+  // and cutting them off over a subscription they were never asked for is worse
+  // than the bug this fixes. Mirrors the CMS's _lib/entitlements.js.
+  const suspended = subscriptionState === 'lapsed';
+
+  const quotas: Record<string, number | null> = suspended
+    ? { ...SUSPENDED_QUOTAS }
+    : {
+        ...DEFAULT_QUOTAS,
+        ...((plan?.quotas as Record<string, number | null>) ?? {}),
+      };
+  const flags = suspended ? { ...SUSPENDED_FLAGS } : resolvePlanFlags(plan);
   const planCredits = resolvePlanCredits(plan);
-  // -1 = unlimited. No plan resolves to unlimited rather than zero.
-  const limits = {
-    maxVenues: Number.isInteger(plan?.maxVenues) ? (plan!.maxVenues as number) : -1,
-    maxAccessPointsPerVenue: Number.isInteger(plan?.maxAccessPointsPerVenue)
-      ? (plan!.maxAccessPointsPerVenue as number)
-      : -1,
-  };
+  // -1 = unlimited. No plan resolves to unlimited rather than zero. A suspended
+  // tenant keeps what they built (0 would read as "delete your venues") but
+  // cannot add more.
+  const limits = suspended
+    ? { maxVenues: 0, maxAccessPointsPerVenue: 0 }
+    : {
+        maxVenues: Number.isInteger(plan?.maxVenues) ? (plan!.maxVenues as number) : -1,
+        maxAccessPointsPerVenue: Number.isInteger(plan?.maxAccessPointsPerVenue)
+          ? (plan!.maxAccessPointsPerVenue as number)
+          : -1,
+      };
 
   const month = currentUsageMonth();
   const [usageSnap, creditsSnap, walletSnap] = await Promise.all([
@@ -267,6 +310,7 @@ export async function getEntitlements(tenantUserId: string): Promise<Entitlement
   const value: Entitlements = {
     planId: (subscription?.planId as string) ?? null,
     subscriptionState,
+    suspended,
     quotas,
     flags,
     limits,
@@ -296,19 +340,22 @@ export function invalidateEntitlements(tenantUserId: string): void {
  * The CMS's `requireActiveSubscription` (cms _lib/plan-gates.js) runs when the
  * tenant clicks send/schedule — but a broadcast scheduled for Sep 1 by a tenant
  * who cancels on Aug 20 sails straight past it. This is the same gate applied
- * at the moment that matters for a scheduled send: dispatch. Same three
- * narrowing conditions, and all three matter there and here:
+ * at the moment that matters for a scheduled send: dispatch.
  *
- *  1. `requireCardForTrial` is ON (`CaptivePortal_Settings/global`) — the flag
- *     stays a complete kill-switch; turning it off relaxes every gate,
- *     including this one. An unreadable settings doc reads as OFF, the
- *     historical behaviour.
- *  2. The account's `Users` doc has `trialActivatedAt`, i.e. it went through
- *     the card flow. A grandfathered card-free tenant has no such stamp and is
- *     never gated, even though their expired trial classifies as 'lapsed'.
- *  3. `subscriptionState === 'lapsed'` — history but nothing retained. 'none'
- *     is excluded (pre-billing tenants), and 'payment_failed' is retained
- *     access (see DUNNING_STATUS in services/subscriptionState.ts).
+ * The condition is `entitlements.suspended`, i.e. `subscriptionState ===
+ * 'lapsed'` — subscription history, but nothing retained. It used to be three
+ * conditions, and the extra two are why an expired trial was never actually
+ * blocked in production:
+ *
+ *  - It required `requireCardForTrial` to be ON. That flag defaulted to OFF, so
+ *    the gate was inert for essentially every tenant.
+ *  - It required `Users.trialActivatedAt`. A card-free trial never gets that
+ *    stamp, so the exact cohort whose trial silently ran out was excluded.
+ *
+ * Nobody is cut off the morning their trial ends: the CMS expiry sweep gives a
+ * lapsed subscription a `past_due` grace window first, and `past_due` is
+ * retained access (see GRACE_STATUS in services/subscriptionState.ts).
+ * Still excluded: 'none' (pre-billing tenants) and 'payment_failed' (dunning).
  *
  * Fails open: if the billing lookup itself errors, this reports NOT lapsed and
  * the send goes out — a Firestore hiccup in a billing check must not silently
@@ -318,16 +365,40 @@ export function invalidateEntitlements(tenantUserId: string): void {
  */
 export async function isLapsedForSending(tenantUserId: string): Promise<boolean> {
   try {
-    const settingsSnap = await db.collection('CaptivePortal_Settings').doc('global').get();
-    if (settingsSnap.data()?.requireCardForTrial !== true) return false;
-
-    const userSnap = await db.collection('Users').doc(tenantUserId).get();
-    if (!userSnap.exists || !userSnap.data()?.trialActivatedAt) return false;
-
-    const { subscriptionState } = await getEntitlements(tenantUserId);
-    return subscriptionState === 'lapsed';
+    const { suspended } = await getEntitlements(tenantUserId);
+    return suspended;
   } catch (error) {
     console.error(`[ENTITLEMENTS] lapse check failed for ${tenantUserId}; allowing dispatch:`, error);
     return false; // fail open — dispatch anyway, matching the CMS gate
+  }
+}
+
+/**
+ * The same gate, keyed by venue, for venue marketing
+ * (`CaptivePortal_EntityMarketing`).
+ *
+ * Those sends fire on guest Wi-Fi events with no human in the loop, so nothing
+ * upstream can intercept them the way the CMS intercepts a campaign send: a
+ * tenant whose billing lapsed kept sending SMS, WhatsApp and email from there
+ * indefinitely. Shared by routes/captive.ts and routes/socialWifiWebhook.ts so
+ * both entry points to the same feature gate identically.
+ *
+ * Fails open on a missing venue or an unreadable tenant, and `getEntitlements`
+ * caches per tenant, so the three channels of one guest event share a read.
+ */
+export async function venueMarketingLapsed(venueId: string, logTag: string): Promise<boolean> {
+  try {
+    const venueDoc = await db.collection('CaptivePortal_Venues').doc(venueId).get();
+    const tenantUserId = venueDoc.data()?.tenantUserId as string | undefined;
+    if (!tenantUserId) return false;
+
+    if (await isLapsedForSending(tenantUserId)) {
+      console.warn(`${logTag} Skipping: subscription lapsed for tenant of venue`, venueId);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error(`${logTag} venue billing check failed; allowing send:`, error);
+    return false;
   }
 }

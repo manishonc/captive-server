@@ -13,6 +13,7 @@ import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { fireAutomationsForGuest } from '../services/campaigns';
+import { venueMarketingLapsed } from '../services/entitlements';
 import { checkVerificationGate, verificationFields } from '../services/verificationGate';
 import { resolveVerification, VERIFICATION_PAGE_DEFAULTS } from '../services/verificationConfig';
 import { normalizeMac } from '../services/verificationToken';
@@ -261,6 +262,8 @@ async function scheduleSmsForEvent(
     return;
   }
 
+  if (await venueMarketingLapsed(venueId, '[SMS]')) return;
+
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {
     console.warn('[SMS] Skipping: no EntityMarketing doc for venueId:', venueId);
@@ -364,6 +367,8 @@ async function scheduleWhatsAppForEvent(
     console.warn('[WHATSAPP] Skipping: AP has no venueId:', accessPointId);
     return;
   }
+
+  if (await venueMarketingLapsed(venueId, '[WHATSAPP]')) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {
@@ -511,6 +516,8 @@ async function scheduleEmailForEvent(
     console.warn('[EMAIL] Skipping: AP has no venueId:', accessPointId);
     return;
   }
+
+  if (await venueMarketingLapsed(venueId, '[EMAIL]')) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {

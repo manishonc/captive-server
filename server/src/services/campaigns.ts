@@ -1753,6 +1753,18 @@ export async function fireAutomationsForGuest(
   const tenantUserId = (venueDoc.data()?.tenantUserId as string) || null;
   if (!tenantUserId) return;
 
+  // Subscription gate, before anything is queried or priced.
+  //
+  // This is the send path with no human in the loop: an automation fires on
+  // every guest Wi-Fi event, forever, with no click that a CMS gate could
+  // intercept. A tenant whose billing lapsed used to keep sending from here
+  // indefinitely — the credit check below is not a substitute, because plan
+  // credits are granted monthly and a lapsed tenant may still hold a balance.
+  if (await isLapsedForSending(tenantUserId)) {
+    console.warn(`[AUTOMATION] subscription lapsed for ${tenantUserId}; not firing automations`);
+    return;
+  }
+
   // Single-field query (no composite index needed); filter status/type in memory.
   const snap = await db.collection(CAMPAIGNS).where('tenantUserId', '==', tenantUserId).get();
   if (snap.empty) return;
