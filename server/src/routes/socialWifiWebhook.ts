@@ -16,7 +16,12 @@ import { getVenueName } from '../services/venue';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
-import { venueMarketingLapsed } from '../services/entitlements';
+import {
+  openVenueMarketingGate,
+  admitVenueMarketingMessage,
+  chargeVenueMarketingMessage,
+  recordHeldVenueMarketingSend,
+} from '../services/venueMarketingCredits';
 import { SOCIAL_WIFI_WEBHOOK_SECRET, SOCIAL_WIFI_AP_MAP } from '../config/socialWifi';
 import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 
@@ -176,7 +181,8 @@ async function scheduleSmsForVenue(
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/SMS] AP has no venueId:', accessPointId); return; }
 
-  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/SMS]')) return;
+  const budget = await openVenueMarketingGate(venueId, '[SOCIAL_WIFI/SMS]');
+  if (!budget) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/SMS] No EntityMarketing for venue:', venueId); return; }
@@ -202,9 +208,30 @@ async function scheduleSmsForVenue(
       shortCodes.push(...trackedSwap.codes);
     } catch (err) { console.error('[SOCIAL_WIFI/SMS] Shortlink swap error:', err); }
 
+    const admission = admitVenueMarketingMessage(budget, 'sms', finalContent);
+    if (!admission.ok) {
+      console.warn('[SOCIAL_WIFI/SMS] Held msg %d for guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId: wifiGuestId,
+        channel: 'sms',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     const messageSid = await scheduleSms(phone, finalContent, delayMinutes);
     if (messageSid) {
       console.log('[SOCIAL_WIFI/SMS] Scheduled msg %d for guest %s, sid=%s', i, wifiGuestId, messageSid);
+      await chargeVenueMarketingMessage(budget, {
+        sendId: mRef.id,
+        channel: 'sms',
+        cost: admission.cost,
+        smsContent: finalContent,
+      });
       await mRef.set({
         wifiEvent, channel: 'sms', accessPointId, wifiGuestId, messageSid,
         to: phone, content: finalContent, messageIndex: i, delayMinutes,
@@ -232,7 +259,8 @@ async function scheduleWhatsAppForVenue(
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/WA] AP has no venueId:', accessPointId); return; }
 
-  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/WA]')) return;
+  const budget = await openVenueMarketingGate(venueId, '[SOCIAL_WIFI/WA]');
+  if (!budget) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/WA] No EntityMarketing for venue:', venueId); return; }
@@ -285,10 +313,30 @@ async function scheduleWhatsAppForVenue(
       components = built;
     }
 
+    const admission = admitVenueMarketingMessage(budget, 'whatsapp');
+    if (!admission.ok) {
+      console.warn('[SOCIAL_WIFI/WA] Held msg %d for guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId: wifiGuestId,
+        channel: 'whatsapp',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     const sendFn = async () => {
       const wamid = await sendWhatsAppTemplate(phone, { templateName: msg.templateName, languageCode: msg.languageCode, components, delayMinutes });
       if (wamid) {
         console.log('[SOCIAL_WIFI/WA] Sent msg %d for guest %s, wamid=%s', i, wifiGuestId, wamid);
+        await chargeVenueMarketingMessage(budget, {
+          sendId: mRef.id,
+          channel: 'whatsapp',
+          cost: admission.cost,
+        });
         await mRef.set({
           wifiEvent, channel: 'whatsapp', accessPointId, wifiGuestId, wamid,
           to: phone, templateName: msg.templateName, languageCode: msg.languageCode,
@@ -325,7 +373,8 @@ async function scheduleEmailForVenue(
   const venueId = apDoc.data()?.venueId;
   if (!venueId) { console.warn('[SOCIAL_WIFI/EMAIL] AP has no venueId:', accessPointId); return; }
 
-  if (await venueMarketingLapsed(venueId, '[SOCIAL_WIFI/EMAIL]')) return;
+  const budget = await openVenueMarketingGate(venueId, '[SOCIAL_WIFI/EMAIL]');
+  if (!budget) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) { console.warn('[SOCIAL_WIFI/EMAIL] No EntityMarketing for venue:', venueId); return; }
@@ -368,6 +417,21 @@ async function scheduleEmailForVenue(
     // link swaps so the pixel URL isn't itself rewritten.
     finalBody = injectOpenPixel(finalBody, mRef.id);
 
+    const admission = admitVenueMarketingMessage(budget, 'email');
+    if (!admission.ok) {
+      console.warn('[SOCIAL_WIFI/EMAIL] Held msg %d for guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId: wifiGuestId,
+        channel: 'email',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     const messageId = await sendEmail(
       email,
       finalSubject,
@@ -377,6 +441,11 @@ async function scheduleEmailForVenue(
     );
     if (messageId) {
       console.log('[SOCIAL_WIFI/EMAIL] Scheduled msg %d for guest %s, id=%s', i, wifiGuestId, messageId);
+      await chargeVenueMarketingMessage(budget, {
+        sendId: mRef.id,
+        channel: 'email',
+        cost: admission.cost,
+      });
       await mRef.set({
         wifiEvent, channel: 'email', accessPointId, wifiGuestId, messageId,
         to: email, subject: finalSubject, body: finalBody, messageIndex: i, delayMinutes,

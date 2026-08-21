@@ -373,32 +373,3 @@ export async function isLapsedForSending(tenantUserId: string): Promise<boolean>
   }
 }
 
-/**
- * The same gate, keyed by venue, for venue marketing
- * (`CaptivePortal_EntityMarketing`).
- *
- * Those sends fire on guest Wi-Fi events with no human in the loop, so nothing
- * upstream can intercept them the way the CMS intercepts a campaign send: a
- * tenant whose billing lapsed kept sending SMS, WhatsApp and email from there
- * indefinitely. Shared by routes/captive.ts and routes/socialWifiWebhook.ts so
- * both entry points to the same feature gate identically.
- *
- * Fails open on a missing venue or an unreadable tenant, and `getEntitlements`
- * caches per tenant, so the three channels of one guest event share a read.
- */
-export async function venueMarketingLapsed(venueId: string, logTag: string): Promise<boolean> {
-  try {
-    const venueDoc = await db.collection('CaptivePortal_Venues').doc(venueId).get();
-    const tenantUserId = venueDoc.data()?.tenantUserId as string | undefined;
-    if (!tenantUserId) return false;
-
-    if (await isLapsedForSending(tenantUserId)) {
-      console.warn(`${logTag} Skipping: subscription lapsed for tenant of venue`, venueId);
-      return true;
-    }
-    return false;
-  } catch (error) {
-    console.error(`${logTag} venue billing check failed; allowing send:`, error);
-    return false;
-  }
-}

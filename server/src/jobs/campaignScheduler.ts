@@ -10,7 +10,11 @@
  */
 
 import cron from 'node-cron';
-import { runDueScheduledCampaigns, sweepStaleReservations } from '../services/campaigns';
+import {
+  runDueScheduledCampaigns,
+  sweepStaleReservations,
+  warnUpcomingScheduledCampaigns,
+} from '../services/campaigns';
 
 export function startCampaignScheduler(): void {
   cron.schedule('* * * * *', () => {
@@ -20,6 +24,14 @@ export function startCampaignScheduler(): void {
   // matters after a dispatch crashed between reserve and settle.
   cron.schedule('17 * * * *', () => {
     sweepStaleReservations().catch((err) => console.error('[CAMPAIGN SWEEPER ERROR]', err));
+  });
+  // Credit lookahead: warn a day ahead about a scheduled send that will not be
+  // affordable, so the tenant can top up before the moment passes rather than
+  // finding it parked afterwards. Hourly, offset from the sweeper.
+  cron.schedule('37 * * * *', () => {
+    warnUpcomingScheduledCampaigns().catch((err) =>
+      console.error('[CAMPAIGN CREDIT LOOKAHEAD ERROR]', err),
+    );
   });
   console.log('[CAMPAIGN SCHEDULER] Started — checking every minute for due broadcasts');
 }
