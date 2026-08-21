@@ -39,7 +39,7 @@ import {
   releaseReservation,
   settleCampaignRun,
   getWalletSnapshot,
-  maybeNotifyLowBalance,
+  onCreditsSpent,
   debitOne,
   InsufficientCreditsError,
   normalizeReservation,
@@ -862,7 +862,7 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
         rateCardVersion: reservation.rateCardVersion,
         breakdown: creditBreakdown,
       });
-      await maybeNotifyLowBalance(campaign.tenantUserId);
+      await onCreditsSpent(campaign.tenantUserId);
     } catch (err) {
       // Leave creditReservation on the doc — the sweeper releases it later.
       console.error(`[CAMPAIGN] settle failed for ${campaign.id} (sweeper will release):`, err);
@@ -1257,6 +1257,65 @@ export async function sweepStaleReservations(): Promise<void> {
   }
 }
 
+/** How far ahead the lookahead warns about a scheduled send it cannot pay for. */
+const SCHEDULED_WARNING_LOOKAHEAD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Warn about scheduled campaigns that will not be affordable when they fire.
+ *
+ * Without this the first anyone hears about it is at `sendAt`, when the send is
+ * parked — by which time the moment the campaign was scheduled for has usually
+ * passed. A day's notice is enough to top up, and it is the whole difference
+ * between "your campaign went out late" and "your campaign did not go out".
+ *
+ * Warns ONCE per campaign, tracked by `creditsWarnedAt`, cleared whenever the
+ * schedule changes. Purely advisory: it never parks or cancels anything —
+ * `runDueScheduledCampaigns` remains the authority at dispatch time.
+ */
+export async function warnUpcomingScheduledCampaigns(): Promise<void> {
+  if (creditsEnforcementMode() === 'off') return;
+
+  const snap = await db.collection(CAMPAIGNS).where('status', '==', 'scheduled').get();
+  const now = Date.now();
+
+  for (const doc of snap.docs) {
+    const data = doc.data() as CampaignDoc & { creditsWarnedAt?: unknown };
+    const sendAt = data.schedule?.sendAt;
+    if (!sendAt) continue;
+
+    const dueIn = new Date(sendAt).getTime() - now;
+    // Already due is runDueScheduledCampaigns' problem, not this pass's.
+    if (dueIn <= 0 || dueIn > SCHEDULED_WARNING_LOOKAHEAD_MS) continue;
+    if (data.creditsWarnedAt) continue;
+
+    try {
+      const estimate = await estimateCampaignCredits(doc.id, data.tenantUserId);
+      if (!estimate.ok || estimate.sufficient) continue;
+
+      const starved = estimate.perChannel.filter((c) => c.short > 0);
+      const warning = estimate.sharedContended
+        ? `This send needs ${estimate.creditsNeeded.toLocaleString()} credits on ` +
+          `${starved.map((c) => CHANNEL_NOUNS[c.channel]).join('/')}. You have enough overall — ` +
+          'move some credits across before it goes out.'
+        : `This send needs ${estimate.creditsNeeded.toLocaleString()} credits and you have ` +
+          `${estimate.spendable.toLocaleString()}. Top up before ${new Date(sendAt).toUTCString()} ` +
+          'or part of it will be held.';
+
+      await doc.ref.update({
+        creditsWarning: warning,
+        creditsWarnedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      // Same 24h-deduped alert the debit path uses, so a tenant with several
+      // upcoming campaigns gets one email rather than one per campaign.
+      await onCreditsSpent(data.tenantUserId).catch(() => {});
+      console.warn(`[CAMPAIGN] scheduled ${doc.id} is short on credits; warned tenant ${data.tenantUserId}`);
+    } catch (err) {
+      console.error(`[CAMPAIGN] lookahead estimate failed for ${doc.id}:`, err);
+    }
+  }
+}
+
 /** Run any scheduled broadcasts whose send time has arrived. Called by the cron. */
 export async function runDueScheduledCampaigns(): Promise<void> {
   const snap = await db.collection(CAMPAIGNS).where('status', '==', 'scheduled').get();
@@ -1310,7 +1369,7 @@ export async function runDueScheduledCampaigns(): Promise<void> {
         await doc.ref
           .update({ creditsWarning: warning, updatedAt: FieldValue.serverTimestamp() })
           .catch(() => {});
-        await maybeNotifyLowBalance(data.tenantUserId).catch(() => {});
+        await onCreditsSpent(data.tenantUserId).catch(() => {});
       }
       continue;
     }
@@ -1389,6 +1448,99 @@ export async function estimateCampaignCredits(
     perChannel,
     sharedContended: !sufficient && spendable >= estimate.creditsNeeded,
     rateCardVersion: estimate.config.rateCardVersion,
+    enforcementMode: creditsEnforcementMode(),
+  };
+}
+
+/**
+ * What ONE firing of an automation costs.
+ *
+ * An automation is not a broadcast: it fires for a single guest, on a Wi-Fi
+ * event, over and over. Running it through `estimateCampaignCredits` answers a
+ * question nobody asked — "what would it cost to message this whole audience
+ * once" — and reads as a single alarming number for something that actually
+ * spends a trickle. The tenant's real question is "what does each one cost, and
+ * how many can I afford", which is what this returns.
+ *
+ * Priced as the WORST case: a guest reachable on every enabled channel, in
+ * whichever language of the segment prices highest. Under-quoting a recurring
+ * cost is how a wallet drains overnight, and SMS pricing is language-dependent
+ * (variant text plus the CTIA opt-out suffix), so the cheapest variant is not a
+ * safe number to show.
+ *
+ * `addressablePool` is how many guests currently match the segment — a rough
+ * ceiling on firings, not a promise, since the same guest can reconnect.
+ */
+export async function estimateAutomationRun(
+  campaignId: string,
+  tenantUserId: string,
+): Promise<
+  | {
+      ok: true;
+      creditsPerRun: number;
+      creditsPerChannel: Record<Channel, number>;
+      smsSegmentsPerMessage: number | null;
+      addressablePool: number;
+      spendable: number;
+      /** Firings the current balance covers, null when a run costs nothing. */
+      runsAffordable: number | null;
+      /** False when the balance cannot cover even one firing. */
+      sufficient: boolean;
+      rateCardVersion: number;
+      enforcementMode: string;
+    }
+  | { ok: false; error: string }
+> {
+  const campaign = await loadCampaign(campaignId);
+  if (!campaign) return { ok: false, error: 'not_found' };
+  if (campaign.tenantUserId !== tenantUserId) return { ok: false, error: 'forbidden' };
+
+  const config = await getCreditConfig();
+  const [audience, wallet] = await Promise.all([
+    materializeAudience(campaign),
+    getWalletSnapshot(tenantUserId).catch(() => null),
+  ]);
+
+  const messages = (campaign.messages || []).filter((m) => campaign.channels.includes(m.channel));
+  const pricer = createUnitPricer(config);
+
+  // The languages this automation could actually fire in. Falling back to a
+  // single null language keeps the estimate meaningful for a brand-new
+  // automation whose segment has not matched anyone yet.
+  const languages = Array.from(new Set(audience.map((m) => m.language)));
+  const pricingLanguages: Array<string | null> = languages.length > 0 ? languages : [null];
+
+  const creditsPerChannel: Record<Channel, number> = { email: 0, sms: 0, whatsapp: 0 };
+  let creditsPerRun = 0;
+  let smsSegs: number | null = null;
+
+  for (const msg of messages) {
+    let worst = 0;
+    for (const language of pricingLanguages) {
+      const cost = pricer.credits(msg, language);
+      if (cost > worst) worst = cost;
+      if (msg.channel === 'sms') {
+        const segs = pricer.segments(msg, language);
+        if (segs !== null && (smsSegs === null || segs > smsSegs)) smsSegs = segs;
+      }
+    }
+    creditsPerChannel[msg.channel] += worst;
+    creditsPerRun += worst;
+  }
+
+  const spendable = wallet?.spendable ?? 0;
+
+  return {
+    ok: true,
+    creditsPerRun,
+    creditsPerChannel,
+    smsSegmentsPerMessage: smsSegs,
+    addressablePool: audience.length,
+    spendable,
+    runsAffordable: creditsPerRun > 0 ? Math.floor(spendable / creditsPerRun) : null,
+    // A zero-cost automation (no messages yet) is not "insufficient".
+    sufficient: creditsPerRun === 0 || spendable >= creditsPerRun,
+    rateCardVersion: config.rateCardVersion,
     enforcementMode: creditsEnforcementMode(),
   };
 }
@@ -1641,7 +1793,7 @@ export async function retryHeldSends(
         rateCardVersion: config.rateCardVersion,
         breakdown,
       });
-      await maybeNotifyLowBalance(tenantUserId);
+      await onCreditsSpent(tenantUserId);
     } catch (err) {
       console.error(`[CAMPAIGN] retry settle failed for ${campaignId} (sweeper will release):`, err);
     }
@@ -1753,6 +1905,18 @@ export async function fireAutomationsForGuest(
   const tenantUserId = (venueDoc.data()?.tenantUserId as string) || null;
   if (!tenantUserId) return;
 
+  // Subscription gate, before anything is queried or priced.
+  //
+  // This is the send path with no human in the loop: an automation fires on
+  // every guest Wi-Fi event, forever, with no click that a CMS gate could
+  // intercept. A tenant whose billing lapsed used to keep sending from here
+  // indefinitely — the credit check below is not a substitute, because plan
+  // credits are granted monthly and a lapsed tenant may still hold a balance.
+  if (await isLapsedForSending(tenantUserId)) {
+    console.warn(`[AUTOMATION] subscription lapsed for ${tenantUserId}; not firing automations`);
+    return;
+  }
+
   // Single-field query (no composite index needed); filter status/type in memory.
   const snap = await db.collection(CAMPAIGNS).where('tenantUserId', '==', tenantUserId).get();
   if (snap.empty) return;
@@ -1858,7 +2022,7 @@ export async function fireAutomationsForGuest(
             scheduledAt: FieldValue.serverTimestamp(),
           })
           .catch(() => {});
-        await maybeNotifyLowBalance(campaign.tenantUserId).catch(() => {});
+        await onCreditsSpent(campaign.tenantUserId).catch(() => {});
         continue;
       }
 
@@ -1900,5 +2064,5 @@ export async function fireAutomationsForGuest(
     }
   }
 
-  if (debited) await maybeNotifyLowBalance(tenantUserId).catch(() => {});
+  if (debited) await onCreditsSpent(tenantUserId).catch(() => {});
 }

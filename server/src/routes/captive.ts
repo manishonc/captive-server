@@ -13,6 +13,12 @@ import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
 import { fireAutomationsForGuest } from '../services/campaigns';
+import {
+  openVenueMarketingGate,
+  admitVenueMarketingMessage,
+  chargeVenueMarketingMessage,
+  recordHeldVenueMarketingSend,
+} from '../services/venueMarketingCredits';
 import { checkVerificationGate, verificationFields } from '../services/verificationGate';
 import { resolveVerification, VERIFICATION_PAGE_DEFAULTS } from '../services/verificationConfig';
 import { normalizeMac } from '../services/verificationToken';
@@ -261,6 +267,9 @@ async function scheduleSmsForEvent(
     return;
   }
 
+  const budget = await openVenueMarketingGate(venueId, '[SMS]');
+  if (!budget) return;
+
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {
     console.warn('[SMS] Skipping: no EntityMarketing doc for venueId:', venueId);
@@ -304,10 +313,33 @@ async function scheduleSmsForEvent(
       console.error('[SHORTLINK SWAP ERROR - sms]', err);
     }
 
+    // Priced on the FINAL content: segments depend on the text actually sent,
+    // after variant resolution and link swapping.
+    const admission = admitVenueMarketingMessage(budget, 'sms', finalContent);
+    if (!admission.ok) {
+      console.warn('[SMS] Held msg %d for wifi guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId,
+        channel: 'sms',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     const messageSid = await scheduleSms(to, finalContent, delayMinutes);
 
     if (messageSid) {
       console.log('[SMS] Scheduled msg %d for wifi guest %s, sid=%s, delay=%d min', i, wifiGuestId, messageSid, delayMinutes);
+      await chargeVenueMarketingMessage(budget, {
+        sendId: mRef.id,
+        channel: 'sms',
+        cost: admission.cost,
+        smsContent: finalContent,
+      });
       const record: CaptivePortalMarketingDocument = {
         wifiEvent,
         channel: 'sms',
@@ -364,6 +396,9 @@ async function scheduleWhatsAppForEvent(
     console.warn('[WHATSAPP] Skipping: AP has no venueId:', accessPointId);
     return;
   }
+
+  const budget = await openVenueMarketingGate(venueId, '[WHATSAPP]');
+  if (!budget) return;
 
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {
@@ -434,6 +469,24 @@ async function scheduleWhatsAppForEvent(
       components = built;
     }
 
+    // Admitted before the send is scheduled, not inside sendFn: a delayed
+    // WhatsApp message fires minutes later, and admitting then would let a
+    // burst of guests each pass a check against the same stale balance.
+    const admission = admitVenueMarketingMessage(budget, 'whatsapp');
+    if (!admission.ok) {
+      console.warn('[WHATSAPP] Held msg %d for wifi guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId,
+        channel: 'whatsapp',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     // Meta Cloud API has no native scheduling — use setTimeout for short delays
     // For production with long delays, replace with a job queue (e.g. Bull, GCP Tasks)
     const sendFn = async () => {
@@ -446,6 +499,11 @@ async function scheduleWhatsAppForEvent(
 
       if (wamid) {
         console.log('[WHATSAPP] Sent msg %d for wifi guest %s, wamid=%s, delay=%d min', i, wifiGuestId, wamid, delayMinutes);
+        await chargeVenueMarketingMessage(budget, {
+          sendId: mRef.id,
+          channel: 'whatsapp',
+          cost: admission.cost,
+        });
         const record = {
           wifiEvent,
           channel: 'whatsapp' as const,
@@ -512,6 +570,9 @@ async function scheduleEmailForEvent(
     return;
   }
 
+  const budget = await openVenueMarketingGate(venueId, '[EMAIL]');
+  if (!budget) return;
+
   const marketingDoc = await db.collection('CaptivePortal_EntityMarketing').doc(`venue_${venueId}`).get();
   if (!marketingDoc.exists) {
     console.warn('[EMAIL] Skipping: no EntityMarketing doc for venueId:', venueId);
@@ -576,6 +637,21 @@ async function scheduleEmailForEvent(
     // itself rewritten into a short link.
     finalBody = injectOpenPixel(finalBody, mRef.id);
 
+    const admission = admitVenueMarketingMessage(budget, 'email');
+    if (!admission.ok) {
+      console.warn('[EMAIL] Held msg %d for wifi guest %s: insufficient credits', i, wifiGuestId);
+      await recordHeldVenueMarketingSend({
+        tenantUserId: budget.tenantUserId,
+        venueId,
+        wifiGuestId,
+        channel: 'email',
+        cost: admission.cost,
+        wifiEvent,
+        messageIndex: i,
+      });
+      continue;
+    }
+
     // The 5th arg adds the RFC 8058 List-Unsubscribe headers, so Gmail/Apple
     // show a native unsubscribe button. Empty string when unconfigured.
     const messageId = await sendEmail(
@@ -588,6 +664,11 @@ async function scheduleEmailForEvent(
 
     if (messageId) {
       console.log('[EMAIL] Scheduled msg %d for wifi guest %s, id=%s, delay=%d min', i, wifiGuestId, messageId, delayMinutes);
+      await chargeVenueMarketingMessage(budget, {
+        sendId: mRef.id,
+        channel: 'email',
+        cost: admission.cost,
+      });
       const record = {
         wifiEvent,
         channel: 'email' as const,

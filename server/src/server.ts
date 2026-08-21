@@ -15,6 +15,7 @@ import verifyRoutes from './routes/verify';
 import publicPricingRoutes from './routes/publicPricing';
 import { startApMonitor } from './jobs/apMonitor';
 import { startCampaignScheduler } from './jobs/campaignScheduler';
+import { startSubscriptionExpirySweep } from './jobs/subscriptionExpiry';
 import { channelConfigured, VERIFICATION_CHANNELS } from './services/verificationConfig';
 import { verificationSubsystemReady } from './services/verificationToken';
 import { portalSecretConfigured } from './services/clientIp';
@@ -97,4 +98,5 @@ app.listen(PORT, () => {
   logAdoptionReadiness();
   startApMonitor();
   startCampaignScheduler();
+  startSubscriptionExpirySweep();
 });

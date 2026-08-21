@@ -182,7 +182,8 @@ Used by the CMS to trigger immediate marketing "Send test" messages via
 
 | Variable | Description |
 |---|---|
-| `INTERNAL_API_SECRET` | Shared secret authenticating server-to-server calls from the CMS. Must equal the CMS's `CAPTIVE_SERVER_INTERNAL_SECRET`. Endpoint fails closed (401) if unset. |
+| `INTERNAL_API_SECRET` | Shared secret authenticating server-to-server calls from the CMS. Must equal the CMS's `CAPTIVE_SERVER_INTERNAL_SECRET`. Endpoint fails closed (401) if unset. Also sent on the one call that goes the OTHER way — see `CMS_INTERNAL_URL`. |
+| `CMS_INTERNAL_URL` | The CMS's base URL (e.g. `https://portal.heidifi.ai`), used only to trigger credit auto-refill after a debit. Stripe and the credit-grant ledger live in the CMS, so this server asks it to charge rather than holding a Stripe client of its own. **Optional** — unset simply means this deployment does not trigger auto-refill; nothing else changes. |
 
 **`INTERNAL_API_SECRET`:** Generate with `openssl rand -hex 32`.
 
@@ -246,6 +247,7 @@ Vercel, **before** deploying `mcp`.
 | Variable | Service | Description |
 |---|---|---|
 | `ENFORCE_QUOTAS` | server + CMS | `true` flips soft quota warnings into hard blocks (sends stop at the plan limit with `skipped_quota` records). Leave unset while messaging is free. |
+| `ENFORCE_CREDITS` | server | `off` (default) \| `warn` \| `true`. The master switch for the credit system. **While it is `off` nothing reads or writes the wallet on the send path** — no reservation, no debit, no ledger entry, and the low-balance alert never fires, because it only runs on a debit. Estimates and balances still display, so the UI looks live while nothing is actually metered. `warn` prices and records without blocking; `true` blocks sends that cannot be paid for (held with `deliveryStatus: 'held_insufficient_credits'`). Roll out `warn` first and read the ledger before switching to `true`. |
 
 ---
 

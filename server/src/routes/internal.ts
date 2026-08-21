@@ -36,6 +36,7 @@ import {
   resumeCampaign,
   cancelCampaign,
   estimateCampaignCredits,
+  estimateAutomationRun,
   retryHeldSends,
 } from '../services/campaigns';
 import { getCreditConfig } from '../services/credits';
@@ -488,6 +489,8 @@ router.post('/adoption/rate-limit', async (req: Request, res: Response) => {
 interface CampaignActionBody {
   campaignId?: string;
   tenantUserId?: string;
+  /** estimate only: 'automation' prices one firing, anything else a broadcast. */
+  mode?: 'broadcast' | 'automation';
 }
 
 /** Map a service-layer reason to an HTTP status. */
@@ -532,7 +535,13 @@ router.post('/campaigns/estimate', async (req: Request<{}, {}, CampaignActionBod
     return res.status(400).json({ ok: false, error: 'campaignId and tenantUserId are required' });
   }
   try {
-    const result = await estimateCampaignCredits(String(campaignId), String(tenantUserId));
+    // `mode` decides which question is being asked. An automation fires for one
+    // guest at a time, so the broadcast estimate ("what to message everyone
+    // once") is the wrong number for it — see estimateAutomationRun.
+    const result =
+      req.body?.mode === 'automation'
+        ? await estimateAutomationRun(String(campaignId), String(tenantUserId))
+        : await estimateCampaignCredits(String(campaignId), String(tenantUserId));
     if (!result.ok) return res.status(campaignErrorStatus(result.error)).json({ ok: false, error: result.error });
     return res.json(result);
   } catch (err) {
