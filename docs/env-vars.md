@@ -182,7 +182,8 @@ Used by the CMS to trigger immediate marketing "Send test" messages via
 
 | Variable | Description |
 |---|---|
-| `INTERNAL_API_SECRET` | Shared secret authenticating server-to-server calls from the CMS. Must equal the CMS's `CAPTIVE_SERVER_INTERNAL_SECRET`. Endpoint fails closed (401) if unset. |
+| `INTERNAL_API_SECRET` | Shared secret authenticating server-to-server calls from the CMS. Must equal the CMS's `CAPTIVE_SERVER_INTERNAL_SECRET`. Endpoint fails closed (401) if unset. Also sent on the one call that goes the OTHER way — see `CMS_INTERNAL_URL`. |
+| `CMS_INTERNAL_URL` | The CMS's base URL (e.g. `https://portal.heidifi.ai`), used only to trigger credit auto-refill after a debit. Stripe and the credit-grant ledger live in the CMS, so this server asks it to charge rather than holding a Stripe client of its own. **Optional** — unset simply means this deployment does not trigger auto-refill; nothing else changes. |
 
 **`INTERNAL_API_SECRET`:** Generate with `openssl rand -hex 32`.
 

@@ -39,7 +39,7 @@ import {
   releaseReservation,
   settleCampaignRun,
   getWalletSnapshot,
-  maybeNotifyLowBalance,
+  onCreditsSpent,
   debitOne,
   InsufficientCreditsError,
   normalizeReservation,
@@ -862,7 +862,7 @@ async function dispatchCampaign(campaign: CampaignDoc): Promise<{ sent: number; 
         rateCardVersion: reservation.rateCardVersion,
         breakdown: creditBreakdown,
       });
-      await maybeNotifyLowBalance(campaign.tenantUserId);
+      await onCreditsSpent(campaign.tenantUserId);
     } catch (err) {
       // Leave creditReservation on the doc — the sweeper releases it later.
       console.error(`[CAMPAIGN] settle failed for ${campaign.id} (sweeper will release):`, err);
@@ -1308,7 +1308,7 @@ export async function warnUpcomingScheduledCampaigns(): Promise<void> {
       });
       // Same 24h-deduped alert the debit path uses, so a tenant with several
       // upcoming campaigns gets one email rather than one per campaign.
-      await maybeNotifyLowBalance(data.tenantUserId).catch(() => {});
+      await onCreditsSpent(data.tenantUserId).catch(() => {});
       console.warn(`[CAMPAIGN] scheduled ${doc.id} is short on credits; warned tenant ${data.tenantUserId}`);
     } catch (err) {
       console.error(`[CAMPAIGN] lookahead estimate failed for ${doc.id}:`, err);
@@ -1369,7 +1369,7 @@ export async function runDueScheduledCampaigns(): Promise<void> {
         await doc.ref
           .update({ creditsWarning: warning, updatedAt: FieldValue.serverTimestamp() })
           .catch(() => {});
-        await maybeNotifyLowBalance(data.tenantUserId).catch(() => {});
+        await onCreditsSpent(data.tenantUserId).catch(() => {});
       }
       continue;
     }
@@ -1793,7 +1793,7 @@ export async function retryHeldSends(
         rateCardVersion: config.rateCardVersion,
         breakdown,
       });
-      await maybeNotifyLowBalance(tenantUserId);
+      await onCreditsSpent(tenantUserId);
     } catch (err) {
       console.error(`[CAMPAIGN] retry settle failed for ${campaignId} (sweeper will release):`, err);
     }
@@ -2022,7 +2022,7 @@ export async function fireAutomationsForGuest(
             scheduledAt: FieldValue.serverTimestamp(),
           })
           .catch(() => {});
-        await maybeNotifyLowBalance(campaign.tenantUserId).catch(() => {});
+        await onCreditsSpent(campaign.tenantUserId).catch(() => {});
         continue;
       }
 
@@ -2064,5 +2064,5 @@ export async function fireAutomationsForGuest(
     }
   }
 
-  if (debited) await maybeNotifyLowBalance(tenantUserId).catch(() => {});
+  if (debited) await onCreditsSpent(tenantUserId).catch(() => {});
 }

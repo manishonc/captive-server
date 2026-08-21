@@ -15,6 +15,7 @@
  */
 
 import { db } from '../firebase';
+import { triggerAutoRefill } from './autoRefillTrigger';
 import { sendEmail } from './brevo';
 import { smsSegments } from './smsBilling';
 import {
@@ -757,8 +758,37 @@ export async function debitOne(opts: {
 const LOW_BALANCE_DEDUPE_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * The single hook every debit path calls once it has spent something.
+ *
+ * Order matters: auto-refill runs FIRST, and only if it does not resolve the
+ * situation does the tenant get a low-balance alert. A tenant who set up
+ * auto-refill precisely so they never have to think about this should not be
+ * emailed about a balance that topped itself up seconds later.
+ *
+ * The refill trigger is a hint to the CMS, which re-checks everything and does
+ * the actual charging; if it is disabled, capped, or the card fails, it returns
+ * without topping up and the alert below does its job — which is exactly the
+ * fallback the spec asks for.
+ *
+ * Best-effort throughout: this runs after the message has already gone out, so
+ * nothing here may throw back into the send path.
+ */
+export async function onCreditsSpent(tenantUserId: string): Promise<void> {
+  try {
+    await triggerAutoRefill(tenantUserId);
+  } catch (error) {
+    console.error('[CREDITS] auto-refill trigger failed:', error);
+  }
+  await maybeNotifyLowBalance(tenantUserId).catch(() => {});
+}
+
+/**
  * After a debit: if spendable dropped under the configured threshold and the
  * tenant hasn't been notified in 24h, mark + notify (best-effort email).
+ *
+ * Prefer `onCreditsSpent` from a send path — it gives auto-refill a chance to
+ * fix the problem before the tenant is told about it. This is the alert on its
+ * own, for callers that only want to warn.
  */
 export async function maybeNotifyLowBalance(tenantUserId: string): Promise<void> {
   try {

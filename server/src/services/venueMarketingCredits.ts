@@ -27,7 +27,7 @@ import {
   providerCostForMessage,
   debitOne,
   creditsEnforcementMode,
-  maybeNotifyLowBalance,
+  onCreditsSpent,
   type CreditChannel,
 } from './credits';
 import { availableTotal } from './creditBuckets';
@@ -204,7 +204,7 @@ export async function chargeVenueMarketingMessage(
         opts.smsContent,
       ),
     });
-    await maybeNotifyLowBalance(budget.tenantUserId).catch(() => {});
+    await onCreditsSpent(budget.tenantUserId).catch(() => {});
   } catch (error) {
     console.error('[VENUE MARKETING CREDITS] debit failed:', error);
   }
