@@ -43,15 +43,17 @@ interface StoredUnifiConfig {
   password?: string;
 }
 
-interface VenueUnifiAp {
+export interface VenueUnifiAp {
   id: string;
   mac: string;
+  /** Display name, used by the live-clients view to label which router a device is on. */
+  name?: string | null;
   venueId?: string;
   unifiConfig?: StoredUnifiConfig | null;
 }
 
 /** Build a controller config from a stored AP unifiConfig, with UNIFI_* env fallback per field. */
-function resolveConfig(stored?: StoredUnifiConfig | null): UnifiConfig {
+export function resolveConfig(stored?: StoredUnifiConfig | null): UnifiConfig {
   const ct = stored?.controllerType || process.env.UNIFI_CONTROLLER_TYPE || 'classic';
   const controllerType = ct === 'udm' ? 'udm' : 'classic';
   // Internal address (UNIFI_CONTROLLER_URL env) wins over the AP's stored public URL.
@@ -65,18 +67,18 @@ function resolveConfig(stored?: StoredUnifiConfig | null): UnifiConfig {
   return { controllerType, controllerUrl, site, username, password };
 }
 
-async function getVenueUnifiAps(venueId: string): Promise<VenueUnifiAp[]> {
+export async function getVenueUnifiAps(venueId: string): Promise<VenueUnifiAp[]> {
   const snap = await db.collection(AP_COLLECTION).where('venueId', '==', venueId).get();
   const aps: VenueUnifiAp[] = [];
   snap.forEach((doc) => {
     const d = doc.data() as any;
     if (String(d.vendor || '').toLowerCase() !== 'unifi') return;
-    aps.push({ id: doc.id, mac: normalizeMac(d.mac), venueId, unifiConfig: d.unifiConfig || null });
+    aps.push({ id: doc.id, mac: normalizeMac(d.mac), name: d.name || null, venueId, unifiConfig: d.unifiConfig || null });
   });
   return aps;
 }
 
-function resolveVenueController(aps: VenueUnifiAp[]): UnifiConfig {
+export function resolveVenueController(aps: VenueUnifiAp[]): UnifiConfig {
   const withCfg = aps.find((a) => a.unifiConfig?.password);
   return resolveConfig(withCfg?.unifiConfig || undefined);
 }

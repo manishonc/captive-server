@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerVenueTools } from './tools/venues';
 import { registerAccessPointTools } from './tools/accessPoints';
+import { registerActiveClientTools } from './tools/activeClients';
 import { registerGuestTools } from './tools/guests';
 import { registerCampaignTools } from './tools/campaigns';
 import { registerAnalyticsTools } from './tools/analytics';
@@ -22,6 +23,10 @@ import { registerUsageTools } from './tools/usage';
  * Tier 1 read tools (all tenant-scoped via the OAuth token's tenantUserId):
  *   venues:        list_venues, get_venue
  *   access points: list_access_points (venue-scoped), get_access_point
+ *   live clients:  list_active_clients (who is connected right now, guests grouped
+ *                  with all of their devices), get_venue_live_count, get_live_counts —
+ *                  read straight from the WiFi controller. All read-only: there is
+ *                  deliberately no disconnect tool, see tools/activeClients.ts for why.
  *   guests:        list_guests (filterable by guest language), get_guest,
  *                  search_guests — all carry the splash language the guest
  *                  chose, or 'unknown' when none was recorded
@@ -63,6 +68,7 @@ export function buildMcpServer(): McpServer {
 
   registerVenueTools(server);
   registerAccessPointTools(server);
+  registerActiveClientTools(server);
   registerGuestTools(server);
   registerCampaignTools(server);
   registerAnalyticsTools(server);

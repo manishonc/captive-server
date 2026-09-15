@@ -18,6 +18,12 @@ import { sendWhatsAppTemplate, WhatsAppTemplateComponent } from '../services/wha
 import { createShortLink, VISITOR_BASE_URL } from '../services/shortlinks';
 import { getVenueName } from '../services/venue';
 import { applyVenueWifi, detachApFromVenueWifi, getDeviceStatuses, runDiagnostics, resolveAnyController } from '../services/unifiWlan';
+import {
+  disconnectVenueClient,
+  DisconnectError,
+  getOrgActiveClients,
+  getVenueActiveClients,
+} from '../services/unifiClients';
 import { checkApCredentials } from '../services/unifiCredentialCheck'; // ⚠️ TEMPORARY — remove with its route
 import { adoptDevice, forgetDevice } from '../services/unifi';
 import { canonMac, listPendingDevices, adoptRegisteredPendingDevices } from '../services/unifiAdoption';
@@ -225,6 +231,58 @@ router.post('/unifi/device-status', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[INTERNAL UNIFI device-status]', err);
     return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'device-status failed' });
+  }
+});
+
+// ── Live clients ──────────────────────────────────────────────────────────────
+// Who is connected to a venue's WiFi right now, read straight from the controller.
+// The CMS has already authorized the caller against the venue before reaching here;
+// unifiClients then re-derives the venue's own APs and filters to them, so a caller
+// cannot widen their own scope by passing a different id.
+
+router.post('/unifi/active-clients', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { venueId, includeClients, includeIdentity } = req.body || {};
+  if (!venueId) return res.status(400).json({ ok: false, error: 'venueId is required' });
+  try {
+    const venue = await getVenueActiveClients(String(venueId), {
+      includeClients: includeClients !== false,
+      includeIdentity: includeIdentity !== false,
+    });
+    return res.json({ ok: true, venue });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI active-clients]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'active-clients failed' });
+  }
+});
+
+router.post('/unifi/active-clients/org', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const venueIds: string[] = Array.isArray(req.body?.venueIds) ? req.body.venueIds : [];
+  try {
+    const org = await getOrgActiveClients(venueIds);
+    return res.json({ ok: true, org });
+  } catch (err) {
+    console.error('[INTERNAL UNIFI active-clients/org]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'org rollup failed' });
+  }
+});
+
+router.post('/unifi/disconnect-client', async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
+  const { venueId, mac, actorId } = req.body || {};
+  if (!venueId || !mac) return res.status(400).json({ ok: false, error: 'venueId and mac are required' });
+  try {
+    const result = await disconnectVenueClient(String(venueId), String(mac), actorId ? String(actorId) : undefined);
+    return res.json(result);
+  } catch (err) {
+    // A refusal is a real answer, not a controller fault — pass the reason and its status
+    // through so the CMS can tell "not connected" from "not yours" from "controller down".
+    if (err instanceof DisconnectError) {
+      return res.status(err.status).json({ ok: false, error: err.code });
+    }
+    console.error('[INTERNAL UNIFI disconnect-client]', err);
+    return res.status(502).json({ ok: false, error: err instanceof Error ? err.message : 'disconnect failed' });
   }
 });
 
