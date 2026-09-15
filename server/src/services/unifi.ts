@@ -359,6 +359,240 @@ export async function getDevices(config: UnifiConfig): Promise<UnifiDevice[]> {
   return mapped;
 }
 
+// ── Live clients (stat/sta) ───────────────────────────────────────────────────
+
+/**
+ * One connected station as reported by the controller.
+ *
+ * `canon`/`apCanon` are the join keys: AP docs in Firestore store MACs in several
+ * legacy spellings (hyphenated, bare hex, upper case), so every cross-source match
+ * goes through `canonMac`, never the raw string.
+ */
+export interface UnifiClient {
+  mac: string;
+  canon: string;
+  /** Null for wired stations, which report `sw_mac`/`sw_port` instead. */
+  apMac: string | null;
+  apCanon: string | null;
+  isWired: boolean;
+  authorized: boolean;
+  isGuest: boolean;
+  hostname: string | null;
+  /** Controller-side alias, set by an admin. Usually absent. */
+  name: string | null;
+  ip: string | null;
+  essid: string | null;
+  network: string | null;
+  /** Manufacturer prefix. The only identity hint that survives MAC randomization. */
+  oui: string | null;
+  uptimeSec: number | null;
+  idleSec: number | null;
+  /** Controller-clock epoch seconds. Diagnostic only — see the note on uptime below. */
+  assocTime: number | null;
+  rxBytes: number;
+  txBytes: number;
+  signal: number | null;
+  rssi: number | null;
+  channel: number | null;
+  radio: string | null;
+  satisfaction: number | null;
+}
+
+function num(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function str(v: unknown): string | null {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s ? s : null;
+}
+
+/**
+ * Short-lived cache of `stat/sta`, deliberately LONGER than `DEVICE_CACHE_TTL_MS`.
+ *
+ * `stat/device` returns one row per AP; `stat/sta` returns one row per client across
+ * EVERY tenant on the shared site, so it is an order of magnitude more controller work.
+ * The 5s device TTL was tuned for someone watching an adoption progress bar wait for a
+ * state transition — nobody waits on a headcount that way.
+ *
+ * 8s is deliberately just UNDER the dashboard's 10s poll. A TTL equal to the poll
+ * interval is the worst possible choice: phase drift makes each poll land either just
+ * inside the window (serving data a full cycle old, so the UI visibly stalls for 20s)
+ * or just outside it (every poll is a controller call and the cache does nothing).
+ * Under the interval, each poll refreshes while N simultaneous viewers of the same
+ * venue still collapse onto one controller round trip.
+ */
+const clientCache = new Map<string, { rows: UnifiClient[]; at: number }>();
+const CLIENT_CACHE_TTL_MS = 8_000;
+
+/**
+ * In-flight `stat/sta` calls, keyed like the cache.
+ *
+ * A TTL only helps AFTER the first response lands. On a cold cache the org rollup plus
+ * three open venue pages fire four concurrent identical requests at the controller.
+ * `getDevices` has this gap; do not copy it here.
+ */
+const clientInflight = new Map<string, Promise<UnifiClient[]>>();
+
+function clientCacheKey(config: UnifiConfig): string {
+  return `${config.controllerType}|${config.controllerUrl}|${config.site}`;
+}
+
+/** Drop the cached client list — call after anything that changes who is connected. */
+export function invalidateClientCache(config?: UnifiConfig): void {
+  if (config) clientCache.delete(clientCacheKey(config));
+  else clientCache.clear();
+}
+
+function mapClient(c: any): UnifiClient {
+  const apMac = str(c.ap_mac);
+  return {
+    mac: normalizeMac(c.mac),
+    canon: canonMac(c.mac),
+    apMac: apMac ? normalizeMac(apMac) : null,
+    apCanon: apMac ? canonMac(apMac) : null,
+    isWired: c.is_wired === true,
+    authorized: c.authorized === true,
+    isGuest: c.is_guest === true,
+    hostname: str(c.hostname),
+    name: str(c.name),
+    ip: str(c.ip),
+    essid: str(c.essid),
+    network: str(c.network),
+    oui: str(c.oui),
+    uptimeSec: num(c.uptime),
+    idleSec: num(c.idletime),
+    assocTime: num(c.latest_assoc_time) ?? num(c.assoc_time),
+    rxBytes: num(c.rx_bytes) ?? 0,
+    txBytes: num(c.tx_bytes) ?? 0,
+    signal: num(c.signal),
+    rssi: num(c.rssi),
+    channel: num(c.channel),
+    radio: str(c.radio),
+    satisfaction: num(c.satisfaction),
+  };
+}
+
+/**
+ * Every station currently connected to the site.
+ *
+ * IMPORTANT: all tenants share one UniFi site, so this returns EVERY tenant's clients.
+ * Callers MUST filter to an allowlist of the venue's own registered AP MACs before
+ * exposing anything. See `services/unifiClients.ts`.
+ */
+export async function getClients(config: UnifiConfig, opts?: { force?: boolean }): Promise<UnifiClient[]> {
+  const key = clientCacheKey(config);
+
+  if (!opts?.force) {
+    const hit = clientCache.get(key);
+    if (hit && Date.now() - hit.at < CLIENT_CACHE_TTL_MS) return hit.rows;
+    const pending = clientInflight.get(key);
+    if (pending) return pending;
+  }
+
+  const run = (async () => {
+    const rows = ensureOk(await siteRequest(config, 'GET', 'stat/sta'), 'stat/sta');
+    const mapped: UnifiClient[] = rows.map(mapClient);
+    clientCache.set(key, { rows: mapped, at: Date.now() });
+    return mapped;
+  })();
+
+  clientInflight.set(key, run);
+  try {
+    return await run;
+  } finally {
+    clientInflight.delete(key);
+  }
+}
+
+/** A guest authorization record from `stat/guest` — the authoritative session window. */
+export interface UnifiGuestAuth {
+  canon: string;
+  start: number | null;
+  end: number | null;
+  durationMin: number | null;
+}
+
+/**
+ * Authorization windows, the only source of a real "authorized until".
+ *
+ * Cached far longer than the client list on purpose: `sessionTimeout` defaults to 10
+ * hours, so this clock ticks in minutes and 30s of staleness is invisible, while a 30s
+ * TTL against a 10s poll amortizes the extra round trip to roughly one call in three.
+ */
+const guestAuthCache = new Map<string, { rows: UnifiGuestAuth[]; at: number }>();
+const GUEST_AUTH_CACHE_TTL_MS = 30_000;
+
+export async function getGuestAuthorizations(config: UnifiConfig): Promise<UnifiGuestAuth[]> {
+  const key = clientCacheKey(config);
+  const hit = guestAuthCache.get(key);
+  if (hit && Date.now() - hit.at < GUEST_AUTH_CACHE_TTL_MS) return hit.rows;
+
+  const rows = ensureOk(await siteRequest(config, 'GET', 'stat/guest'), 'stat/guest');
+  const mapped: UnifiGuestAuth[] = rows.map((g: any) => ({
+    canon: canonMac(g.mac),
+    start: num(g.start),
+    end: num(g.end),
+    durationMin: num(g.duration),
+  }));
+  guestAuthCache.set(key, { rows: mapped, at: Date.now() });
+  return mapped;
+}
+
+// ── Guest de-authorization ────────────────────────────────────────────────────
+
+/**
+ * Revoke a device's guest authorization.
+ *
+ * Must be paired with `kickClient`, in that order. Unauthorizing alone closes the
+ * firewall but leaves the 802.11 association up, so the station keeps appearing in
+ * `stat/sta` and the dashboard still shows it connected until it re-DHCPs.
+ */
+export async function unauthorizeGuest(config: UnifiConfig, clientMac: string): Promise<void> {
+  const res = await siteRequest(config, 'POST', 'cmd/stamgr', {
+    cmd: 'unauthorize-guest',
+    mac: normalizeMac(clientMac),
+  });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`UniFi unauthorize-guest failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  }
+  console.log('[UNIFI] Unauthorized guest', clientMac, 'via', config.controllerUrl);
+}
+
+/** Whether a stamgr failure means the station is already gone — which is the goal state. */
+function isStationAlreadyGone(res: UnifiResponse): boolean {
+  if (res.status === 404) return true;
+  const msg = String(res.body?.meta?.msg ?? '');
+  return msg === 'api.err.UnknownStation' || msg === 'api.err.NoSuchStation';
+}
+
+/**
+ * Force a station to reassociate.
+ *
+ * On its own this achieves nothing lasting: guest authorization is site-wide, so the
+ * device reconnects within seconds and never sees the splash again. Always call
+ * `unauthorizeGuest` first.
+ *
+ * A station that vanished between our check and this call is treated as success — it
+ * left, which is what we wanted. Mirrors how `forgetDevice` handles an unknown device.
+ */
+export async function kickClient(config: UnifiConfig, clientMac: string): Promise<void> {
+  const res = await siteRequest(config, 'POST', 'cmd/stamgr', {
+    cmd: 'kick-sta',
+    mac: normalizeMac(clientMac),
+  });
+  if (res.status >= 200 && res.status < 300) {
+    console.log('[UNIFI] Kicked station', clientMac, 'via', config.controllerUrl);
+    return;
+  }
+  if (isStationAlreadyGone(res)) {
+    console.log('[UNIFI] Station already gone', clientMac);
+    return;
+  }
+  throw new Error(`UniFi kick-sta failed HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+}
+
 // ── Device adoption ───────────────────────────────────────────────────────────
 
 export interface UnifiPendingDevice {

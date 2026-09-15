@@ -37,6 +37,27 @@ FAILED_PRECONDITION: The query requires an index
 
 ---
 
+## CaptivePortal_Devices (live "who's online")
+
+The device registry maps a MAC address to the guest who signed in on it, so the live view can
+show one person with all of their devices.
+
+**The live view itself needs no index.** Documents are keyed by canonical MAC, so resolving the
+devices currently connected is a `getAll` by document id — no query, no ordering, no `in` clause.
+
+These three are for the admin/list views only, and can be created lazily when something first
+needs them:
+
+| # | Field 1 | Field 2 | Used for |
+|---|---|---|---|
+| 1 | `venueId` — Ascending | `lastSeenAt` — Descending | Devices recently seen at one venue |
+| 2 | `tenantUserId` — Ascending | `lastSeenAt` — Descending | Devices recently seen across an account |
+| 3 | `email` — Ascending | `tenantUserId` — Ascending | One person's devices across their venues |
+
+Query scope: Collection, for all three.
+
+---
+
 ## Single-field indexes (auto-managed)
 
 Firestore automatically creates single-field indexes for every field on write. You do not need to add these manually unless you have disabled them via field overrides.

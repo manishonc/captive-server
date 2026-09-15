@@ -8,6 +8,7 @@ import { sendWhatsAppTemplate, toE164 as toE164WA, WhatsAppTemplateComponent } f
 import { swapVenueRatingUrl, swapTrackedLinks, createShortLink, VISITOR_BASE_URL, ShortLinkContext } from '../services/shortlinks';
 import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '../services/unifi';
 import { getVenueName } from '../services/venue';
+import { recordDeviceIdentity } from '../services/deviceRegistry';
 import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
@@ -95,6 +96,10 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
   let captivePortalAccessPointId: string | null = null;
   let venueId: string | null = null;
+  // Carried for the device registry: identity is only ever attached to a MAC when the
+  // owning tenant matches, so the AP's tenant must travel with the sighting.
+  let apTenantUserId: string | null = null;
+  let apVendor = 'aruba';
 
   try {
     const snapshot = await db
@@ -105,7 +110,10 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
 
     if (!snapshot.empty) {
       captivePortalAccessPointId = snapshot.docs[0].id;
-      venueId = snapshot.docs[0].data().venueId || null;
+      const apRow = snapshot.docs[0].data();
+      venueId = apRow.venueId || null;
+      apTenantUserId = apRow.tenantUserId || null;
+      apVendor = apRow.vendor || 'aruba';
       snapshot.docs[0].ref.update({ lastSeen: FieldValue.serverTimestamp() })
         .catch((err) => console.error('[AP LASTSEEN ERROR]', err));
     } else {
@@ -220,6 +228,22 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     };
     db.collection('CaptivePortal_Sessions').add(sessionDoc)
       .catch((err) => console.error('[SESSION LOG ERROR]', err));
+
+    // Device registry: remember which person this MAC belongs to, so the live view can
+    // show one guest with all of their devices. Fire-and-forget — access is already
+    // granted at this point, so a registry failure must not fail the request.
+    recordDeviceIdentity({
+      mac: mac || '',
+      wifiGuestId,
+      email,
+      firstName,
+      lastName,
+      phone,
+      accessPointId: captivePortalAccessPointId,
+      venueId,
+      tenantUserId: apTenantUserId,
+      vendor: apVendor,
+    }).catch((err) => console.error('[DEVICE REGISTRY ERROR]', err));
   }
 
   // Marketing scheduling (event-aware)
@@ -1277,6 +1301,9 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   let venueId: string | null = null;
   let unifiConfig: UnifiConfig | null = null;
   let sessionTimeoutSeconds = 36000;
+  // Carried for the device registry: identity is only ever attached to a MAC when the
+  // owning tenant matches, so the AP's tenant must travel with the sighting.
+  let apTenantUserId: string | null = null;
 
   try {
     const apSnap = await db.collection('CaptivePortal_AccessPoints')
@@ -1293,6 +1320,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     const apData = apDoc.data();
     captivePortalAccessPointId = apDoc.id;
     venueId = apData.venueId || null;
+    apTenantUserId = apData.tenantUserId || null;
     sessionTimeoutSeconds = apData.sessionTimeout || 36000;
 
     if (!apData.unifiConfig?.controllerUrl || !apData.unifiConfig?.username || !apData.unifiConfig?.password) {
@@ -1422,6 +1450,22 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     };
     db.collection('CaptivePortal_Sessions').add(sessionDoc)
       .catch((err) => console.error('[UNIFI SESSION LOG ERROR]', err));
+
+    // Device registry: remember which person this MAC belongs to, so the live view can
+    // show one guest with all of their devices. Fire-and-forget — the controller has
+    // already opened the firewall, so a registry failure must not fail the request.
+    recordDeviceIdentity({
+      mac: normalizedClientMac,
+      wifiGuestId,
+      email,
+      firstName,
+      lastName,
+      phone,
+      accessPointId: captivePortalAccessPointId,
+      venueId,
+      tenantUserId: apTenantUserId,
+      vendor: 'unifi',
+    }).catch((err) => console.error('[UNIFI DEVICE REGISTRY ERROR]', err));
   }
 
   if (marketingOptIn && captivePortalAccessPointId) {
