@@ -1,0 +1,70 @@
+# Publishes the two images that askheidi-zurich/cms needs to run its
+# captive-portal end-to-end suite on every PR.
+#
+# Why this lives here rather than in cms: a cms CI checkout has no sibling
+# repos, so it cannot build these from source. It pulls them by tag instead.
+#
+# The packages are intended to be PUBLIC, so cms pulls them anonymously with no
+# token and no secret. Visibility is a per-package setting that a workflow
+# cannot set — after the first successful run, flip each package to Public once
+# at https://github.com/users/manishonc/packages. Until then cms cannot pull.
+#
+# Neither image takes build args, so `:main` is a straight build of this repo's
+# default branch. (Contrast heidifi-landingpage, whose e2e image must be built
+# with a non-production VITE_PORTAL_URL.)
+
+name: e2e images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'portal/**'
+      - '.github/workflows/e2e-images.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Enough to push to ghcr.io/manishonc/* — the images stay under this repo's
+  # own owner, so no PAT is involved on the publishing side.
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: server
+            image: heidifi-captive-server
+          - context: portal
+            image: heidifi-portal
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ghcr.io/manishonc/${{ matrix.image }}:main
+            ghcr.io/manishonc/${{ matrix.image }}:${{ github.sha }}
+          # Layer cache in GitHub's own cache backend. Without it every run
+          # re-runs npm install from scratch.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
