@@ -68,3 +68,22 @@ jobs:
           # re-runs npm install from scratch.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # Every merge pushes an immutable :<sha> version that nothing ever
+      # removes, and GHCR storage counts against the account quota with no
+      # expiry of its own. Left alone this grows without bound. Pruning at
+      # publish time keeps it flat without a cron job.
+      #
+      # 5 is chosen so the version :main points at always survives: it is the
+      # newest, and the two tags on the same digest count as ONE version.
+      # Anything older is a rollback target you would reach for by digest, and
+      # you can still rerun this workflow to rebuild it.
+      - name: Prune old versions of ${{ matrix.image }}
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.image }}
+          package-type: container
+          min-versions-to-keep: 5
+          # Untagged versions are buildx attestation/cache leftovers, not
+          # images anyone pulls, but they still occupy storage.
+          delete-only-untagged-versions: false
