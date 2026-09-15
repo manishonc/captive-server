@@ -1,0 +1,10 @@
+# The Dockerfile does `COPY . .` after `npm ci --production`, so anything left
+# in this directory lands in the image — and the image is published PUBLICLY to
+# GHCR for the cms e2e suite. Keep host-only and secret-shaped files out.
+node_modules
+.git
+.env
+.env.*
+.DS_Store
+*.log
+tests

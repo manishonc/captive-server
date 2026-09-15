@@ -1,0 +1,10 @@
+# This image is published PUBLICLY to GHCR for the cms e2e suite. The Dockerfile
+# copies only package.json/tsconfig/src today, but keep the context narrow so a
+# future `COPY . .` cannot leak host-only files.
+node_modules
+dist
+.git
+.env
+.env.*
+.DS_Store
+*.log
