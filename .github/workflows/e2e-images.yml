@@ -69,21 +69,22 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-      # Every merge pushes an immutable :<sha> version that nothing ever
-      # removes, and GHCR storage counts against the account quota with no
-      # expiry of its own. Left alone this grows without bound. Pruning at
-      # publish time keeps it flat without a cron job.
+      # NO prune step here, deliberately.
       #
-      # 5 is chosen so the version :main points at always survives: it is the
-      # newest, and the two tags on the same digest count as ONE version.
-      # Anything older is a rollback target you would reach for by digest, and
-      # you can still rerun this workflow to rebuild it.
-      - name: Prune old versions of ${{ matrix.image }}
-        uses: actions/delete-package-versions@v5
-        with:
-          package-name: ${{ matrix.image }}
-          package-type: container
-          min-versions-to-keep: 5
-          # Untagged versions are buildx attestation/cache leftovers, not
-          # images anyone pulls, but they still occupy storage.
-          delete-only-untagged-versions: false
+      # A version-count prune (actions/delete-package-versions) is unsafe for
+      # multi-arch images on GHCR: an image index and each of its child manifests
+      # count as SEPARATE versions, and an unchanged image re-pushed under a new
+      # tag reuses the SAME child manifest — which keeps its ORIGINAL creation
+      # date and therefore sorts as one of the oldest versions. Pruning the
+      # oldest versions then deletes a child manifest that every live tag's
+      # index still references, leaving tags that resolve but cannot be pulled.
+      #
+      # This is not theoretical: the prune run of 15 Sep 2026 did exactly that to
+      # BOTH images published here (cms PR #199's e2e then failed with
+      # "manifest unknown"). The indexes and buildx attestations survived —
+      # only the runnable children died — which is why the publishing job
+      # itself still reported success.
+      #
+      # If storage growth becomes a problem again, prune by AGE over a safe
+      # window (e.g. delete versions older than 90 days) via the API with the
+      # full digest graph checked first — never by count.
