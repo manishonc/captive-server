@@ -5,6 +5,22 @@ const senderEmail = process.env.BREVO_SENDER_EMAIL;
 const senderName = process.env.BREVO_SENDER_NAME || 'WiFi Portal';
 
 /**
+ * Where the Brevo API lives. Unset in every real deployment, where the SDK's
+ * own default (https://api.brevo.com/v3) applies.
+ *
+ * It exists so the transport can be pointed somewhere else without touching
+ * code: an egress proxy, a sandbox, or a stub in the E2E stack. Email is the
+ * only OTP channel with no offline path — `channelConfigured('email')` demands
+ * BREVO_API_KEY and BREVO_SENDER_EMAIL, and a failed send calls `revokeOtp`,
+ * which deletes the code — so without a reachable endpoint the verification
+ * flow cannot be exercised end to end at all.
+ *
+ * Deliberately NOT gated on NODE_ENV: a URL override that silently ignores
+ * itself in production is worse than one that does what it says.
+ */
+const apiBaseUrl = process.env.BREVO_API_URL;
+
+/**
  * Sends or schedules a transactional email via Brevo.
  * - If delayMinutes >= 1: schedules using Brevo's scheduledAt parameter
  * - Otherwise: sends immediately
@@ -24,7 +40,9 @@ export async function sendEmail(
     return null;
   }
 
-  const client = new BrevoClient({ apiKey });
+  // `baseUrl` is the SDK's own documented option ("Specify a custom URL to
+  // connect the client to"); omitting it keeps the SDK default.
+  const client = new BrevoClient(apiBaseUrl ? { apiKey, baseUrl: apiBaseUrl } : { apiKey });
 
   const params: Parameters<typeof client.transactionalEmails.sendTransacEmail>[0] = {
     to: [{ email: to }],
@@ -57,7 +75,11 @@ export async function sendEmail(
  */
 export async function blocklistContact(email: string): Promise<void> {
   if (!apiKey || !email) return;
-  const res = await fetch(`https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`, {
+  // Same override as sendEmail — this call bypasses the SDK, so it needs its
+  // own. Falls back to the SDK's default base so behaviour is unchanged when
+  // BREVO_API_URL is unset.
+  const base = apiBaseUrl ?? 'https://api.brevo.com/v3';
+  const res = await fetch(`${base}/contacts/${encodeURIComponent(email)}`, {
     method: 'PUT',
     headers: { 'api-key': apiKey, 'content-type': 'application/json' },
     body: JSON.stringify({ emailBlacklisted: true }),
