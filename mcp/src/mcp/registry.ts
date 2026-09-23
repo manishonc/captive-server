@@ -13,6 +13,7 @@ import { registerTemplateTools } from './tools/templates';
 import { registerBrandingTools } from './tools/branding';
 import { registerAudienceTools } from './tools/audience';
 import { registerUsageTools } from './tools/usage';
+import { registerPlaybookTools } from './tools/playbooks';
 
 /**
  * Build a fresh McpServer with all tools registered.
@@ -52,6 +53,9 @@ import { registerUsageTools } from './tools/usage';
  *                  preview_splash_config, apply_splash_config, copy_splash_config
  *                  (writes proxy to the CMS internal API, which owns the validator;
  *                   apply is gated on a confirmToken from the preview)
+ *   adaptive:      list_playbooks, get_playbook, list_playbook_setups — read-only
+ *                  Adaptive Campaigns playbooks and each venue's setup (proxies
+ *                  captive-server /internal/adaptive/*, which owns the rules)
  *   languages:     no dedicated tool — a venue's guest languages and the
  *                  per-language splash copy live in the `languages` block of the
  *                  splash config, so they go through the same preview/apply pair.
@@ -80,6 +84,7 @@ export function buildMcpServer(): McpServer {
   registerBrandingTools(server);
   registerAudienceTools(server);
   registerUsageTools(server);
+  registerPlaybookTools(server);
 
   return server;
 }

@@ -37,3 +37,27 @@ export async function callServerInternal(
   }
   return { status: response.status, data };
 }
+
+/**
+ * GET twin of callServerInternal, for the read-only Adaptive Campaigns API
+ * (`/internal/adaptive/tenants/:id/…`, see server/src/adaptive/api/router.ts),
+ * which owns the playbook rules — the MCP reads through it instead of Firestore.
+ */
+export async function callServerInternalGet(path: string): Promise<ServerCallResult> {
+  if (!config.serverInternalSecret) {
+    return { status: 503, data: { ok: false, error: 'INTERNAL_API_SECRET is not configured on the MCP service' } };
+  }
+
+  const response = await fetch(`${config.serverApiUrl}${path}`, {
+    method: 'GET',
+    headers: { 'x-internal-secret': config.serverInternalSecret },
+  });
+
+  let data: Record<string, unknown> = {};
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    /* non-JSON error body */
+  }
+  return { status: response.status, data };
+}
