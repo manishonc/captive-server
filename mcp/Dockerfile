@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ COPY src ./src
 # The prune step below strips devDependencies back out of the runtime image.
 RUN npm install --include=dev && npm run build
 
-RUN npm prune --production
+RUN npm prune --omit=dev
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
