@@ -119,7 +119,8 @@ Backend API that persists guest data to Firestore, schedules/sends SMS via Twili
 | GET | `/splash-config?apmac=<mac>` | Splash screen config for an AP |
 | GET | `/privacy-policy` | Published privacy policy document |
 | GET | `/terms` | Published terms of service document |
-| POST | `/schedule-sms` | Schedule an SMS message |
+| POST | `/schedule-sms` | Schedule an SMS message (internal: needs `x-internal-secret`) |
+| POST | `/schedule-email` | Send or schedule an email (internal: needs `x-internal-secret`) |
 | POST | `/webhook/twilio/sms-status` | Twilio delivery status webhook |
 | GET | `/health` | Health check → `{"status":"ok"}` |
 

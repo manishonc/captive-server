@@ -134,10 +134,12 @@ If `BREVO_API_KEY` or `BREVO_SENDER_EMAIL` is missing, email sends are skipped w
 
 ## Direct Send Endpoint
 
-You can trigger an email directly without going through the WiFi event flow:
+Internal callers can trigger an email directly without going through the WiFi event flow. The
+endpoint needs the `x-internal-secret` header (= `INTERNAL_API_SECRET`), like the `/internal` routes:
 
 ```
 POST /schedule-email
+x-internal-secret: <INTERNAL_API_SECRET>
 ```
 
 **Request body:**
@@ -161,6 +163,7 @@ POST /schedule-email
 
 | Status | Reason |
 |---|---|
+| `401` | Missing or wrong `x-internal-secret` (or `INTERNAL_API_SECRET` not set) |
 | `400` | Missing or invalid `to`, `subject`, or `body` |
 | `503` | Brevo credentials not configured |
 | `500` | Brevo API error |
