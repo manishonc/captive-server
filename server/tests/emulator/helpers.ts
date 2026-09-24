@@ -9,6 +9,7 @@ import { invalidateCatalogue } from '../../src/adaptive/service/catalogue';
 import { saveSetups } from '../../src/adaptive/service/tenant';
 import { clearEngineSettingsCache, type LaunchMode } from '../../src/adaptive/store/engineSettings';
 import { adaptiveOnConnect, __clearConnectCaches } from '../../src/adaptive/ingest/connect';
+import { __clearLegacyCaches } from '../../src/adaptive/engine/route';
 import { setSandboxClock, refreshClock, now } from '../../src/adaptive/engine/clock';
 import { AdaptiveWorker } from '../../src/adaptive/worker/worker';
 import { COL, CONFIG_DOC_ID } from '../../src/adaptive/store/collections';
@@ -61,6 +62,7 @@ export async function resetEmulator(): Promise<void> {
 export function clearCaches(): void {
   clearEngineSettingsCache();
   __clearConnectCaches();
+  __clearLegacyCaches();
   invalidateCatalogue();
 }
 

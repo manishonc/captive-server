@@ -213,7 +213,10 @@ function ruleQuiet(i: GateInput): RuleCheck {
   for (let pass = 0; pass < 3; pass += 1) {
     const inside = zones.filter((tz) => isInWindow(new Date(until), tz, window));
     if (!inside.length) break;
-    for (const tz of inside) until = Math.max(until, windowEnd(new Date(until), tz, window).getTime());
+    // Each zone's end from the same moment: measured from an already-moved time, a
+    // zone east of the venue would find its window over and jump to its next one.
+    const from = until;
+    for (const tz of inside) until = Math.max(until, windowEnd(new Date(from), tz, window).getTime());
   }
   until = afterQuietHours(new Date(until), i.quiet.jitterMinutes, i.jitterKey);
   const tz = quietIn[0];

@@ -24,7 +24,7 @@ services:
       - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
       - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
       - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
-      # Derives the identity key (must equal the server's value; the worker checks).
+      # Derives the identity key. Must equal the server's value (check sameKey on the admin engine status).
       - GUEST_OTP_PEPPER=${GUEST_OTP_PEPPER}
       # Sending (used from PR B on; harmless before).
       - BREVO_API_KEY=${BREVO_API_KEY}

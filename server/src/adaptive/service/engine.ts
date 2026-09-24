@@ -33,7 +33,16 @@ export async function getEngineStatus() {
     countWhere('queued'),
     countWhere('leased'),
     countWhere('dead'),
-    db.collection(COL.journeyTasks).where('status', '==', 'queued').where('dueAt', '<=', new Date(now())).orderBy('dueAt').limit(1).get(),
+    // Needs the hand-made (status, dueAt) index: if it is missing or still building,
+    // report that here instead of failing the whole status (which shows indexCheck).
+    db.collection(COL.journeyTasks)
+      .where('status', '==', 'queued')
+      .where('dueAt', '<=', new Date(now()))
+      .orderBy('dueAt')
+      .limit(1)
+      .get()
+      .then((snap) => ({ snap, error: null as string | null }))
+      .catch((err: unknown) => ({ snap: null, error: String((err as Error)?.message ?? err).slice(0, 300) })),
   ]);
   const apiFingerprint = keyFingerprint();
   const workers = Object.entries((statusSnap.get('workers') ?? {}) as Record<string, Record<string, unknown>>).map(([id, w]) => {
@@ -46,14 +55,22 @@ export async function getEngineStatus() {
       sameKey: Boolean(apiFingerprint) && w.keyFingerprint === apiFingerprint,
     };
   });
-  const oldestDue = oldest.docs[0] ? tsMs(oldest.docs[0].get('dueAt')) : null;
+  const oldestDue = oldest.snap?.docs[0] ? tsMs(oldest.snap.docs[0].get('dueAt')) : null;
+  const pinned = statusSnap.get('identity.keyFingerprint');
   return {
     api: { version: ENGINE_RUNTIME_VERSION, identityReady: identityReady(), keyFingerprint: apiFingerprint, sandbox: sandboxEnabled() },
     launch: settings.launch,
     paused: settings.paused,
     safety: settings.safety,
     workers,
-    queue: { queued, leased, dead, lagSeconds: oldestDue !== null ? Math.max(0, Math.round((now() - oldestDue) / 1000)) : 0 },
+    identity: { pinnedFingerprint: typeof pinned === 'string' ? pinned : null, apiMatchesPinned: typeof pinned === 'string' ? pinned === apiFingerprint : null },
+    queue: {
+      queued,
+      leased,
+      dead,
+      lagSeconds: oldest.error ? null : oldestDue !== null ? Math.max(0, Math.round((now() - oldestDue) / 1000)) : 0,
+      ...(oldest.error ? { lagError: oldest.error } : {}),
+    },
     indexCheck: toJson(statusSnap.get('indexCheck') ?? null),
   };
 }

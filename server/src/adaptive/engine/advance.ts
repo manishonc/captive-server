@@ -62,15 +62,23 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
       venueTz: inst.meta.context.venueTz,
       slots: pinned.slots,
       offers: pinned.offers,
-      facts: ctx ? journeyFacts(ctx, contact, null, { instance: { counters: state.counters, vars: state.vars } }) : () => undefined,
+      // instance.* is overlaid by the interpreter from its working state.
+      facts: ctx
+        ? journeyFacts(ctx, contact, {
+            isFirstVisit: inst.meta.context.isFirstVisit,
+            visitNumber: inst.meta.context.visitNumber ?? undefined,
+            isRevisit: inst.meta.context.isRevisit ?? undefined,
+          })
+        : () => undefined,
       stay: null,
     };
 
     let pending: RuntimeInput | null = null;
     let sendNode: string | null = null;
     let dueRun = false;
-    // A timer's run is as old as its due time; an event happens now.
-    const reachedAt = input.kind === 'event' ? now : Math.min(now, env.taskDueAt);
+    // A step is as old as what reached it: a timer's due time, or when the event
+    // happened — so a revisit handled hours late can't produce a late thank-you.
+    const reachedAt = input.kind === 'event' ? Math.min(now, input.event.occurredAt) : Math.min(now, env.taskDueAt);
     if (input.kind === 'send_due') {
       sendNode = input.nodeId;
       dueRun = true;

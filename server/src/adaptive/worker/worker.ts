@@ -9,6 +9,17 @@
  *  - heartbeat to `AdaptiveConfig/engine_status` + a file for Docker's healthcheck;
  *  - a watchdog exits if the loop stalls, so Docker restarts the container;
  *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit.
+ *
+ * Identity-key guard (the key is derived from GUEST_OTP_PEPPER, see identity/key.ts).
+ * The first connect task whose key (the API's, carried on the task) equals this
+ * worker's pins it in `engine_status.identity`. Then:
+ *  - this worker's key differs from the pinned one → the pepper changed and every
+ *    guest would become a stranger: stay idle (after a deliberate change, delete
+ *    `identity` there to re-pin);
+ *  - a connect task carries another key and none is pinned yet → it can't be told
+ *    which app is wrong: hold that connect (retried every 10 min) and warn;
+ *  - a connect task carries another key but this worker's is the pinned one → the
+ *    API was misconfigured; the task's data is fine, so handle it and warn.
  */
 
 import { hostname } from 'os';
@@ -17,7 +28,7 @@ import { writeFileSync } from 'fs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL, ENGINE_STATUS_DOC_ID } from '../store/collections';
-import { anyAccountOn, readEngineSettings, SAFE_SETTINGS, type EngineSettings } from '../store/engineSettings';
+import { anyAccountOn, readEngineSettingsStrict, SAFE_SETTINGS, type EngineSettings } from '../store/engineSettings';
 import { claimDue, completeTask, failTask, reclaimExpiredLeases, releaseTask, TASK_SCHEMA_VERSION, type ClaimedTask } from '../queue/firestoreQueue';
 import { now, refreshClock } from '../engine/clock';
 import { routeEvent, handleVisitEnd } from '../engine/route';
@@ -49,6 +60,11 @@ export class AdaptiveWorker {
   private settingsAt = 0;
   private state: WorkerState = 'starting';
   private indexes: IndexCheckResult | null = null;
+  /** Why this worker won't run tasks (identity guard), shown on the admin status. */
+  private identityProblem: string | null = null;
+  /** The last connect task that carried another identity key than this worker's. */
+  private keyWarning: { message: string; at: Date } | null = null;
+  private pinned: { fingerprint: string | null; at: number } | null = null;
   private tasksRun = 0;
   private errors = 0;
   private readonly startedAt = Date.now();
@@ -76,9 +92,19 @@ export class AdaptiveWorker {
 
     if (!identityReady()) {
       this.state = 'idle_identity';
+      this.identityProblem = 'GUEST_OTP_PEPPER is not set';
       await sleep(IDLE_POLL_MS);
       return;
     }
+    const problem = await this.identityCheck();
+    if (problem) {
+      if (this.identityProblem !== problem) console.error(`[ADAPTIVE WORKER] identity key problem — staying idle: ${problem}`);
+      this.state = 'idle_identity';
+      this.identityProblem = problem;
+      await sleep(IDLE_POLL_MS);
+      return;
+    }
+    this.identityProblem = null;
     if (!this.indexes?.ok) {
       this.indexes = await checkIndexes();
       if (!this.indexes.ok) {
@@ -92,8 +118,16 @@ export class AdaptiveWorker {
 
     await refreshClock();
     if (Date.now() - this.settingsAt > 10_000) {
-      this.settings = await readEngineSettings();
-      this.settingsAt = Date.now();
+      try {
+        this.settings = await readEngineSettingsStrict();
+        this.settingsAt = Date.now();
+      } catch (err) {
+        // Keep the last good copy and take no tasks until a read works: a task run
+        // as "everything off" would be marked done without its work being done.
+        console.error('[ADAPTIVE WORKER] engine settings read failed — no tasks this round:', (err as Error)?.message || err);
+        await sleep(POLL_MS);
+        return;
+      }
     }
     if (Date.now() - this.lastReclaimAt > 60_000) {
       this.lastReclaimAt = Date.now();
@@ -116,7 +150,7 @@ export class AdaptiveWorker {
     let total = 0;
     for (let round = 0; round < maxRounds; round += 1) {
       await refreshClock(true);
-      this.settings = await readEngineSettings();
+      this.settings = await readEngineSettingsStrict();
       this.settingsAt = Date.now();
       const tasks = await claimDue(this.id, now(), 50);
       if (!tasks.length) break;
@@ -136,9 +170,22 @@ export class AdaptiveWorker {
         return;
       }
       switch (task.kind) {
-        case 'event_route':
+        case 'event_route': {
+          const apiKey = typeof task.payload.keyFingerprint === 'string' ? task.payload.keyFingerprint : null;
+          const own = keyFingerprint();
+          if (apiKey && apiKey !== own) {
+            const pinned = await this.pinnedFingerprint();
+            if (pinned !== own) {
+              this.warnKey(`a connect task carried identity key ${apiKey}, this worker has ${own}${pinned ? `, the pinned one is ${pinned}` : ' and none is pinned yet'} — check GUEST_OTP_PEPPER on both apps`);
+              await releaseTask(task.id, this.id, 10 * 60_000, env.now);
+              return;
+            }
+            this.warnKey(`a connect task carried identity key ${apiKey}, not the pinned ${own} — check GUEST_OTP_PEPPER on the server app`);
+          }
           await routeEvent(task.payload as any, env);
+          if (apiKey && apiKey === own) await this.pinKey(own).catch((err) => console.warn('[ADAPTIVE WORKER] pinning the identity key failed:', err?.message || err));
           break;
+        }
         case 'node_run': {
           const r = await runTimer(task.payload as any, { ...env, taskDueAt: task.dueAt });
           if (r.status === 'retry') {
@@ -186,6 +233,8 @@ export class AdaptiveWorker {
               version: ENGINE_RUNTIME_VERSION,
               keyFingerprint: keyFingerprint(),
               state: this.state,
+              identityProblem: this.identityProblem,
+              keyWarning: this.keyWarning,
               tasksRun: this.tasksRun,
               errors: this.errors,
             },
@@ -196,6 +245,46 @@ export class AdaptiveWorker {
         { merge: true },
       )
       .catch((err) => console.warn('[ADAPTIVE WORKER] heartbeat failed:', err?.message || err));
+  }
+
+  /** The pinned identity-key fingerprint (read at most once a minute). */
+  private async pinnedFingerprint(): Promise<string | null> {
+    if (!this.pinned || Date.now() - this.pinned.at > HEARTBEAT_MS) {
+      const snap = await db.collection(COL.config).doc(ENGINE_STATUS_DOC_ID).get();
+      const fp = snap.get('identity.keyFingerprint');
+      this.pinned = { fingerprint: typeof fp === 'string' ? fp : null, at: Date.now() };
+    }
+    return this.pinned.fingerprint;
+  }
+
+  /** Null when this worker's identity key may be used; otherwise why not. */
+  private async identityCheck(): Promise<string | null> {
+    const pinned = await this.pinnedFingerprint();
+    const own = keyFingerprint();
+    if (pinned && pinned !== own) {
+      return `this worker's identity key (${own}) differs from the pinned one (${pinned}) — GUEST_OTP_PEPPER changed`;
+    }
+    return null;
+  }
+
+  private warnKey(message: string): void {
+    if (this.keyWarning?.message !== message) console.error(`[ADAPTIVE WORKER] ${message}`);
+    this.keyWarning = { message, at: new Date() };
+  }
+
+  /** Pins the key the first time the API and this worker agree on it. */
+  private async pinKey(fingerprint: string): Promise<void> {
+    // Confirmed within the last minute: nothing to do (the pin may have been cleared since — then re-pin).
+    if (this.pinned?.fingerprint === fingerprint && Date.now() - this.pinned.at < HEARTBEAT_MS) return;
+    const ref = db.collection(COL.config).doc(ENGINE_STATUS_DOC_ID);
+    const stored = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const existing = snap.get('identity.keyFingerprint');
+      if (typeof existing === 'string') return existing;
+      tx.set(ref, { identity: { keyFingerprint: fingerprint, pinnedAt: new Date() } }, { merge: true });
+      return fingerprint;
+    });
+    this.pinned = { fingerprint: stored, at: Date.now() };
   }
 
   private async pruneOldWorkers(): Promise<void> {

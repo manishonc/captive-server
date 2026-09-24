@@ -32,7 +32,16 @@ export interface InstanceMeta {
   pendingConfigVersion: number | null;
   purpose: 'marketing' | 'service' | 'mixed';
   mode: RunMode;
-  context: { lang: Lang; venueTz: string; phoneTz: string | null; isFirstVisit: boolean; stayId: string | null };
+  context: {
+    lang: Lang;
+    venueTz: string;
+    phoneTz: string | null;
+    isFirstVisit: boolean;
+    stayId: string | null;
+    /** The visit that started the journey (older instances may lack these). */
+    visitNumber?: number | null;
+    isRevisit?: boolean | null;
+  };
 }
 
 export interface LoadedInstance {

@@ -30,6 +30,13 @@ const PROBES: Probe[] = [
     run: () =>
       db.collection(COL.journeySends).where('venueId', '==', '_probe').where('mode', '==', 'live').where('purpose', '==', 'service').where('createdAt', '>=', past()).count().get(),
   },
+  // The old opt-out lookups (engine/route.ts): equality only, which Firestore serves by
+  // merging single-field indexes — probed so a field exempted from indexing shows up here.
+  ...(['smsOptOut', 'whatsappOptOut'] as const).flatMap((flag) => [
+    { name: `Users(phoneE164, ${flag})`, run: () => db.collection(COL.guests).where('phoneE164', '==', '_probe').where(flag, '==', true).limit(1).get() },
+    { name: `Users(${flag})`, run: () => db.collection(COL.guests).where(flag, '==', true).select('phone').limit(1).get() },
+  ]),
+  { name: 'Users(email in, unsubscribed)', run: () => db.collection(COL.guests).where('email', 'in', ['_probe', '_probe2']).where('unsubscribed', '==', true).limit(1).get() },
 ];
 
 export interface IndexCheckResult {

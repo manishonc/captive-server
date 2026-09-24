@@ -14,7 +14,7 @@
 
 import { getNodeContract } from '../registry';
 import { pickLang, type JourneyDefinition, type Offer, type SlotValue } from '../schemas';
-import { evaluateCondition, matchesWhere, type FactGetter } from './conditions';
+import { evaluateCondition, getPath, matchesWhere, type FactGetter } from './conditions';
 import { DAY_MS, atLocalTime, durationMs, offsetMs } from './time';
 import {
   MAX_TRAIL,
@@ -173,10 +173,19 @@ function within(startedAt: number, window: string, now: number): boolean {
   return now - startedAt <= durationMs(window);
 }
 
-export function step(stateIn: InstanceState, input: RuntimeInput, ctx: InterpreterContext): StepResult {
+export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: InterpreterContext): StepResult {
   if (stateIn.status !== 'active') return { state: stateIn, effects: [], unchanged: true };
 
   const state = cloneState(stateIn);
+  // `instance.*` facts come from the working state, so a branch sees what earlier
+  // steps of this same run changed (an issued offer, a send's counters).
+  const ctx: InterpreterContext = {
+    ...ctxIn,
+    facts: (path) =>
+      path === 'instance' || path.startsWith('instance.')
+        ? getPath({ instance: { counters: state.counters, vars: state.vars, lastTouch: state.lastTouch } }, path)
+        : ctxIn.facts(path),
+  };
   const effects: Effect[] = [];
   const def = ctx.definition;
   const now = ctx.now;
@@ -221,7 +230,8 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctx: Interpret
         break;
       }
       // The goal is checked continuously and counted once per instance.
-      if (def.goal && !state.goal && event.type === def.goal.event && within(state.startedAt, def.goal.within, now)) {
+      // The window is judged by when the event happened, not when it was handled.
+      if (def.goal && !state.goal && event.type === def.goal.event && within(state.startedAt, def.goal.within, Math.min(now, event.occurredAt))) {
         state.goal = { reachedAt: now, eventId: event.id };
         effects.push({ type: 'emit', eventType: 'journey.converted', data: { goalEvent: event.type, eventId: event.id } });
         result = def.goal.onReach ? moveTo(def.goal.onReach) : { exit: def.goal.exit, reason: 'goal' };

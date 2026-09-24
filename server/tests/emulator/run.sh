@@ -14,10 +14,11 @@ CONTAINER=adaptive-engine-test-emulator
 IMAGE="${ADAPTIVE_EMULATOR_IMAGE:-adaptive-verify-emulator:local}"
 PROJECT=demo-adaptive-test
 WORK="$(mktemp -d)"
-STARTED=0
+CONTAINER_ID=""
 
 cleanup() {
-  if [ "$STARTED" = 1 ]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
+  # Only the container this run started — never another run's.
+  if [ -n "$CONTAINER_ID" ]; then docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true; fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -30,11 +31,15 @@ if [ -z "$HOST" ]; then
   cat >"$WORK/firebase.json" <<'JSON'
 { "emulators": { "firestore": { "port": 8080, "host": "0.0.0.0" }, "ui": { "enabled": false }, "singleProjectMode": true } }
 JSON
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --rm --name "$CONTAINER" -p 127.0.0.1:8085:8080 \
+  # One run at a time: the port and the emulator's data are shared by the whole suite.
+  if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = "true" ]; then
+    echo "Another emulator test run is in progress (container $CONTAINER). Wait for it, or stop it: docker rm -f $CONTAINER" >&2
+    exit 1
+  fi
+  docker rm "$CONTAINER" >/dev/null 2>&1 || true # a stopped leftover
+  CONTAINER_ID="$(docker run -d --rm --name "$CONTAINER" -p 127.0.0.1:8085:8080 \
     -v "$WORK/firebase.json:/app/firebase.json:ro" \
-    "$IMAGE" firebase emulators:start --project "$PROJECT" --only firestore >/dev/null
-  STARTED=1
+    "$IMAGE" firebase emulators:start --project "$PROJECT" --only firestore)"
   HOST=127.0.0.1:8085
   printf 'Waiting for the test emulator on %s ' "$HOST"
   for _ in $(seq 1 60); do

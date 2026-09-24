@@ -415,6 +415,45 @@ test('a tourist phone zone only makes quiet hours stricter', () => {
   assertEqual(runGate(gateInput({ now: night, enteredAt: night, intendedAt: night, quiet: london })).rule, 'quiet_hours', 'venue night');
 });
 
+test('a phone zone east of the venue: the next morning, not a day later', () => {
+  // Thu 22:00 Zurich = Thu 23:00 Athens / Fri 05:00 Tokyo → Fri 09:00–09:20 Zurich suits both.
+  const night = zonedTime(2026, 9, 24, 22, 0, TZ).getTime();
+  const nine = zonedTime(2026, 9, 25, 9, 0, TZ).getTime();
+  for (const phoneTz of ['Europe/Athens', 'Asia/Tokyo']) {
+    const g = runGate(gateInput({ now: night, enteredAt: night, intendedAt: night, quiet: { ...gateInput().quiet, phoneTz } }));
+    assert(g.until! >= nine && g.until! <= nine + 20 * MINUTE_MS, `${phoneTz}: until Fri 09:00–09:20 Zurich, got ${iso(g.until!)}`);
+  }
+  // Every 10 minutes over a day, for zones west and east: the earliest moment both are out of quiet hours (+ jitter).
+  const w = { start: '21:00', end: '09:00' };
+  for (const phoneTz of ['Europe/London', 'Europe/Athens', 'Asia/Kolkata', 'Asia/Tokyo', 'America/New_York']) {
+    for (let t = zonedTime(2026, 9, 24, 0, 0, TZ).getTime(); t < zonedTime(2026, 9, 25, 0, 0, TZ).getTime(); t += 10 * MINUTE_MS) {
+      const g = runGate(gateInput({ now: t, enteredAt: t, intendedAt: t, quiet: { ...gateInput().quiet, phoneTz } }));
+      let earliest = t;
+      while (isInWindow(new Date(earliest), TZ, w) || isInWindow(new Date(earliest), phoneTz, w)) earliest += MINUTE_MS;
+      if (earliest === t) {
+        assertEqual(g.verdict, 'allow', `${phoneTz} ${iso(t)}: daytime in both`);
+        continue;
+      }
+      assert(g.until! >= earliest && g.until! <= earliest + 20 * MINUTE_MS, `${phoneTz} ${iso(t)}: until ${iso(g.until!)}, earliest ${iso(earliest)}`);
+    }
+  }
+});
+
+test('a branch sees what earlier steps of the same run set (instance.* facts)', () => {
+  const base = journey('welcome_second_visit');
+  const def = {
+    ...base,
+    nodes: {
+      ...base.nodes,
+      offer: { ...base.nodes.offer, edges: { done: 'b', none: 'x_done' } },
+      b: { type: 'branch', config: { cases: [{ when: { fact: 'instance.vars.offerKey', eq: 'dessert' }, edge: 'has' }] }, edges: { has: 'd1', default: 'x_done' } },
+    },
+  } as unknown as JourneyDefinition;
+  const t0 = zonedTime(2026, 9, 22, 12, 40, TZ).getTime();
+  const r = run(def, freshState(def.start, t0), { kind: 'start' }, t0);
+  assertEqual(r.state.cursor.nodeId, 'd1', 'the branch saw the offer issued one step earlier');
+});
+
 test('consent, blocked address, caps, weekly limit, must-differ each skip with a reason', () => {
   assertEqual(runGate(gateInput({ consent: { state: 'none' } })).reason, 'no_consent', 'consent');
   assertEqual(runGate(gateInput({ address: { blocked: 'stop', lowRatingAt: null } })).reason, 'blocked', 'blocked');
@@ -474,7 +513,14 @@ test('the owner sentence comes from the stored record (EN + DE)', () => {
   const en = explainDecision(rec, 'en', TZ);
   assert(en.startsWith('Held back until') && en.includes('quiet hours'), en);
   const de = explainDecision(rec, 'de', TZ);
-  assert(de.startsWith('Zurückgehalten bis'), de);
+  assert(/^Zurückgehalten bis [A-Z][a-z]+\., \d{1,2}\. [A-Z][a-z]+\.?, \d{2}:\d{2}, weil Ruhezeit war\.$/.test(de), `German date + verb at the end: ${de}`);
+  // Limits come from the stored fact; unknown or suffixed codes never leak into the sentence.
+  const weekly = { ...rec, result: 'skip' as const, until: null, rule: 'weekly_limit' as const, reason: 'weekly_limit', checks: [{ rule: 'weekly_limit' as const, ok: false, fact: '2 of 2 marketing messages in the last 7 days' }] };
+  assert(explainDecision(weekly, 'en', TZ).includes('already got 2 marketing messages') && explainDecision(weekly, 'de', TZ).includes('schon 2 Werbenachrichten erhalten hat'), explainDecision(weekly, 'de', TZ));
+  for (const reason of ['booking_link_missing', 'missing_value:venue.name', 'something_new']) {
+    const s = explainDecision({ ...rec, result: 'skip', until: null, reason }, 'en', TZ) + explainDecision({ ...rec, result: 'skip', until: null, reason }, 'de', TZ);
+    assert(!/_/.test(s), `no machine code in: ${s}`);
+  }
   const sent = explainDecision({ ...rec, result: 'allow', until: null, reason: null }, 'en', TZ);
   assertEqual(sent, 'Sent by SMS (15 credits).', 'sent');
   const dry = explainDecision({ ...rec, result: 'allow', until: null, reason: null, mode: 'test' }, 'en', TZ);

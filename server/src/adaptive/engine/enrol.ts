@@ -45,7 +45,7 @@ export interface VisitFacts {
   isRevisit: boolean;
 }
 
-export function journeyFacts(ctx: VenueContext, contact: ContactDoc | null, visit: VisitFacts | null, extra: Record<string, unknown> = {}) {
+export function journeyFacts(ctx: VenueContext, contact: ContactDoc | null, visit: Partial<VisitFacts> | null, extra: Record<string, unknown> = {}) {
   return factsFrom({
     contact: {
       lang: contact?.lang ?? null,
@@ -148,6 +148,8 @@ async function enrolOne(args: {
         phoneTz: phoneCountry(who.contact.phoneE164)?.tz ?? null,
         isFirstVisit: Boolean(args.visit?.isFirstVisit),
         stayId: args.stayId ?? null,
+        visitNumber: args.visit?.visitNumber ?? null,
+        isRevisit: args.visit ? args.visit.isRevisit : null,
       },
     };
     const state = freshState(j.definition.start, now);

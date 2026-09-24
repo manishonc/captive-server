@@ -216,7 +216,7 @@ switches: `docs/adaptive-engine.md`.
 ### Environment Variables
 Copies of the `server` app's existing values; no new variables:
 - Firebase: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` (multiline)
-- `GUEST_OTP_PEPPER` — must equal the server's; the worker compares fingerprints
+- `GUEST_OTP_PEPPER` — must equal the server's. Check `sameKey: true` on `GET /internal/adaptive/admin/engine`: a different value holds guests' connects (or, once a key is pinned, idles the worker whose key changed) — see docs/adaptive-engine.md, "The identity-key guard"
 - Brevo: `BREVO_*`
 - Twilio: `TWILIO_*`
 - URLs and links: `SERVER_PUBLIC_URL`, `VISITOR_BASE_URL`, `UNSUBSCRIBE_SIGNING_SECRET`

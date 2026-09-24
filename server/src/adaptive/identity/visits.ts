@@ -4,8 +4,13 @@
  * 8 h) — the same number today's analytics use, so both agree on what a visit is.
  *
  * One transaction on `ContactVenues/{contactId}_{venueId}`, which also makes each
- * person's connects at a venue go one at a time. Safe to re-run: the connect
- * event id is remembered, and a replay returns the same answer.
+ * person's connects at a venue go one at a time. Safe to re-run and to handle out
+ * of order:
+ *  - a connect that started a visit is recognised by that visit's id (derived from
+ *    the connect), so a retry answers "new visit" again even after later connects;
+ *  - a connect older than the latest one never opens a visit or moves `lastSeenAt`
+ *    back — it joins the current visit, or is ignored if it belongs to an older one;
+ *  - a visit doc already removed by the 25-month TTL is simply not closed.
  */
 
 import { FieldValue } from 'firebase-admin/firestore';
@@ -64,49 +69,58 @@ export async function recordConnect(input: ConnectInput): Promise<VisitOutcome> 
   return db.runTransaction(async (tx) => {
     const cvSnap = await tx.get(cvRef);
     const cv = cvSnap.exists ? (cvSnap.data() as ContactVenueDoc) : null;
+    const ownRef = visits.doc(visitIdFor(input.connectEventId));
+    const [ownSnap, currentSnap] = await Promise.all([
+      tx.get(ownRef),
+      cv?.currentVisitId ? tx.get(visits.doc(cv.currentVisitId)) : Promise.resolve(null),
+    ]);
+    const lastSeen = tsMs(cv?.lastSeenAt);
 
-    // Replay of a connect we already handled: answer the same way.
-    if (cv?.lastConnectEventId === input.connectEventId && cv.currentVisitId) {
-      const v = await tx.get(visits.doc(cv.currentVisitId));
-      const visit = v.data() as VisitDoc | undefined;
+    // This connect already started a visit (a retry, maybe after later connects).
+    if (ownSnap.exists) {
+      const own = ownSnap.data() as VisitDoc;
       return {
-        visitId: cv.currentVisitId,
-        isNew: visit?.startEventId === input.connectEventId,
-        visitNumber: visit?.visitNumber ?? cv.visitCount,
-        isFirstVisit: Boolean(visit?.isFirstVisit),
-        isRevisit: Boolean(visit?.isRevisit),
-        lastSeenAt: tsMs(cv.lastSeenAt) ?? input.occurredAt,
+        visitId: ownRef.id,
+        isNew: true,
+        visitNumber: own.visitNumber,
+        isFirstVisit: Boolean(own.isFirstVisit),
+        isRevisit: Boolean(own.isRevisit),
+        lastSeenAt: lastSeen ?? input.occurredAt,
       };
     }
 
-    const lastSeen = tsMs(cv?.lastSeenAt);
-    const sameVisit =
-      cv?.currentVisitId && lastSeen !== null && input.occurredAt - lastSeen <= input.gapHours * HOUR_MS && input.occurredAt >= lastSeen - HOUR_MS;
+    const current = currentSnap?.exists ? (currentSnap.data() as VisitDoc) : null;
+    const gapMs = input.gapHours * HOUR_MS;
+    const currentFacts = (seen: number): VisitOutcome => ({
+      visitId: cv!.currentVisitId!,
+      isNew: false,
+      visitNumber: current?.visitNumber ?? cv!.visitCount,
+      isFirstVisit: Boolean(current?.isFirstVisit),
+      isRevisit: Boolean(current?.isRevisit),
+      lastSeenAt: seen,
+    });
 
-    if (sameVisit) {
+    // Handled already (it joined the current visit), or older than the current visit's
+    // window (it belonged to a visit that is over): change nothing.
+    if (current && lastSeen !== null && (cv!.lastConnectEventId === input.connectEventId || input.occurredAt < lastSeen - gapMs)) {
+      return currentFacts(lastSeen);
+    }
+
+    if (current && lastSeen !== null && input.occurredAt - lastSeen <= gapMs) {
       const visitId = cv!.currentVisitId!;
-      const v = await tx.get(visits.doc(visitId));
-      const visit = v.data() as VisitDoc | undefined;
-      const seen = Math.max(lastSeen!, input.occurredAt);
+      const seen = Math.max(lastSeen, input.occurredAt);
       tx.update(visits.doc(visitId), {
         lastSeenAt: new Date(seen),
         ...(input.apId ? { apIds: FieldValue.arrayUnion(input.apId) } : {}),
       });
       tx.update(cvRef, { lastSeenAt: new Date(seen), lastConnectEventId: input.connectEventId, updatedAt: new Date() });
-      return {
-        visitId,
-        isNew: false,
-        visitNumber: visit?.visitNumber ?? cv!.visitCount,
-        isFirstVisit: Boolean(visit?.isFirstVisit),
-        isRevisit: Boolean(visit?.isRevisit),
-        lastSeenAt: seen,
-      };
+      return currentFacts(seen);
     }
 
     // A new visit: close the previous one at its last sign of life.
     const visitCount = (cv?.visitCount ?? 0) + 1;
     const visitId = visitIdFor(input.connectEventId);
-    if (cv?.currentVisitId) {
+    if (current && cv?.currentVisitId) {
       tx.update(visits.doc(cv.currentVisitId), { status: 'closed', endedAt: cv.lastSeenAt ?? at, endSource: 'next_visit' });
     }
     const visit: VisitDoc = {

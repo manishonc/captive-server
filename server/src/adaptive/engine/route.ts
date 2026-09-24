@@ -57,16 +57,88 @@ function asLang(value: unknown): Lang | null {
   return typeof value === 'string' && (LANGS as readonly string[]).includes(value) ? (value as Lang) : null;
 }
 
-/** Old STOP flags live on every guest doc with that number (services/optOut.ts writes them all). */
+function digitsOf(value: string): string {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+type OptOutFlag = 'smsOptOut' | 'whatsappOptOut';
+const FLAGGED_TTL_MS = 5 * 60_000;
+const FLAGGED_MAX = 5000;
+const flaggedCache = new Map<OptOutFlag, { forms: string[][]; at: number }>();
+
+/**
+ * The digit forms of every guest doc an old STOP flagged, read once per 5 minutes.
+ * STOPs are rare, so the set is small. Forms per doc: code + number as typed, the
+ * same without a trunk 0, and the number alone — typed numbers can hold spaces,
+ * a leading 0 or the country code twice, which no exact query can match.
+ */
+async function flaggedForms(flag: OptOutFlag): Promise<string[][]> {
+  const hit = flaggedCache.get(flag);
+  if (hit && Date.now() - hit.at < FLAGGED_TTL_MS) return hit.forms;
+  const snap = await db.collection(COL.guests).where(flag, '==', true).select('phone', 'phoneCountryCode').limit(FLAGGED_MAX).get();
+  if (snap.size >= FLAGGED_MAX) console.warn(`[ADAPTIVE] more than ${FLAGGED_MAX} guest docs carry ${flag} — only the first ${FLAGGED_MAX} are checked`);
+  const forms = snap.docs.map((d) => {
+    const cc = digitsOf(String(d.get('phoneCountryCode') ?? ''));
+    const typed = digitsOf(String(d.get('phone') ?? ''));
+    return Array.from(new Set([cc + typed, cc + typed.replace(/^0+/, ''), typed.replace(/^0+/, '')])).filter((f) => f.length >= 7);
+  });
+  flaggedCache.set(flag, { forms, at: Date.now() });
+  return forms;
+}
+
+/**
+ * Old STOP flags (services/optOut.ts) sit on the guest docs that existed when the
+ * STOP arrived — `phoneE164` is only on docs written since July 2026. So: a fresh
+ * query for flagged docs with this `phoneE164`, and the cached flagged set compared
+ * by digits the way optOut.ts matched them (equal, or one ends with the other).
+ * When unsure, stop: a false match only withholds SMS.
+ */
 async function legacyPhoneStops(phoneE164: string): Promise<{ sms: boolean; whatsapp: boolean }> {
-  const snap = await db.collection(COL.guests).where('phoneE164', '==', phoneE164).limit(25).get();
-  let sms = false;
-  let whatsapp = false;
-  for (const d of snap.docs) {
-    if (d.get('smsOptOut') === true) sms = true;
-    if (d.get('whatsappOptOut') === true) whatsapp = true;
-  }
+  const digits = digitsOf(phoneE164);
+  const flagged = async (flag: OptOutFlag): Promise<boolean> => {
+    const byE164 = await db.collection(COL.guests).where('phoneE164', '==', phoneE164).where(flag, '==', true).limit(1).get();
+    if (!byE164.empty) return true;
+    return (await flaggedForms(flag)).some((forms) => forms.some((f) => f === digits || digits.endsWith(f) || f.endsWith(digits)));
+  };
+  const [sms, whatsapp] = await Promise.all([flagged('smsOptOut'), flagged('whatsappOptOut')]);
   return { sms, whatsapp };
+}
+
+/** For tests. */
+export function __clearLegacyCaches(): void {
+  flaggedCache.clear();
+}
+
+/** The address as typed plus its common capitalisations (Firestore matches case-sensitively). */
+function emailCasings(email: string, typed: string[]): string[] {
+  const at = email.lastIndexOf('@');
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const capParts = (s: string) => s.split(/([._-])/).map(cap).join('');
+  const locals = [local, cap(local), capParts(local), local.toUpperCase()];
+  const domains = [domain, cap(domain), domain.toUpperCase()];
+  const out = new Set<string>(typed);
+  out.add(email);
+  for (const l of locals) for (const d of domains) out.add(`${l}@${d}`);
+  return Array.from(out).slice(0, 30);
+}
+
+/**
+ * Old email unsubscribes (routes/unsubscribe.ts) flag the one guest doc the link
+ * was for — there is one per email (as typed) and access point. The page promised
+ * "no more marketing emails from this venue", so a flag on any of this address's
+ * docs at one of this venue's access points counts. Docs keep the address as typed
+ * and Firestore can't match case-insensitively, so the common capitalisations are
+ * asked for; an unusual one (e.g. "aNNa@x.ch") can still be missed.
+ */
+async function legacyEmailUnsubscribed(typed: Array<string | null | undefined>, email: string, venueId: string): Promise<boolean> {
+  const values = emailCasings(email, typed.map((t) => String(t ?? '').trim()).filter((v) => v.length > 0));
+  const snap = await db.collection(COL.guests).where('email', 'in', values).where('unsubscribed', '==', true).limit(20).get();
+  const apIds = Array.from(new Set(snap.docs.map((d) => d.get('captivePortalAccessPointId')).filter((id): id is string => typeof id === 'string' && id.length > 0)));
+  if (!apIds.length) return false;
+  const aps = await db.getAll(...apIds.map((id) => db.collection(COL.accessPoints).doc(id)));
+  return aps.some((ap) => ap.get('venueId') === venueId);
 }
 
 async function handleConnect(event: EngineEvent, guest: GuestPayload, env: RouteEnv): Promise<void> {
@@ -86,7 +158,10 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
   const phoneE164 = guest.phoneE164 ?? g.phoneE164 ?? normalizeE164(guest.phoneCountryCode ?? g.phoneCountryCode ?? '', guest.phone ?? g.phone ?? '');
   if (!email && !phoneE164) return; // nothing to reach this guest on
 
-  const stops = phoneE164 ? await legacyPhoneStops(phoneE164) : { sms: false, whatsapp: false };
+  const [stops, emailUnsubscribed] = await Promise.all([
+    phoneE164 ? legacyPhoneStops(phoneE164) : { sms: false, whatsapp: false },
+    email ? legacyEmailUnsubscribed([guest.email, g.email], email, venueId) : false,
+  ]);
   const resolved = await resolveContact({
     tenantUserId: ctx.tenantUserId,
     venueId,
@@ -98,11 +173,14 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     lang: asLang(event.data.lang) ?? asLang(g.language),
     consentGiven: event.data.consentGiven === true,
     emailVerified: Boolean(guest.emailVerified || g.emailVerified),
-    phoneVerified: Boolean(guest.phoneVerified || g.phoneVerified),
+    // Only this request's own check: the guest doc's flag isn't tied to a number,
+    // and a reconnect can change the number under it. A contact keeps a flag it
+    // earned earlier for the same number (resolve.ts).
+    phoneVerified: Boolean(guest.phoneVerified),
     legacy: {
       smsStop: stops.sms || g.smsOptOut === true,
       whatsappStop: stops.whatsapp || g.whatsappOptOut === true,
-      emailUnsubscribed: g.unsubscribed === true,
+      emailUnsubscribed: g.unsubscribed === true || emailUnsubscribed,
     },
     occurredAt: event.occurredAt,
     sourceEventId: event.id,

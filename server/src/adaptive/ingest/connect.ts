@@ -10,8 +10,10 @@
  * The event id is `portal:{guest}:{AP}:{minute}`, so the UniFi double call
  * (/create-user then /unifi/authorize) can't create two. `/create-user` also skips
  * UniFi APs outright — `/unifi/authorize` is the moment that guest is online.
- * Raw contact details travel only in the task payload (kept 7 days), never in the
- * 25-month event log.
+ * Raw contact details travel only in the task payload, never in the 25-month event
+ * log. The queue removes them once the task is done or dead, and a task nobody
+ * handles expires after 30 days. The payload also carries this API's identity-key
+ * fingerprint, so the worker can hold or flag connects made with a different key.
  */
 
 import { db } from '../../firebase';
@@ -23,6 +25,8 @@ import { now, refreshClock } from '../engine/clock';
 import { retentionFrom } from '../store/time';
 import { SCHEMA_VERSION } from '../core/constants';
 import { TASK_SCHEMA_VERSION } from '../queue/firestoreQueue';
+import { keyFingerprint } from '../identity/key';
+import { DAY_MS } from '../core/runtime/time';
 
 export interface ConnectHookInput {
   route: 'create-user' | 'unifi-authorize';
@@ -112,6 +116,7 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
     payload: {
       eventId,
       schemaVersion: TASK_SCHEMA_VERSION,
+      keyFingerprint: keyFingerprint(),
       guest: {
         firstName: input.firstName,
         lastName: input.lastName,
@@ -127,7 +132,8 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
     venueId: input.venueId,
     createdAt: new Date(),
     doneAt: null,
-    expireAt: null,
+    // Backstop only (e.g. the worker was stopped for good): done/dead set their own.
+    expireAt: new Date(Date.now() + 30 * DAY_MS),
   });
   try {
     await batch.commit();

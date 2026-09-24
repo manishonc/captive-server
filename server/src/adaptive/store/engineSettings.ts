@@ -21,7 +21,9 @@ const settingsSchema = z.object({
   launch: z
     .object({
       default: modeSchema.catch('off'),
-      accounts: z.record(z.string(), modeSchema).catch({}),
+      // Each entry on its own: a bad value turns only that account off, never
+      // another account's explicit 'off' back to the default.
+      accounts: z.record(z.string(), modeSchema.catch('off')).catch({}),
       changedAt: z.unknown().optional(),
       changedBy: z.string().nullable().optional(),
     })
@@ -73,11 +75,16 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
   };
 }
 
+/** Fresh read that throws when Firestore can't be read (the worker keeps its last good copy). */
+export async function readEngineSettingsStrict(): Promise<EngineSettings> {
+  const snap = await db.collection(COL.config).doc(CONFIG_DOC_ID).get();
+  return parseEngineSettings(snap.exists ? (snap.data() as Record<string, unknown>) : undefined);
+}
+
 /** Fresh read; any failure reads as off + paused. */
 export async function readEngineSettings(): Promise<EngineSettings> {
   try {
-    const snap = await db.collection(COL.config).doc(CONFIG_DOC_ID).get();
-    return parseEngineSettings(snap.exists ? (snap.data() as Record<string, unknown>) : undefined);
+    return await readEngineSettingsStrict();
   } catch (err) {
     console.error('[ADAPTIVE] engine settings read failed; treating as off:', err);
     return SAFE_SETTINGS;

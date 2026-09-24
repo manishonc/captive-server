@@ -6,8 +6,9 @@
  * Manish's rule is "no new env", so the key is DERIVED from the existing
  * `GUEST_OTP_PEPPER` (the guest-data pepper the OTP feature already uses) with a
  * fixed label — a separate key in practice, never stored anywhere. Changing that
- * pepper would change every id, so the worker compares fingerprints and refuses
- * to send when they don't match (see worker/health.ts).
+ * pepper would change every id, so the worker compares fingerprints — the API's,
+ * carried on each connect task, and the one pinned in `engine_status.identity` —
+ * and holds connects, warns, or stays idle when they differ (see worker/worker.ts).
  */
 
 import { createHash, createHmac } from 'crypto';

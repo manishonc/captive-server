@@ -117,10 +117,13 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       await existing.ref.update({ status: 'unknown', updatedAt: new Date() });
     }
     const went = !['failed', 'bounced', 'cancelled'].includes(s.status);
+    // Keep the ladder position the send moved to, so "next on ladder" moves on.
+    const ladderPos = typeof s.ladderPos === 'number' ? s.ladderPos : a.definition.channelLadder.indexOf(s.channel);
     return {
       kind: 'done',
       outcome: went ? 'sent' : 'skipped',
       touch: went ? { channel: s.channel, variantId: s.variantId ?? '', slot: s.slot, sendKey, purpose: s.purpose, at: tsMs(s.createdAt) ?? now } : null,
+      ...(went && ladderPos >= 0 ? { ladderPos } : {}),
       revAfter: null,
       suppress: false,
       events: [],
@@ -448,6 +451,7 @@ async function dryRun(p: {
     mode: 'test',
     purpose: p.cfg.purpose,
     channel: p.channel,
+    ladderPos: p.ladderPos,
     toPointId: p.channel === 'email' ? p.contact.emailPointId : p.contact.phonePointId,
     toMasked: address ? maskDestination(p.channel === 'email' ? 'email' : 'sms', address) : '',
     variantId: p.variantId,

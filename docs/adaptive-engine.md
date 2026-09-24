@@ -6,7 +6,8 @@ Design: `research/heidifi-adaptive-campaign-manager/prd/04-engine-runtime.md`. B
 
 **This release (PR A) runs in test mode only.** Journeys run for real, but every send ends as a
 `dry_run` record: nothing is sent to Brevo or Twilio and no credits are charged. There are no provider
-adapters in this build, so an account set to `live` is stopped by gate rule 1 ("sending isn't set up").
+adapters in this build, so an account set to `live` starts no journeys (its guests' contacts and visits
+are still recorded).
 
 ## How it runs
 
@@ -92,9 +93,34 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
    - `sameKey: true`;
    - `indexCheck.ok: true`.
 
-   Launch is still `off`.
+   Launch is still `off`. After the first test-run guest connects, `identity.pinnedFingerprint` is
+   set and `identity.apiMatchesPinned` is `true`.
 
 5. **Test run for one account:** set `launch.accounts.<your tenant> = "test"`.
+
+### The identity-key guard
+
+Contact ids are hashed with a key derived from `GUEST_OTP_PEPPER`, so both apps must have the same
+value, and it must not change. Each connect task carries the API's key fingerprint; the first one that
+matches the worker's is pinned in `engine_status.identity.keyFingerprint`.
+
+- **The worker's key differs from the pinned one** (the pepper changed): the worker stays idle
+  (`state: idle_identity`, reason in `identityProblem`). Put the old value back. Only after a deliberate
+  change, knowing every guest becomes a new contact (consent, visit counts and STOP blocks don't carry
+  over), delete `identity` on that doc to pin the new key.
+- **The apps disagree before anything is pinned:** connect tasks are held (retried every 10 min) and
+  `keyWarning` says so; the worker itself keeps `state: running`. Fix the value on the wrong app and
+  redeploy it. If it was the worker, the held connects go through at once. If it was the server, the
+  held tasks still carry its old key: they go through within 10 minutes of the next guest connecting
+  (that connect pins the key), each refreshing `keyWarning` — it keeps its last message and time.
+- **The API disagrees with the pinned key:** the worker still handles its connects (their data is fine)
+  and sets `keyWarning`; `sameKey: false` on this status means the `server` app's pepper is wrong now.
+
+### Dead tasks and guest details
+
+Tasks that fail 8 times become `dead` and are kept 30 days for the admin view. A guest's raw contact
+details on a connect task are removed as soon as the task is done or dead; a connect task nobody ever
+handles expires after 30 days.
 
 ## Rollback (fastest first)
 
@@ -105,8 +131,9 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
 
 ## Local test stack
 
-The `heidifi-local-test` skill has launch entries for `adaptive-worker`. Its `run-service.sh` sets
-`ADAPTIVE_SANDBOX=1`, which only works when `FIRESTORE_EMULATOR_HOST` is set. That turns on:
+The `heidifi-local-test` skill starts the worker with `run-service.sh worker` (no port, so no launch
+entry). Its `run-service.sh` sets `ADAPTIVE_SANDBOX=1`, which only works when `FIRESTORE_EMULATOR_HOST`
+is set. That turns on:
 
 | Route | What it does |
 |---|---|
@@ -118,5 +145,6 @@ Tests:
 
 ```bash
 npx tsx tests/adaptiveRuntimeCore.test.ts      # pure, no Firestore
-bash tests/emulator/run.sh                     # needs the Firestore emulator on 127.0.0.1:8080
+bash tests/emulator/run.sh                     # needs Docker; starts a throwaway emulator on 127.0.0.1:8085
+                                               # (project demo-adaptive-test); ADAPTIVE_TEST_EMULATOR=host:port reuses one
 ```

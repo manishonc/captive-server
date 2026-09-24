@@ -143,6 +143,8 @@ export interface VisitDoc {
 
 export interface JourneySendDoc {
   tenantUserId: string;
+  /** The channel's place on the journey's ladder, so a resumed step keeps it. */
+  ladderPos?: number | null;
   venueId: string;
   contactId: string;
   instanceId: string | null;

@@ -5,13 +5,16 @@
  *  - Task ids are hashes of a dedupe key: scheduling the same thing twice is a no-op.
  *  - A worker claims a due task in a transaction (queued → leased, 2-minute lease).
  *  - Done tasks keep `expireAt` (+7 days) for the TTL policy — no hot deletes.
- *  - Failures retry with backoff (30 s … 1 h); after `maxAttempts` → `dead` (admin view).
+ *  - Failures retry with backoff (30 s … 1 h); after `maxAttempts` → `dead` (admin
+ *    view, kept 30 days).
+ *  - A guest's raw contact details (`payload.guest`, connect tasks only) are removed
+ *    as soon as the task is done or dead.
  *  - A lease that runs out (worker died) is put back in the queue.
  *
  * Behind the `Scheduler` interface, so Cloud Tasks can replace it later.
  */
 
-import { Timestamp, type Transaction } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp, type Transaction } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { shardOf, taskIdFor } from '../core/runtime/ids';
@@ -22,6 +25,7 @@ export type TaskKind = 'event_route' | 'node_run' | 'visit_end' | 'send_sweep';
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;
 const DONE_TTL_MS = 7 * DAY_MS;
+const DEAD_TTL_MS = 30 * DAY_MS;
 const DEFAULT_MAX_ATTEMPTS = 8;
 
 export interface TaskSpec {
@@ -154,8 +158,13 @@ export async function completeTask(taskId: string, workerId: string): Promise<vo
     const snap = await tx.get(ref);
     if (!snap.exists || snap.get('status') !== 'leased' || snap.get('leaseOwner') !== workerId) return;
     const now = Date.now();
-    tx.update(ref, { status: 'done', doneAt: new Date(now), expireAt: new Date(now + DONE_TTL_MS), leaseUntil: null });
+    tx.update(ref, { status: 'done', doneAt: new Date(now), expireAt: new Date(now + DONE_TTL_MS), leaseUntil: null, 'payload.guest': FieldValue.delete() });
   });
+}
+
+function deadUpdate(lastError: string) {
+  const now = Date.now();
+  return { status: 'dead', lastError, leaseUntil: null, doneAt: new Date(now), expireAt: new Date(now + DEAD_TTL_MS), 'payload.guest': FieldValue.delete() };
 }
 
 /** Retry with backoff, or `dead` after the last attempt. */
@@ -168,7 +177,7 @@ export async function failTask(taskId: string, workerId: string, error: string, 
     const max = Number(snap.get('maxAttempts') || DEFAULT_MAX_ATTEMPTS);
     const lastError = error.slice(0, 500);
     if (attempts >= max) {
-      tx.update(ref, { status: 'dead', lastError, leaseUntil: null, doneAt: new Date() });
+      tx.update(ref, deadUpdate(lastError));
       return;
     }
     const backoff = Math.min(HOUR_MS, 30_000 * 2 ** (attempts - 1));
@@ -207,7 +216,7 @@ export async function reclaimExpiredLeases(limit = 50): Promise<number> {
         const attempts = Number(fresh.get('attempts') || 1);
         const max = Number(fresh.get('maxAttempts') || DEFAULT_MAX_ATTEMPTS);
         if (attempts >= max) {
-          tx.update(doc.ref, { status: 'dead', lastError: 'lease expired on the last attempt', leaseUntil: null, doneAt: new Date() });
+          tx.update(doc.ref, deadUpdate('lease expired on the last attempt'));
         } else {
           tx.update(doc.ref, { status: 'queued', leaseOwner: null, leaseUntil: null });
         }
