@@ -193,6 +193,44 @@ To add AP-specific rules, edit `freeradius/users` and redeploy.
 
 ---
 
+## Service 4: Adaptive worker
+
+### What it does
+Runs the Adaptive Campaigns journey engine: it leases due tasks from Firestore, starts journeys for
+guests who connect, and walks them through their steps. It has no port and no domain. Design and
+switches: `docs/adaptive-engine.md`.
+
+### Files
+- `docker-compose.adaptive-worker.yml` — same `server/` Dockerfile and image, command
+  `node dist/adaptive/worker/main.js`
+- `server/src/adaptive/worker/main.ts`
+
+### Coolify Settings
+| Setting | Value |
+|---------|-------|
+| Buildpack | `dockercompose` |
+| Compose file | `/docker-compose.adaptive-worker.yml` |
+| Domain | None |
+| Network | `coolify` (external) |
+
+### Environment Variables
+Copies of the `server` app's existing values; no new variables:
+- Firebase: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` (multiline)
+- `GUEST_OTP_PEPPER` — must equal the server's; the worker compares fingerprints
+- Brevo: `BREVO_*`
+- Twilio: `TWILIO_*`
+- URLs and links: `SERVER_PUBLIC_URL`, `VISITOR_BASE_URL`, `UNSUBSCRIBE_SIGNING_SECRET`
+- Auto top-up hint: `CMS_INTERNAL_URL`, `INTERNAL_API_SECRET`
+
+### Rules
+- **Deploy it together with `server` on every release.** The admin engine status shows both versions.
+- **Before the first deploy,** create the Firestore indexes in `firestore.adaptive.indexes.json` by hand.
+  The worker stays idle and reports any missing index.
+- **Stopping it is safe.** Tasks wait in Firestore, and journeys continue when it starts again.
+- **Limits.** Memory is capped at 384 MB. SIGTERM finishes the tasks in hand (30 s grace).
+
+---
+
 ## DNS Records
 
 All three subdomains point to the same GCP VM IP:

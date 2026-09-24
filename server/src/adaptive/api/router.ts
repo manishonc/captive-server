@@ -20,6 +20,7 @@ import { zodIssues } from '../core/issues';
 import { actorSchema, setAvailabilityInputSchema, setListedInputSchema, venueActionInputSchema, type Actor } from '../core/schemas';
 import * as admin from '../service/admin';
 import * as tenant from '../service/tenant';
+import engineRoutes from './engineRoutes';
 
 const router = Router();
 
@@ -142,6 +143,10 @@ router.post(
     return tenant.setGuestInfo(tenantOf(req), req.params.venueId, enabled, actorOf(req));
   }),
 );
+
+// ── Engine (status; sandbox-only dev helpers) ────────────────────────────────
+
+router.use(engineRoutes);
 
 // Anything else under /internal/adaptive is a JSON 404, not Express's HTML page.
 router.use((_req: Request, res: Response) => {
