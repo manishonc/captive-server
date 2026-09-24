@@ -32,7 +32,9 @@ Aruba Instant AP
 **Traefik** (Coolify's built-in proxy) handles HTTPS + Let's Encrypt SSL for portal and server.
 FreeRADIUS uses UDP and bypasses Traefik — ports are mapped directly to the host.
 
-**Current server IP:** `34.116.237.182` (GCP `us-central1`, e2-micro)
+**Current server IP:** `34.116.237.182` (GCP `us-central1`)
+
+**Current machine type:** `e2-medium` (2 vCPUs, 4 GB memory). Resize the VM when more is needed.
 
 ---
 
@@ -262,7 +264,7 @@ All rules are **Ingress**, **Priority 1000**, applied globally.
 Use this when migrating to a new server or setting up in a new environment.
 
 ### Step 1 — Provision GCP VM
-- Machine type: `e2-micro` (free tier eligible in `us-central1`, `us-east1`, `us-west1`)
+- Machine type: `e2-medium` (2 vCPUs, 4 GB memory), the same as production today. Pick a larger type if the stack has grown.
 - OS: Ubuntu 22.04 LTS
 - Disk: 30 GB standard
 - Enable HTTP and HTTPS traffic during creation
