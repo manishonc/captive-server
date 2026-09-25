@@ -134,12 +134,18 @@ export interface AdaptiveVenueDoc {
   createdAt: StoredTime;
   updatedAt: StoredTime;
   schemaVersion: number;
+  /** When the owner paused the venue (null while it runs). Sends planned within the freeze window of it still go. */
+  pausedAt?: StoredTime;
+  /** Per install id: when it stopped running here (playbook switched away, Guest info off). Cleared when it runs again. */
+  switchedOffAt?: Record<string, StoredTime>;
 }
 
 export interface VenueJourneyConfigDoc {
   enabled: boolean;
   templateVersion: number;
   slots: Record<string, SlotValue>;
+  /** When the owner switched this journey off (null while it's on). */
+  disabledAt?: StoredTime;
 }
 
 export interface VenuePlaybookDoc {

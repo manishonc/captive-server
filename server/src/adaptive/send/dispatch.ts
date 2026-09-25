@@ -30,7 +30,7 @@ import { consentFor } from '../identity/resolve';
 import { tsMs } from '../store/time';
 import { debitOne, onCreditsSpent } from '../../services/credits';
 import { firestoreScheduler, LEASE_MS } from '../queue/firestoreQueue';
-import { appendEventInTx, eventDoc, eventRef, type EventInput } from '../engine/events';
+import { appendEvent, appendEventInTx, eventDoc, eventRef, type EventInput } from '../engine/events';
 import { instanceRef, stateUpdate, type LoadedInstance } from '../engine/instanceStore';
 import { applyPhoneStop } from '../engine/optouts';
 import { raiseAlert, dayKey } from '../engine/alerts';
@@ -247,7 +247,10 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
       await sendRef(sendKey)
         .update({ status: 'sent', provider: result.provider, providerMessageId: result.providerMessageId, sentAt: new Date(p.now), dispatchLease: null, updatedAt: new Date() })
         .catch((err) => console.error('[ADAPTIVE] could not record an accepted send:', sendKey, (err as Error)?.message || err));
-      if (marketing) await scheduleChargeRepair(p.inst.meta.tenantUserId, p.inst.meta.venueId, sendKey, p.now);
+      // The repair charges a marketing send and, for every send, writes its message.sent (the
+      // daily numbers count from it) if the try below fails too.
+      await scheduleChargeRepair(p.inst.meta.tenantUserId, p.inst.meta.venueId, sendKey, p.now);
+      await ensureSentEvent(sendKey).catch((err) => console.warn('[ADAPTIVE] message.sent not written:', sendKey, (err as Error)?.message || err));
     }
     await chargeSend(sendKey).catch((err) => {
       console.error('[ADAPTIVE] debit failed after a send — the queued repair will charge it:', sendKey, (err as Error)?.message || err);
@@ -347,6 +350,40 @@ export async function chargeSend(sendKey: string): Promise<'charged' | 'nothing'
   await sendRef(sendKey).update({ 'credits.ledgerId': `debit_auto_${sendKey}`, updatedAt: new Date() });
   void onCreditsSpent(s.tenantUserId).catch(() => undefined);
   return 'charged';
+}
+
+/**
+ * Writes a send's `message.sent` event if the provider took it and the event is missing
+ * (its recording transaction failed): the daily numbers count sends and credits from it.
+ * Create-only, so it is never counted twice.
+ */
+export async function ensureSentEvent(sendKey: string): Promise<'written' | 'nothing'> {
+  const id = eventIdFor('engine', `${sendKey}:message.sent`);
+  const [sSnap, eSnap] = await Promise.all([sendRef(sendKey).get(), eventRef(id).get()]);
+  const s = sSnap.data() as JourneySendDoc | undefined;
+  // sentAt is only ever set once the provider took it (the same rule charges it): a later
+  // failure or bounce is counted by its own event.
+  if (eSnap.exists || !s || s.mode !== 'live' || !s.sentAt) return 'nothing';
+  await appendEvent(
+    {
+      type: 'message.sent',
+      occurredAt: tsMs(s.sentAt) ?? Date.now(),
+      tenantUserId: s.tenantUserId,
+      venueId: s.venueId,
+      contactId: s.contactId,
+      instanceId: s.instanceId,
+      journeyKey: s.journeyKey,
+      nodeId: s.nodeId,
+      sendKey,
+      variantId: s.variantId,
+      channel: s.channel,
+      slot: s.slot,
+      mode: 'live',
+      data: { mode: 'live', repaired: true, channel: s.channel, purpose: s.purpose, credits: s.credits?.amount ?? 0, providerCostMinor: s.providerCostMinor ?? 0, segments: s.smsSegments, slot: s.slot, variantId: s.variantId },
+    },
+    id,
+  );
+  return 'written';
 }
 
 export function chargeRepairTask(tenantUserId: string, venueId: string, sendKey: string, now: number) {

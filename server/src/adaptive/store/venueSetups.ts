@@ -17,6 +17,9 @@ import type { Actor, Offer } from '../core/schemas';
 import type { VenueType } from '../core/constants';
 import { SCHEMA_VERSION } from '../core/constants';
 import type { OverlapFlags } from './tenantData';
+import { firestoreScheduler } from '../queue/firestoreQueue';
+import { now as engineNow, refreshClock, sandboxEnabled } from '../engine/clock';
+import { applyInFlightTask } from '../engine/applyInFlight';
 
 export const GUEST_INFO_KEY = 'guest_info';
 
@@ -60,6 +63,8 @@ export interface SetupWrite {
   journeys: Record<string, VenueJourneyConfigDoc>;
   offerMenu: Offer[];
   note?: string;
+  /** "Apply to guests already in these journeys" (plan §3.10): they move to this version at their next step. */
+  applyToInFlight?: boolean;
 }
 
 export interface GuestInfoWrite {
@@ -123,6 +128,10 @@ function newAdaptiveVenue(change: VenueChange, now: Date): AdaptiveVenueDoc {
 
 export async function applyVenueChanges(changes: VenueChange[], actor: Actor, now = new Date()): Promise<VenueChangeResult[]> {
   const authorKind = actor.kind === 'super_admin' ? 'platform' : 'owner';
+  // Off-times and the in-flight save time are compared with send times, so they use the
+  // engine's clock: the real `now`, or the local sandbox's fake clock where journeys run.
+  if (sandboxEnabled()) await refreshClock();
+  const offAt = sandboxEnabled() ? new Date(engineNow()) : now;
 
   return db.runTransaction(async (tx) => {
     // ── Reads (all before any write) ──
@@ -215,6 +224,15 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
           createdAt: now,
           schemaVersion: SCHEMA_VERSION,
         };
+        // When each journey was switched off, kept across later saves (the version keeps the owner's values only).
+        doc.journeys = journeysWithOffTimes(existing, c.setup.journeys, offAt);
+        if (c.setup.applyToInFlight) {
+          version.applyToInFlight = true;
+          firestoreScheduler.scheduleInTx(
+            tx,
+            applyInFlightTask({ tenantUserId: c.tenantUserId, venueId: c.venueId, installId: ref.id, configVersion, savedAt: offAt.getTime(), journeys: c.setup.journeys }),
+          );
+        }
         tx.set(ref, stripUndefined(doc));
         tx.create(ref.collection(VERSIONS).doc(String(configVersion)), stripUndefined(version));
         result.setup = { playbookKey: c.setup.playbookKey, state, configVersion };
@@ -232,12 +250,16 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
         if (av.activePlaybookKey && av.activePlaybookKey !== c.activateKey) {
           const oldRef = venuePlaybookRef(c.venueId, av.activePlaybookKey);
           if (read(oldRef)?.exists) tx.update(oldRef, { state: 'inactive', updatedAt: now });
+          // Its guests stop at their next send; one planned within the freeze window of this still goes.
+          av.switchedOffAt = { ...(av.switchedOffAt ?? {}), [oldRef.id]: av.status === 'paused' && av.pausedAt ? av.pausedAt : offAt };
         }
         av.status = 'on';
         av.activePlaybookKey = c.activateKey;
         av.activeInstallId = venuePlaybookId(c.venueId, c.activateKey);
         av.activatedAt = now;
         av.activatedBy = actor.uid;
+        if (av.switchedOffAt) delete av.switchedOffAt[av.activeInstallId];
+        av.pausedAt = null;
       }
 
       if (c.status) {
@@ -246,6 +268,7 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
           throw new VenueChangeError('conflict', 'Only a paused venue can be resumed');
         }
         av.status = c.status;
+        av.pausedAt = c.status === 'paused' ? offAt : null;
       }
 
       // Guest info switch (independent of the marketing playbook)
@@ -288,12 +311,15 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
         } else if ((snap.data() as VenuePlaybookDoc).state !== state) {
           tx.update(ref, { state, updatedAt: now, lastEditedBy: actor.uid, lastEditedAt: now });
         }
+        const utilityWasOn = av.utility?.enabled === true;
         av.utility = {
           enabled: c.guestInfo.enabled,
           installId: venuePlaybookId(c.venueId, GUEST_INFO_KEY),
           enabledAt: c.guestInfo.enabled ? now : av.utility?.enabledAt ?? null,
           enabledBy: c.guestInfo.enabled ? actor.uid : av.utility?.enabledBy ?? null,
         };
+        if (c.guestInfo.enabled && av.switchedOffAt) delete av.switchedOffAt[ref.id];
+        if (!c.guestInfo.enabled && utilityWasOn) av.switchedOffAt = { ...(av.switchedOffAt ?? {}), [ref.id]: offAt };
         result.guestInfo = { enabled: c.guestInfo.enabled };
       }
 
@@ -305,4 +331,28 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
     }
     return results;
   });
+}
+
+/**
+ * The saved journeys with `disabledAt` (plan §3.10): set when a journey goes from on to
+ * off, kept while it stays off (an older doc without it keeps its last edit time), and
+ * dropped when it's on — so an unrelated later save never moves "switched off since".
+ */
+export function journeysWithOffTimes(
+  existing: VenuePlaybookDoc | null,
+  next: Record<string, VenueJourneyConfigDoc>,
+  at: Date,
+): Record<string, VenueJourneyConfigDoc> {
+  const out: Record<string, VenueJourneyConfigDoc> = {};
+  for (const [key, jc] of Object.entries(next)) {
+    const { disabledAt: _drop, ...values } = jc;
+    if (jc.enabled) {
+      out[key] = values;
+      continue;
+    }
+    const prev = existing?.journeys?.[key];
+    const since = prev && !prev.enabled ? prev.disabledAt ?? existing?.lastEditedAt ?? at : at;
+    out[key] = { ...values, disabledAt: since };
+  }
+  return out;
 }

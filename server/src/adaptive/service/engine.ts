@@ -22,6 +22,7 @@ import { ApiError } from '../api/errors';
 import type { Lang } from '../core/constants';
 import { z } from 'zod';
 import type { ContactDoc, JourneySendDoc } from '../store/engineTypes';
+import { rollupVenue } from '../rollups/rollup';
 import { adaptiveOnBrevoEvents, adaptiveOnInboundSms, adaptiveOnTwilioStatus, adaptiveOnUnsubscribe, ingestClick, ingestRating } from '../ingest/signals';
 
 async function countWhere(status: string): Promise<number> {
@@ -222,4 +223,23 @@ export async function devProviderEvent(body: unknown) {
       break;
   }
   return { queued: p.event, sendKey: p.sendKey };
+}
+
+/**
+ * Sandbox only: roll the venue's (or every Adaptive venue's) events into the daily
+ * numbers now, without the 2-minute lag, and return that day's docs — the local
+ * stand-in for the PR D results route.
+ */
+export async function devRollup(body: { venueId?: string }) {
+  requireSandbox();
+  const venueIds = body.venueId
+    ? [String(body.venueId)]
+    : (await db.collection(COL.adaptiveVenues).select('venueId').get()).docs.map((d) => String(d.get('venueId') ?? '')).filter(Boolean);
+  const out: Record<string, unknown> = {};
+  for (const venueId of venueIds) {
+    const result = await rollupVenue(venueId, { cutoffMs: Date.now() + 1000 });
+    const stats = await db.collection(COL.journeyStats).where('venueId', '==', venueId).get();
+    out[venueId] = { ...result, docs: stats.docs.filter((d) => d.get('kind') !== 'rollup_state').map((d) => ({ id: d.id, ...toJson(d.data()) })) };
+  }
+  return { venues: out };
 }

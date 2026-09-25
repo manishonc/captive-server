@@ -201,6 +201,8 @@ export interface JourneyEventDoc {
   variantId: string | null;
   channel: string | null;
   slot: string | null;
+  /** The instance's run mode, on engine events (test runs are kept apart in the rollups). */
+  mode?: 'test' | 'live';
   source: 'portal' | 'engine' | 'brevo' | 'twilio' | 'meta' | 'shortlink' | 'cms' | 'scanner' | 'dev' | 'unsubscribe';
   occurredAt: StoredTime;
   recordedAt: StoredTime;

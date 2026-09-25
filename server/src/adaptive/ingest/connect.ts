@@ -16,6 +16,7 @@
  * fingerprint, so the worker can hold or flag connects made with a different key.
  */
 
+import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL, adaptiveVenueId } from '../store/collections';
 import type { AdaptiveVenueDoc } from '../store/types';
@@ -98,7 +99,7 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
     slot: null,
     source: 'portal',
     occurredAt: new Date(occurredAt),
-    recordedAt: new Date(),
+    recordedAt: FieldValue.serverTimestamp(), // commit time (the rollups read the log in this order)
     data: { apId: input.accessPointId, route: input.route, consentGiven: input.consentGiven, lang: input.language },
     expireAt: retentionFrom(occurredAt),
     schemaVersion: SCHEMA_VERSION,

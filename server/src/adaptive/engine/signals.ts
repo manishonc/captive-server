@@ -25,7 +25,8 @@ import { DAY_MS } from '../core/runtime/time';
 import { contactPointId } from '../identity/key';
 import { tsMs } from '../store/time';
 import { normalizeEmail } from '../../services/phone';
-import { loadEvent } from './events';
+import { eventDoc, loadEvent } from './events';
+import { eventIdFor } from '../core/runtime/ids';
 import { deliverEvent } from './advance';
 import { mustDeliver, __clearLegacyCaches } from './route';
 import { applyEmailRevoke, applyPhoneStart, applyPhoneStop } from './optouts';
@@ -97,9 +98,12 @@ async function applySendSignal(event: EngineEvent, env: SignalEnv): Promise<void
     const contactRef = db.collection(COL.contacts).doc(s.contactId);
     const needsContact = event.type === 'message.opened' || event.type === 'message.clicked';
     const needsPoint = event.type === 'message.bounced' && s.toPointId;
-    const [cSnap, cpSnap] = await Promise.all([
+    const repairs = event.type === 'message.delivered' && (s.status === 'unknown' || s.status === 'dispatching');
+    const sentEventRef = db.collection(COL.journeyEvents).doc(eventIdFor('engine', `${sendKey}:message.sent`));
+    const [cSnap, cpSnap, sentEventSnap] = await Promise.all([
       needsContact ? tx.get(contactRef) : Promise.resolve(null),
       needsPoint ? tx.get(db.collection(COL.contactPoints).doc(s.toPointId!)) : Promise.resolve(null),
+      repairs ? tx.get(sentEventRef) : Promise.resolve(null),
     ]);
     const at = new Date(env.now);
     const upd: Record<string, unknown> = { updatedAt: new Date() };
@@ -116,6 +120,28 @@ async function applySendSignal(event: EngineEvent, env: SignalEnv): Promise<void
         const mid = event.data.messageId;
         if (!s.providerMessageId && typeof mid === 'string' && mid) upd.providerMessageId = mid;
         if (s.purpose === 'marketing' && !s.credits?.ledgerId) firestoreScheduler.scheduleInTx(tx, chargeRepairTask(s.tenantUserId, s.venueId, sendKey, env.now));
+        // It went out after all: the daily numbers count it as sent (and its credits), once.
+        if (sentEventSnap && !sentEventSnap.exists) {
+          tx.set(
+            sentEventRef,
+            eventDoc({
+              type: 'message.sent',
+              occurredAt: env.now,
+              tenantUserId: s.tenantUserId,
+              venueId: s.venueId,
+              contactId: s.contactId,
+              instanceId: s.instanceId,
+              journeyKey: s.journeyKey,
+              nodeId: s.nodeId,
+              sendKey,
+              variantId: s.variantId,
+              channel: s.channel,
+              slot: s.slot,
+              mode: 'live',
+              data: { mode: 'live', repaired: true, channel: s.channel, purpose: s.purpose, credits: s.credits?.amount ?? 0, providerCostMinor: s.providerCostMinor ?? 0, segments: s.smsSegments, slot: s.slot, variantId: s.variantId },
+            }),
+          );
+        }
       }
     }
     if (event.type === 'message.failed') {

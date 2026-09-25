@@ -21,6 +21,9 @@ import { getCreditConfig, providerCostForMessage } from '../../services/credits'
 import { loadCatalogue } from '../service/catalogue';
 import { channelAdapters } from './sendPath';
 import { callProvider, dispatchLease } from '../send/dispatch';
+import { appendEvent } from './events';
+import { ensureRollup } from '../rollups/rollup';
+import { eventIdFor } from '../core/runtime/ids';
 import type { EngineSettings } from '../store/engineSettings';
 
 // No venue name: the number is shared, and the reply may answer another venue's
@@ -133,5 +136,25 @@ export async function sendReplyNotice(args: {
         ? { status: 'unknown', errorMessage: result.reason.slice(0, 300) }
         : { status: 'failed', errorCode: result.kind === 'rejected' ? result.code.slice(0, 60) : 'retry', errorMessage: (result.kind === 'rejected' ? result.message : result.reason).slice(0, 300) };
   await ref.update({ ...update, provider: result.provider, dispatchLease: null, updatedAt: new Date() });
+  if (result.kind === 'accepted') {
+    // The venue's daily numbers count it as a service message (a create: a retry writes nothing twice).
+    await appendEvent(
+      {
+        type: 'message.sent',
+        occurredAt: args.now,
+        tenantUserId: args.tenantUserId,
+        venueId: args.venueId,
+        contactId: args.contactId,
+        sendKey,
+        channel: 'sms',
+        slot: 'now',
+        mode: 'live',
+        data: { mode: 'live', kind: 'reply_notice', channel: 'sms', purpose: 'service', credits: 0, providerCostMinor: providerCostForMessage(creditConfig, 'sms', claimed.body), segments: result.segments ?? smsSegments(claimed.body), slot: 'now' },
+      },
+      eventIdFor('engine', `${sendKey}:message.sent`),
+    ).catch((err) => console.warn('[ADAPTIVE] reply notice event not written:', sendKey, (err as Error)?.message || err));
+    // Handled by a signal task without a venue: arm the venue's rollup here.
+    await ensureRollup(args.venueId, args.tenantUserId).catch(() => undefined);
+  }
   return result.kind === 'accepted' ? 'sent' : 'skipped';
 }

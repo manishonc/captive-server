@@ -22,6 +22,8 @@ import { loadContact, loadVenueContext, pinnedConfig } from './context';
 import { journeyFacts } from './enrol';
 import { instanceRef, loadInstance, stateUpdate, type LoadedInstance } from './instanceStore';
 import { runSend } from './sendPath';
+import { decideConfigSwap } from '../core/runtime/configSwap';
+import { MINUTE_MS } from '../core/runtime/time';
 
 export type AdvanceInput =
   | { kind: 'start' }
@@ -34,15 +36,31 @@ export type AdvanceResult = { status: 'done' } | { status: 'conflict' } | { stat
 const MAX_LOOPS = 20;
 const MAX_CONFLICT_RETRIES = 5;
 
-export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { now: number; settings: EngineSettings; workerId: string; taskDueAt: number }): Promise<AdvanceResult> {
+export async function advance(
+  inst: LoadedInstance,
+  input: AdvanceInput,
+  env: { now: number; settings: EngineSettings; workerId: string; taskDueAt: number },
+): Promise<AdvanceResult> {
   const { now } = env;
   // A replayed webhook or a retried task delivers the same event again: count it once.
   if (input.kind === 'event' && (inst.state.seenEventIds ?? []).includes(input.event.id)) return { status: 'done' };
   const cat = await loadCatalogue();
   const found = templateVersion(cat, inst.meta.journeyKey, inst.meta.templateVersion);
+  // An owner edit applied to running guests (plan §3.10): the guest moves to the new values
+  // at its first step after the freeze window of the save — nothing within 60 minutes of
+  // the save, and no send planned within them, uses the new values.
+  const freezeMinutes = Number.isFinite(cat.config.freezeWindowMinutes) ? cat.config.freezeWindowMinutes : 60;
+  const swap = decideConfigSwap(
+    { configVersion: inst.meta.configVersion, pendingConfigVersion: inst.meta.pendingConfigVersion, pendingConfigAt: inst.meta.pendingConfigAt ?? null },
+    inst.state.waiting,
+    freezeMinutes * MINUTE_MS,
+    now,
+  );
+  // Everything below (the pinned values, the send record, the "why" record) sees the version actually used.
+  if (swap.kind === 'swap') inst = { ...inst, meta: { ...inst.meta, configVersion: swap.use, pendingConfigVersion: null, pendingConfigAt: null } };
   const [ctx, pinned, contact] = await Promise.all([
     loadVenueContext(inst.meta.venueId),
-    pinnedConfig(inst.meta.installId, inst.meta.pendingConfigVersion ?? inst.meta.configVersion, inst.meta.journeyKey),
+    pinnedConfig(inst.meta.installId, swap.use, inst.meta.journeyKey),
     loadContact(inst.meta.contactId),
   ]);
 
@@ -51,7 +69,7 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
   let changed = false;
   const tasks: TaskSpec[] = [];
   const events: EventInput[] = [];
-  const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey };
+  const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode: inst.meta.mode };
 
   if (!found) {
     changed = true;
@@ -158,6 +176,9 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
   }
 
   if (!changed) return { status: 'done' };
+  if (swap.kind === 'swap') {
+    events.push({ ...common, type: 'journey.config_updated', occurredAt: now, data: { from: swap.from, to: swap.use } });
+  }
 
   // ── commit ──
   const ok = await db.runTransaction(async (tx) => {
@@ -165,7 +186,17 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
     if (!snap.exists || Number(snap.get('rev')) !== expectedRev) return false;
     const next = { ...state, rev: expectedRev + 1 };
     const ended = ENDED_STATUSES.has(next.status);
-    tx.update(instanceRef(inst.id), stateUpdate(next, now, ended ? retentionFrom(now) : null));
+    const update = stateUpdate(next, now, ended ? retentionFrom(now) : null);
+    if (swap.kind === 'swap' || swap.kind === 'stale') {
+      if (swap.kind === 'swap') update.configVersion = swap.use;
+      // A newer save may have marked the guest since we read it: keep that one for the next step.
+      const pendingNow = snap.get('pendingConfigVersion');
+      if (!(typeof pendingNow === 'number' && pendingNow > swap.use)) {
+        update.pendingConfigVersion = null;
+        update.pendingConfigAt = null;
+      }
+    }
+    tx.update(instanceRef(inst.id), update);
     for (const t of tasks) firestoreScheduler.scheduleInTx(tx, t);
     for (const e of events) appendEventInTx(tx, e);
     if (ended) {

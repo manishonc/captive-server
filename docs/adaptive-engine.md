@@ -25,6 +25,8 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
   visit_end    → 3 h "visit ended" fallback (A2 review ask)
   signal       → a delivery report, open, click, bounce, STOP / START, unsubscribe, reply, rating
   send_sweep   → a charge that failed after a send the provider accepted, repaired
+  rollup_venue → the venue's daily numbers (JourneyStats), every 15 min, 2 min behind real time
+  apply_config_inflight → an owner's "apply to guests already in these journeys" save
 
 Twilio status / inbound, Brevo webhook, the /u unsubscribe page ── +1 guarded line each ──▶ event + signal task
 the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ─────────────────────▶ event + signal task
@@ -91,6 +93,56 @@ Written once to `CaptivePortal_AdaptiveAlerts` (one per venue, reason and day) a
 **Sign-up breaker:** more than `safety.maxNewContactsPerApPerHour` (60) new guests at one access point in
 an hour → the rest of that hour's new guests start no journeys (they are still recorded).
 
+## Daily numbers — `CaptivePortal_JourneyStats`
+
+One doc per venue, journey and day: `{venueId}_{journeyKey}_{yyyymmdd}`, the day being when the event
+happened in the venue's time zone. `{venueId}__venue_{yyyymmdd}` (journey key `_venue`) holds the venue's
+totals over all journeys, plus its visits. No personal data; kept forever. The results route (PR D)
+reads them by id.
+
+| Field | Counts (from `CaptivePortal_JourneyEvents`) |
+|---|---|
+| `entered`, `converted` | guests who started / reached the goal |
+| `ended.{status}`, `exited.{reason}` | how journeys ended (`completed`, `exhausted`, `converted`, `suppressed`, `failed`) and why |
+| `sends.{channel}.{sent,delivered,opened,clicked,bounced,failed,unknown}` | live messages (a message clicked twice counts once) |
+| `bySlot.{slot}` / `byVariant.{variantId}` → `{sent, clicked}` | per time slot and wording |
+| `credits.{channel}` | credits charged for marketing messages (equals the ledger) |
+| `utility.{sends, providerCostMinor}` | service messages (never charged) and their provider cost |
+| `skipped.{reason}` | sends skipped or blocked, by the "why" reason |
+| `dryRun.{…}` | everything of test-run guests, same shape — a test run never shows in `sends` or `credits` |
+| `visits.{total, first, revisits, captures}` (`_venue` only) | visits, first visits, revisits, Wi-Fi sign-ins |
+| `rollupWatermark`, `updatedAt`, `schemaVersion` | how far the numbers go |
+
+- **How:** after the worker runs a task for a venue, it arms `rollup:{venueId}:{15-min bucket}`, due 2 min
+  after the bucket ends. The rollup reads the venue's log in commit order (`recordedAt`, a server
+  timestamp) from its watermark (`JourneyStats/{venueId}_rollup`) up to real now − 2 min, one transaction per
+  500 events: add the counts, move the watermark. Re-running changes nothing. Each event counts on the
+  day it happened (`occurredAt`): a connect handled late still counts on the day of the visit; a webhook
+  is dated when it reaches us, so a delivery report Brevo retries for two days counts on the day it arrived.
+- `revenueEstimateMinor` is not stored: the results route works it out (converted × the venue's
+  average spend), so a changed average needs no recount.
+- Locally, `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` rolls up at once (no 2-min lag) and
+  returns the docs. Use it there: with the fake clock ahead, the automatic rollup runs as soon as it's
+  armed and leaves the last 2 real minutes for the venue's next one.
+
+## Owner edits and switches mid-journey (plan §3.10)
+
+- **Every save is a new config version**; running guests stay on the version they started with.
+- **"Apply to guests already in these journeys"** (`applyToInFlight: true` on the save, see
+  docs/adaptive-api.md): the save queues `apply_config_inflight`, which marks the install's running
+  guests (all its journeys, on the template version the values were written for) with
+  `pendingConfigVersion` + `pendingConfigAt`. Each guest moves to the new values at their first step after
+  the freeze window of the save (`freezeWindowMinutes`, seeded 60). Within the window nothing changes: a
+  send that goes out then — planned before the save, or reached by a delay ending or a click — keeps the
+  values it was planned with, and a send planned within the window keeps them even if a pause or a provider
+  retry holds it longer. The send record and the "why" record show the version used, and the guest's log
+  gets `journey.config_updated`. An offer already issued keeps its label.
+- **Pause, a journey switched off, another playbook turned on, Guest info off:** those guests stop at
+  their next send (`suppressed`, `switched_off`); a send planned within the freeze window of the switch
+  still goes. The switch times are recorded when they happen — `AdaptiveVenues.pausedAt`,
+  `AdaptiveVenues.switchedOffAt.{installId}`, `VenuePlaybooks.journeys.{key}.disabledAt` — so a later,
+  unrelated save can't re-open the window. A switched-off playbook keeps its settings.
+
 ## Switches — `CaptivePortal_AdaptiveConfig/global`
 
 | Field | Default when missing | Meaning |
@@ -127,6 +179,9 @@ an hour → the rest of that hour's new guests start no journeys (they are still
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneySends --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=mode,order=ascending --field-config=field-path=createdAt,order=ascending
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneySends --query-scope=COLLECTION --field-config=field-path=mode,order=ascending --field-config=field-path=createdAt,order=ascending
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneySends --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=mode,order=ascending --field-config=field-path=purpose,order=ascending --field-config=field-path=createdAt,order=ascending
+   # PR B2: the daily numbers read a venue's log in commit order; "apply to running guests" pages a journey's guests
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyEvents --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=recordedAt,order=ascending
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyInstances --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=journeyKey,order=ascending --field-config=field-path=status,order=ascending
    ```
 
    TTL policies:
@@ -139,6 +194,8 @@ an hour → the rest of that hour's new guests start no journeys (they are still
 
    Single-field exemptions: see `fieldOverrides` in the JSON, e.g.
    `gcloud firestore indexes fields update dueAt --collection-group=CaptivePortal_JourneyTasks --disable-indexes --project=$P`.
+   The JourneyStats count maps (`sends`, `skipped`, `exited`, `ended`, `bySlot`, `byVariant`, `credits`,
+   `utility`, `dryRun`, `visits`) are only read by doc id, so their indexes can be switched off the same way.
    Wait until every index shows **Enabled**.
 
 2. **Check** that `GUEST_OTP_PEPPER` is set on the `server` app. The identity key is derived from
@@ -208,6 +265,7 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 | `POST /internal/adaptive/dev/launch` `{ "accounts": { "tenant_demo": "test" } }` | Sets launch modes |
 | `GET /internal/adaptive/dev/guest-log?email=…` | Shows events, sends and the "why" sentences |
 | `POST /internal/adaptive/dev/provider-event` `{ "sendKey", "event": "delivered\|opened\|click\|rating\|stop\|reply…" }` | Fakes a webhook / CMS signal for one send, through the real hook functions |
+| `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` | Rolls the daily numbers up now (no 2-min lag) and returns the JourneyStats docs |
 
 Tests:
 
@@ -215,6 +273,7 @@ Tests:
 npx tsx tests/adaptiveRuntimeCore.test.ts      # pure, no Firestore
 npx tsx tests/adaptiveCompose.test.ts          # message composition (pure)
 npx tsx tests/adaptiveProviders.test.ts        # Brevo / Twilio clients against a fake HTTP layer
+npx tsx tests/adaptiveRollupsEdits.test.ts     # daily-number counting + the mid-journey config swap (pure)
 bash tests/emulator/run.sh                     # needs Docker; starts a throwaway emulator on 127.0.0.1:8085
                                                # (project demo-adaptive-test); ADAPTIVE_TEST_EMULATOR=host:port reuses one
 ```

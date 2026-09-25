@@ -141,14 +141,45 @@ export async function loadGuestInfo(venueId: string): Promise<Record<string, any
   return snap.exists ? (snap.data() as Record<string, any>) : null;
 }
 
-/** Is the journey still switched on right now (and since when is it off)? */
-export function journeyStillOn(ctx: VenueContext | null, installId: string, journeyKey: string): { on: boolean; offSinceAt: number | null } {
-  if (!ctx) return { on: false, offSinceAt: null };
-  const install = ctx.marketing?.installId === installId ? ctx.marketing : ctx.utility?.installId === installId ? ctx.utility : null;
-  if (!install) {
-    return { on: false, offSinceAt: tsMs(ctx.adaptive.updatedAt) };
+/**
+ * Is this guest's journey still switched on here — and if not, since when? (plan §3.10)
+ *
+ * "Since when" comes from timestamps written at the moment of the switch
+ * (store/venueSetups.ts): `pausedAt` on the venue, `switchedOffAt[installId]` for a
+ * playbook switched away or Guest info turned off, `disabledAt` on a journey. So a
+ * later, unrelated save can't move it and re-open the freeze window. When several
+ * apply, the earliest wins: the journey has been off since then. Older docs without
+ * them fall back to their last edit time.
+ */
+export async function journeyOnState(
+  ctx: VenueContext | null,
+  installId: string,
+  journeyKey: string,
+): Promise<{ venueOn: boolean; journeyOn: boolean; offSinceAt: number | null }> {
+  if (!ctx) return { venueOn: false, journeyOn: false, offSinceAt: null };
+  const live = ctx.marketing?.installId === installId ? ctx.marketing : ctx.utility?.installId === installId ? ctx.utility : null;
+  if (live) {
+    if (live.doc.journeys?.[journeyKey]?.enabled) return { venueOn: true, journeyOn: true, offSinceAt: null };
+    return { venueOn: true, journeyOn: false, offSinceAt: journeyOffSince(live.doc, journeyKey) };
   }
-  const jc = install.doc.journeys?.[journeyKey];
-  if (!jc?.enabled) return { on: false, offSinceAt: tsMs(install.doc.lastEditedAt) ?? tsMs(install.doc.updatedAt) };
-  return { on: true, offSinceAt: null };
+
+  // The install doesn't run here any more: the venue is paused, another playbook was
+  // turned on, or Guest info was switched off.
+  const av = ctx.adaptive;
+  const times: Array<number | null> = [];
+  const utilityId = av.utility?.installId ?? venuePlaybookId(ctx.venueId, GUEST_INFO_KEY);
+  const switchedAt = tsMs(av.switchedOffAt?.[installId]);
+  const doc = (await db.collection(COL.venuePlaybooks).doc(installId).get()).data() as VenuePlaybookDoc | undefined;
+  if (installId === utilityId) times.push(switchedAt ?? tsMs(av.updatedAt));
+  else if (av.activeInstallId !== installId) times.push(switchedAt ?? tsMs(av.activatedAt) ?? tsMs(av.updatedAt));
+  else if (av.status !== 'on') times.push(tsMs(av.pausedAt) ?? tsMs(av.updatedAt));
+  else times.push(tsMs(doc?.updatedAt) ?? tsMs(av.updatedAt)); // on, but its setup isn't active
+  // The journey itself may have been switched off even earlier.
+  if (doc && !doc.journeys?.[journeyKey]?.enabled) times.push(journeyOffSince(doc, journeyKey));
+  const known = times.filter((t): t is number => t !== null);
+  return { venueOn: false, journeyOn: false, offSinceAt: known.length ? Math.min(...known) : null };
+}
+
+function journeyOffSince(doc: VenuePlaybookDoc, journeyKey: string): number | null {
+  return tsMs(doc.journeys?.[journeyKey]?.disabledAt) ?? tsMs(doc.lastEditedAt) ?? tsMs(doc.updatedAt);
 }

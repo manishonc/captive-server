@@ -428,6 +428,8 @@ export async function saveSetups(tenantUserId: string, body: unknown, actor: Act
     };
   });
 
+  // Guests already in these journeys move to the new values at their next step (plan §3.10).
+  if (input.applyToInFlight === true) for (const c of changes) if (c.setup) c.setup.applyToInFlight = true;
   const results = await applyVenueChanges(changes, actor).catch(mapVenueError);
   return { ok: true, results, report: makeReport(issues.filter((i) => i.severity !== 'error')) };
 }

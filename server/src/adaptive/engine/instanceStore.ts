@@ -30,6 +30,8 @@ export interface InstanceMeta {
   templateVersion: number;
   configVersion: number;
   pendingConfigVersion: number | null;
+  /** When the owner saved `pendingConfigVersion` (an "apply to guests already in this journey" edit). */
+  pendingConfigAt?: number | null;
   purpose: 'marketing' | 'service' | 'mixed';
   mode: RunMode;
   context: {
@@ -121,6 +123,7 @@ export function fromDoc(id: string, data: Record<string, unknown>): LoadedInstan
     templateVersion: plain.templateVersion,
     configVersion: plain.configVersion,
     pendingConfigVersion: plain.pendingConfigVersion ?? null,
+    pendingConfigAt: typeof plain.pendingConfigAt === 'number' ? plain.pendingConfigAt : null,
     purpose: plain.purpose ?? 'marketing',
     mode: plain.mode === 'live' ? 'live' : 'test',
     context: plain.context,

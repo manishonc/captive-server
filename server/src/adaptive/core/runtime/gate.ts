@@ -63,8 +63,10 @@ export interface GateInput {
     tenantActive: boolean;
     venueOn: boolean;
     journeyOn: boolean;
-    /** When the venue / journey was switched off (sends due within 60 min of that still go). */
+    /** When the venue / journey was switched off (sends due within the freeze window of that still go). */
     offSinceAt: number | null;
+    /** The freeze window (AdaptiveConfig `freezeWindowMinutes`, seeded 60); 60 min when not given. */
+    freezeWindowMs?: number;
     staleAfterMs: number;
     venueSendsToday: number;
     venueCeiling: number;
@@ -121,7 +123,7 @@ function ruleSystem(i: GateInput): RuleCheck {
   const late = i.now - i.intendedAt;
   if (!s.tenantActive) return { rule: 'system', verdict: 'skip', fact: 'account is being deleted', reason: 'tenant_inactive' };
   if (!s.venueOn || !s.journeyOn) {
-    const withinFreeze = s.offSinceAt !== null && i.intendedAt <= s.offSinceAt + FREEZE_WINDOW_MS;
+    const withinFreeze = s.offSinceAt !== null && i.intendedAt <= s.offSinceAt + (s.freezeWindowMs ?? FREEZE_WINDOW_MS);
     if (!withinFreeze) {
       return { rule: 'system', verdict: 'skip', fact: !s.venueOn ? 'venue is paused or off' : 'journey was switched off', reason: 'switched_off' };
     }

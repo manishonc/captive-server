@@ -8,7 +8,8 @@
  *  - expired leases put back every 60 s;
  *  - heartbeat to `AdaptiveConfig/engine_status` + a file for Docker's healthcheck;
  *  - a watchdog exits if the loop stalls, so Docker restarts the container;
- *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit.
+ *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit;
+ *  - after a task for a venue, that venue's 15-minute rollup is armed (rollups/rollup.ts).
  *
  * Identity-key guard (the key is derived from GUEST_OTP_PEPPER, see identity/key.ts).
  * The first connect task whose key (the API's, carried on the task) equals this
@@ -36,10 +37,12 @@ import { runTimer } from '../engine/advance';
 import { handleSignal } from '../engine/signals';
 import { channelAdapters } from '../engine/sendPath';
 import { registerAdapters } from '../send/adapters';
-import { chargeSend } from '../send/dispatch';
+import { chargeSend, ensureSentEvent } from '../send/dispatch';
 import { identityReady, keyFingerprint } from '../identity/key';
 import { ENGINE_RUNTIME_VERSION } from '../core/runtime/version';
 import { checkIndexes, type IndexCheckResult } from './indexCheck';
+import { ensureRollup, rollupVenue } from '../rollups/rollup';
+import { applyConfigInFlight } from '../engine/applyInFlight';
 import { tsMs } from '../store/time';
 
 const POLL_MS = 5_000;
@@ -211,7 +214,23 @@ export class AdaptiveWorker {
           break;
         case 'send_sweep':
           // A send the provider accepted but the debit failed: charge it (idempotent).
-          if (task.payload.action === 'charge' && typeof task.payload.sendKey === 'string') await chargeSend(task.payload.sendKey);
+          if (task.payload.action === 'charge' && typeof task.payload.sendKey === 'string') {
+            await chargeSend(task.payload.sendKey);
+            await ensureSentEvent(task.payload.sendKey); // a send whose recording failed still counts in the daily numbers
+          }
+          break;
+        case 'rollup_venue': {
+          // The venue's daily numbers (rollups/rollup.ts); a big backlog continues shortly.
+          const r = typeof task.payload.venueId === 'string' ? await rollupVenue(task.payload.venueId) : { more: false };
+          if (r.more) {
+            await releaseTask(task.id, this.id, 5_000, env.now);
+            return;
+          }
+          break;
+        }
+        case 'apply_config_inflight':
+          // An owner's "apply to guests already in these journeys" save.
+          await applyConfigInFlight(task.payload as any);
           break;
         default:
           await releaseTask(task.id, this.id, 10 * 60_000, env.now); // a kind this build doesn't know yet
@@ -225,6 +244,8 @@ export class AdaptiveWorker {
       console.error(`[ADAPTIVE WORKER] task ${task.kind} ${task.id} failed:`, (err as Error)?.message || err);
       await failTask(task.id, this.id, message, env.now).catch(() => undefined);
     } finally {
+      // Whatever this task wrote for the venue is counted by its next rollup.
+      if (task.kind !== 'rollup_venue') await ensureRollup(task.venueId, task.tenantUserId).catch((err) => console.warn('[ADAPTIVE WORKER] arming the rollup failed:', err?.message || err));
       this.inflight -= 1;
     }
   }

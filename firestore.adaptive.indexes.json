@@ -2,6 +2,23 @@
   "_README": "Reference only. The Firebase project is shared with other products — NEVER deploy this file with the Firebase CLI (it would replace every index). Create each entry by hand or with the gcloud commands in docs/adaptive-engine.md. The adaptive worker checks these at startup and stays idle while one is missing.",
   "indexes": [
     {
+      "collectionGroup": "CaptivePortal_JourneyEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "recordedAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyInstances",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "journeyKey", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "CaptivePortal_JourneyTasks",
       "queryScope": "COLLECTION",
       "fields": [
@@ -54,6 +71,16 @@
     }
   ],
   "fieldOverrides": [
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "sends", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "skipped", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "exited", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "ended", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "bySlot", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "byVariant", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "credits", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "utility", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "dryRun", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "visits", "indexes": [] },
     { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
     { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "dueAt", "indexes": [] },
     { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "leaseUntil", "indexes": [] },

@@ -14,6 +14,7 @@ import { setSandboxClock, refreshClock, now } from '../../src/adaptive/engine/cl
 import { AdaptiveWorker } from '../../src/adaptive/worker/worker';
 import { COL, CONFIG_DOC_ID } from '../../src/adaptive/store/collections';
 import { zonedTime, localParts, DAY_MS } from '../../src/adaptive/core/runtime/time';
+import { __clearRollupArming } from '../../src/adaptive/rollups/rollup';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST || process.env.ADAPTIVE_SANDBOX !== '1') {
   console.error('Run these through tests/emulator/run.sh (emulator + sandbox only).');
@@ -64,6 +65,7 @@ export function clearCaches(): void {
   __clearConnectCaches();
   __clearLegacyCaches();
   invalidateCatalogue();
+  __clearRollupArming();
 }
 
 export async function seedCatalogue(): Promise<void> {
