@@ -8,6 +8,7 @@
  * anything (deterministic ids, remembered connect ids, idempotent enrolment).
  */
 
+import { FieldPath } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import type { VisitDoc } from '../store/engineTypes';
@@ -27,6 +28,7 @@ import { enabledJourneys, loadContact, loadVenueContext, type VenueContext } fro
 import { enrolForEvent, type VisitFacts } from './enrol';
 import { deliverEvent } from './advance';
 import { fromDoc } from './instanceStore';
+import { dayKey, raiseAlert } from './alerts';
 
 export interface RouteEnv {
   now: number;
@@ -49,8 +51,13 @@ export async function routeEvent(payload: { eventId: string; guest?: GuestPayloa
   const event = await loadEvent(payload.eventId);
   if (!event) return;
   if (event.type === 'wifi.connected') return handleConnect(event, payload.guest ?? {}, env);
-  // Events tied to one journey (message.*, ratings) arrive with PR B.
-  if (event.instanceId) await deliverEvent(event.instanceId, event, env);
+  // Events tied to one journey (message.*, ratings): the task retries if the journey is busy.
+  if (event.instanceId) mustDeliver(await deliverEvent(event.instanceId, event, env));
+}
+
+/** A journey that stayed busy through the retries: fail the task so it is tried again, never drop the event. */
+export function mustDeliver(r: { status: string }): void {
+  if (r.status === 'retry') throw new Error('journey busy — the event will be delivered again');
 }
 
 function asLang(value: unknown): Lang | null {
@@ -200,6 +207,13 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
   const contact = await loadContact(resolved.contactId);
   if (!contact) return;
 
+  // Sign-up breaker: an unusual burst of NEW people at one access point starts no
+  // journeys for the rest of that hour (their contact and visit are still kept).
+  const apId = typeof event.data.apId === 'string' ? event.data.apId : null;
+  // "New" = first seen by this connect (also on a retried task, where `created` is false).
+  const isNew = resolved.created || tsMs(contact.firstSeenAt) === event.occurredAt;
+  const tripped = isNew && apId ? await signupBreakerTripped(ctx, apId, resolved.contactId, event.occurredAt, env) : false;
+
   // A connect handled long after it happened (the worker was stopped) still updates
   // the guest's record, but starts nothing — no welcome hours after the visit.
   const fresh = env.now - event.occurredAt <= env.settings.safety.staleAfterHours * HOUR_MS;
@@ -219,11 +233,42 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     );
     if (visit.isRevisit) await wakeRunningJourneys(ctx, resolved.contactId, started, env);
     const visitFacts: VisitFacts = { visitId: visit.visitId, visitNumber: visit.visitNumber, isFirstVisit: visit.isFirstVisit, isRevisit: visit.isRevisit };
-    if (fresh) await enrolForEvent({ ctx, who: { contactId: resolved.contactId, networkId: resolved.networkId, contact }, event: started, mode, visit: visitFacts, now: env.now });
+    if (tripped) console.warn('[ADAPTIVE] sign-up breaker tripped — no journeys started:', apId);
+    else if (fresh) await enrolForEvent({ ctx, who: { contactId: resolved.contactId, networkId: resolved.networkId, contact }, event: started, mode, visit: visitFacts, now: env.now });
     else console.warn('[ADAPTIVE] connect handled late — no journeys started:', event.id);
   }
 
   await armVisitEnd(ctx, resolved.contactId, visit.visitId, visit.lastSeenAt);
+}
+
+/**
+ * Sign-up breaker: each new person at an access point leaves one marker for that
+ * hour (no shared counter to fight over in a burst); their rank by arrival decides —
+ * the first `maxNewContactsPerApPerHour` start journeys, the rest don't. True when
+ * this person is over the limit (and HeidiFi is alerted, once a day per AP).
+ */
+async function signupBreakerTripped(ctx: VenueContext, apId: string, contactId: string, at: number, env: RouteEnv): Promise<boolean> {
+  const hour = new Date(at).toISOString().slice(0, 13).replace(/\D/g, '');
+  const signups = db.collection(COL.breakers).doc(`${apId}_${hour}`).collection('signups');
+  const when = new Date(at);
+  await signups.doc(contactId).set({ at: when, apId, venueId: ctx.venueId, expireAt: new Date(at + 2 * 24 * HOUR_MS) });
+  const [earlier, tied] = await Promise.all([
+    signups.where('at', '<', when).count().get(),
+    signups.where('at', '==', when).where(FieldPath.documentId(), '<', contactId).count().get(),
+  ]);
+  const rank = earlier.data().count + tied.data().count + 1;
+  const limit = env.settings.safety.maxNewContactsPerApPerHour;
+  if (rank <= limit) return false;
+  await raiseAlert({
+    kind: 'signup_breaker',
+    dedupeKey: `signup:${apId}:${dayKey(at, ctx.tz)}`,
+    audience: 'heidifi',
+    tenantUserId: ctx.tenantUserId,
+    venueId: ctx.venueId,
+    subject: `Adaptive: sign-up burst at ${ctx.venueName || ctx.venueId}`,
+    text: `More than ${limit} new guests signed up in one hour at access point ${apId} (${ctx.venueName || ctx.venueId}). New guests there start no journeys for the rest of the hour. Check for fake sign-ups.`,
+  });
+  return true;
 }
 
 /**
@@ -235,7 +280,7 @@ async function wakeRunningJourneys(ctx: VenueContext, contactId: string, started
   for (const doc of snap.docs) {
     const inst = fromDoc(doc.id, doc.data() as Record<string, unknown>);
     if (inst.meta.venueId !== ctx.venueId) continue;
-    await deliverEvent(inst.id, started, env);
+    mustDeliver(await deliverEvent(inst.id, started, env));
     const expires = Number(inst.state.vars?.offerExpiresAt);
     if (Number.isFinite(expires) && expires > started.occurredAt && !inst.state.goal) {
       const redeemed: EngineEvent = {
@@ -251,7 +296,7 @@ async function wakeRunningJourneys(ctx: VenueContext, contactId: string, started
         { type: redeemed.type, occurredAt: redeemed.occurredAt, tenantUserId: ctx.tenantUserId, venueId: ctx.venueId, contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, data: redeemed.data },
         redeemed.id,
       );
-      await deliverEvent(inst.id, redeemed, env);
+      mustDeliver(await deliverEvent(inst.id, redeemed, env));
     }
   }
 }

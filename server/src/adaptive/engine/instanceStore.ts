@@ -38,6 +38,8 @@ export interface InstanceMeta {
     phoneTz: string | null;
     isFirstVisit: boolean;
     stayId: string | null;
+    /** The guest doc of the connect that started the journey (the unsubscribe link names it). */
+    guestId?: string | null;
     /** The visit that started the journey (older instances may lack these). */
     visitNumber?: number | null;
     isRevisit?: boolean | null;
@@ -95,6 +97,7 @@ const STATE_KEYS: Array<keyof InstanceState> = [
   'trail',
   'startedAt',
   'exitReason',
+  'seenEventIds',
 ];
 
 export function fromDoc(id: string, data: Record<string, unknown>): LoadedInstance {
@@ -103,6 +106,7 @@ export function fromDoc(id: string, data: Record<string, unknown>): LoadedInstan
   for (const k of STATE_KEYS) (state as any)[k] = plain[k] ?? null;
   state.vars = state.vars ?? {};
   state.trail = state.trail ?? [];
+  state.seenEventIds = state.seenEventIds ?? [];
   state.rev = Number(state.rev) || 0;
   const meta: InstanceMeta = {
     tenantUserId: plain.tenantUserId,
@@ -155,6 +159,7 @@ export function stateUpdate(state: InstanceState, now: number, endedExpireAt: Da
     rev: state.rev,
     trail: state.trail,
     exitReason: state.exitReason,
+    seenEventIds: state.seenEventIds ?? [],
     updatedAt: now,
   });
   if (ended) {

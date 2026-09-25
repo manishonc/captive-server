@@ -33,6 +33,10 @@ import { claimDue, completeTask, failTask, reclaimExpiredLeases, releaseTask, TA
 import { now, refreshClock } from '../engine/clock';
 import { routeEvent, handleVisitEnd } from '../engine/route';
 import { runTimer } from '../engine/advance';
+import { handleSignal } from '../engine/signals';
+import { channelAdapters } from '../engine/sendPath';
+import { registerAdapters } from '../send/adapters';
+import { chargeSend } from '../send/dispatch';
 import { identityReady, keyFingerprint } from '../identity/key';
 import { ENGINE_RUNTIME_VERSION } from '../core/runtime/version';
 import { checkIndexes, type IndexCheckResult } from './indexCheck';
@@ -51,6 +55,11 @@ type WorkerState = 'starting' | 'running' | 'idle_identity' | 'idle_indexes' | '
 
 export class AdaptiveWorker {
   readonly id = `${hostname()}-${process.pid}-${randomBytes(3).toString('hex')}`;
+
+  constructor() {
+    // Brevo / Twilio (or the local sandbox) — only the worker sends.
+    registerAdapters(channelAdapters);
+  }
   private running = false;
   private inflight = 0;
   private lastLoopAt = Date.now();
@@ -196,6 +205,13 @@ export class AdaptiveWorker {
         }
         case 'visit_end':
           await handleVisitEnd(task.payload as any, env);
+          break;
+        case 'signal':
+          await handleSignal(task.payload as any, env);
+          break;
+        case 'send_sweep':
+          // A send the provider accepted but the debit failed: charge it (idempotent).
+          if (task.payload.action === 'charge' && typeof task.payload.sendKey === 'string') await chargeSend(task.payload.sendKey);
           break;
         default:
           await releaseTask(task.id, this.id, 10 * 60_000, env.now); // a kind this build doesn't know yet

@@ -122,6 +122,11 @@ const REASON_WORDS: Record<string, Record<'en' | 'de', string>> = {
   guest_info_missing: { en: 'the Guest info page is not filled in yet', de: 'die Gästeinfos noch nicht ausgefüllt sind' },
   booking_link_missing: { en: 'no direct-booking link is set in Guest info', de: 'in den Gästeinfos kein Link für Direktbuchungen hinterlegt ist' },
   missing_value: { en: 'a value this message needs is missing', de: 'ein Wert fehlt, den diese Nachricht braucht' },
+  rate_card_invalid: { en: 'the price list could not be read', de: 'die Preisliste nicht gelesen werden konnte' },
+  provider_unavailable: { en: 'the message service did not accept it after several tries', de: 'der Versanddienst sie nach mehreren Versuchen nicht angenommen hat' },
+  provider_retry: { en: 'the message service asked to try again later', de: 'der Versanddienst um einen späteren Versuch gebeten hat' },
+  unsupported_format: { en: 'this wording has a format that cannot be sent yet', de: 'dieser Text ein Format hat, das noch nicht versendet werden kann' },
+  no_address: { en: 'the guest has no address for this channel', de: 'der Gast für diesen Kanal keine Adresse hat' },
 };
 
 const UNKNOWN_REASON: Record<'en' | 'de', string> = { en: 'a sending rule stopped it', de: 'eine Versandregel es verhindert hat' };

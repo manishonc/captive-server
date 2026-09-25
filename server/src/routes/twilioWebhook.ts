@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import twilio from 'twilio';
 import { recordDeliveryStatus } from '../services/campaignTracking';
 import { recordMarketingDeliveryStatus } from '../services/marketingTracking';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { adaptiveOnTwilioStatus } from '../adaptive/ingest/signals';
 
 const router = Router();
 
@@ -45,6 +47,11 @@ router.post('/', async (req: Request, res: Response) => {
 
   // Always return 200 to prevent Twilio retries
   res.sendStatus(200);
+
+  // Adaptive Campaigns: a status for one of its sends (fire-and-forget, after the reply).
+  runAdaptiveHook('twilio-status', () =>
+    adaptiveOnTwilioStatus({ messageSid: String(MessageSid), status: String(MessageStatus), errorCode: req.body?.ErrorCode ? String(req.body.ErrorCode) : null }),
+  );
 });
 
 export default router;

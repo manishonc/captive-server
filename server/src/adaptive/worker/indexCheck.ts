@@ -6,6 +6,7 @@
  * stays idle (saying which index is missing) until they all work.
  */
 
+import { FieldPath } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 
@@ -36,6 +37,14 @@ const PROBES: Probe[] = [
     { name: `Users(phoneE164, ${flag})`, run: () => db.collection(COL.guests).where('phoneE164', '==', '_probe').where(flag, '==', true).limit(1).get() },
     { name: `Users(${flag})`, run: () => db.collection(COL.guests).where(flag, '==', true).select('phone').limit(1).get() },
   ]),
+  // The sign-up breaker ranks new people per access point and hour.
+  {
+    name: 'AdaptiveBreakers/*/signups(at)',
+    run: () =>
+      db.collection(COL.breakers).doc('_probe').collection('signups').where('at', '==', past()).where(FieldPath.documentId(), '<', '_probe').count().get(),
+  },
+  // Twilio status callbacks find their send by the provider id (single-field index; must not be exempted).
+  { name: 'JourneySends(providerMessageId)', run: () => db.collection(COL.journeySends).where('providerMessageId', '==', '_probe').limit(1).get() },
   { name: 'Users(email in, unsubscribed)', run: () => db.collection(COL.guests).where('email', 'in', ['_probe', '_probe2']).where('unsubscribed', '==', true).limit(1).get() },
 ];
 

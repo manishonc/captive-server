@@ -148,6 +148,7 @@ async function enrolOne(args: {
         phoneTz: phoneCountry(who.contact.phoneE164)?.tz ?? null,
         isFirstVisit: Boolean(args.visit?.isFirstVisit),
         stayId: args.stayId ?? null,
+        guestId: typeof event.data.guestId === 'string' ? event.data.guestId : null,
         visitNumber: args.visit?.visitNumber ?? null,
         isRevisit: args.visit ? args.visit.isRevisit : null,
       },

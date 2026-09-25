@@ -20,6 +20,9 @@ import { explainDecision, type DecisionRecord } from '../core/runtime/decision';
 import { normalizeE164, normalizeEmail } from '../../services/phone';
 import { ApiError } from '../api/errors';
 import type { Lang } from '../core/constants';
+import { z } from 'zod';
+import type { ContactDoc, JourneySendDoc } from '../store/engineTypes';
+import { adaptiveOnBrevoEvents, adaptiveOnInboundSms, adaptiveOnTwilioStatus, adaptiveOnUnsubscribe, ingestClick, ingestRating } from '../ingest/signals';
 
 async function countWhere(status: string): Promise<number> {
   const snap = await db.collection(COL.journeyTasks).where('status', '==', status).count().get();
@@ -152,4 +155,71 @@ export async function devGuestLog(query: { email?: string; phone?: string; lang?
     });
   }
   return { now: new Date(now()).toISOString(), contacts };
+}
+
+const PROVIDER_EVENTS = ['delivered', 'failed', 'opened', 'bounce', 'spam', 'unsubscribe', 'click', 'rating', 'stop', 'start', 'reply'] as const;
+
+/**
+ * Sandbox only: fake what a provider or the CMS would send back for one send —
+ * through the same hook functions the real webhooks call, so the whole path runs.
+ */
+export async function devProviderEvent(body: unknown) {
+  requireSandbox();
+  const p = z
+    .object({
+      sendKey: z.string().regex(/^js_[0-9a-f]{32}$/),
+      event: z.enum(PROVIDER_EVENTS),
+      stars: z.number().int().min(1).max(5).optional(),
+      text: z.string().max(500).optional(),
+    })
+    .parse(body);
+  const snap = await db.collection(COL.journeySends).doc(p.sendKey).get();
+  const s = snap.data() as JourneySendDoc | undefined;
+  if (!s) throw new ApiError('not_found', 'No such send');
+  const contact = (await db.collection(COL.contacts).doc(s.contactId).get()).data() as ContactDoc | undefined;
+  const brevo = (event: string) => adaptiveOnBrevoEvents([{ event, 'message-id': s.providerMessageId ?? '', 'X-Mailin-custom': p.sendKey }]);
+  const inbound = (kind: 'stop' | 'start' | null, text: string) => {
+    if (!contact?.phoneE164) throw new ApiError('bad_request', 'This guest has no phone number');
+    return adaptiveOnInboundSms({ from: contact.phoneE164, body: text, legacyKind: kind, messageSid: `SMdev${Date.now()}`, optOutType: null, signatureChecked: true });
+  };
+  switch (p.event) {
+    case 'delivered':
+    case 'failed':
+      if (s.channel === 'sms') await adaptiveOnTwilioStatus({ messageSid: s.providerMessageId ?? '', status: p.event === 'delivered' ? 'delivered' : 'undelivered', errorCode: p.event === 'failed' ? '30003' : null });
+      else await brevo(p.event === 'delivered' ? 'delivered' : 'error');
+      break;
+    case 'opened':
+      await brevo('opened');
+      break;
+    case 'bounce':
+      await brevo('hard_bounce');
+      break;
+    case 'spam':
+      await brevo('spam');
+      break;
+    case 'unsubscribe':
+      await adaptiveOnUnsubscribe({ g: p.sendKey, v: s.venueId, c: p.sendKey });
+      break;
+    case 'click':
+    case 'rating': {
+      const codes = s.shortCodes ?? [];
+      if (!codes.length) throw new ApiError('bad_request', 'This send has no links');
+      const links = await Promise.all(codes.map((c) => db.collection('CaptivePortal_ShortLinks').doc(c).get()));
+      const rating = links.find((l) => l.get('journeyLink') === 'rating');
+      if (p.event === 'click') await ingestClick({ shortCode: codes[0] });
+      else if (!rating) throw new ApiError('bad_request', 'This send has no rating link');
+      else await ingestRating({ shortCode: rating.id, stars: p.stars ?? 5, feedback: p.text ?? null });
+      break;
+    }
+    case 'stop':
+      await inbound('stop', 'STOP');
+      break;
+    case 'start':
+      await inbound('start', 'START');
+      break;
+    case 'reply':
+      await inbound(null, p.text ?? 'danke');
+      break;
+  }
+  return { queued: p.event, sendKey: p.sendKey };
 }

@@ -20,7 +20,7 @@ import { COL } from '../store/collections';
 import { shardOf, taskIdFor } from '../core/runtime/ids';
 import { DAY_MS, HOUR_MS } from '../core/runtime/time';
 
-export type TaskKind = 'event_route' | 'node_run' | 'visit_end' | 'send_sweep';
+export type TaskKind = 'event_route' | 'node_run' | 'visit_end' | 'send_sweep' | 'signal';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;

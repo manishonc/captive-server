@@ -61,6 +61,8 @@ export interface WaitState {
   slot?: string;
   lastDeferReason?: string;
   creditsWaitStartedAt?: number;
+  /** Provider "try again later" answers so far for this send (capped). */
+  dispatchAttempts?: number;
 }
 
 export interface InstanceState {
@@ -76,6 +78,8 @@ export interface InstanceState {
   trail: Array<{ nodeId: string; outcome: string; at: number }>;
   startedAt: number;
   exitReason: string | null;
+  /** The last events delivered to this guest's journey — a replayed webhook is not counted twice. */
+  seenEventIds?: string[];
 }
 
 export interface EngineEvent {

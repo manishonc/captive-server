@@ -15,6 +15,8 @@ export interface ConsentEntry {
   at: StoredTime;
   eventId: string;
   revokedVia?: RevokedVia | null;
+  /** What caused the change (sms_keyword, unsubscribe_page, brevo_spam…): START re-grants only what STOP took. */
+  source?: string | null;
 }
 
 /** `{ 'venue:abc': { email?: …, sms?: …, whatsapp?: … } }` */
@@ -35,6 +37,8 @@ export interface ContactPointDoc {
   hardBounceCount: number;
   lastBounceAt: StoredTime;
   verifiedAt: StoredTime;
+  /** The last live Adaptive SMS to this number — a plain reply is matched to it. */
+  lastLiveSms?: { sendKey: string; tenantUserId: string; at: StoredTime } | null;
   createdAt: StoredTime;
   updatedAt: StoredTime;
   schemaVersion: number;
@@ -165,7 +169,8 @@ export interface JourneySendDoc {
   providerMessageId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
-  credits: { amount: number; ledgerId: string | null } | null;
+  /** Priced once in phase 1; every debit attempt reuses these numbers (debitOne's first write wins). */
+  credits: { amount: number; ledgerId: string | null; rateCardVersion?: number } | null;
   providerCostMinor: number | null;
   smsSegments: number | null;
   shortCodes: string[];
@@ -179,6 +184,8 @@ export interface JourneySendDoc {
   updatedAt: StoredTime;
   expireAt: StoredTime;
   schemaVersion: number;
+  /** Reply notice: a service message outside any journey. */
+  kind?: 'journey' | 'reply_notice';
 }
 
 export interface JourneyEventDoc {
@@ -194,7 +201,7 @@ export interface JourneyEventDoc {
   variantId: string | null;
   channel: string | null;
   slot: string | null;
-  source: 'portal' | 'engine' | 'brevo' | 'twilio' | 'meta' | 'shortlink' | 'cms' | 'scanner' | 'dev';
+  source: 'portal' | 'engine' | 'brevo' | 'twilio' | 'meta' | 'shortlink' | 'cms' | 'scanner' | 'dev' | 'unsubscribe';
   occurredAt: StoredTime;
   recordedAt: StoredTime;
   data: Record<string, unknown>;

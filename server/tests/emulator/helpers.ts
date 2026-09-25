@@ -116,6 +116,30 @@ export async function setLaunch(accounts: Record<string, LaunchMode>, opts: { de
   clearCaches();
 }
 
+/** Safety limits on AdaptiveConfig/global (e.g. a high sign-up limit for bulk tests). */
+export async function setSafety(safety: Partial<{ maxSendsPerVenuePerDay: number; maxSendsPlatformPerDay: number; maxNewContactsPerApPerHour: number; staleAfterHours: number }>): Promise<void> {
+  const update: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(safety)) update[`safety.${k}`] = v;
+  await db.collection(COL.config).doc(CONFIG_DOC_ID).update(update);
+  clearCaches();
+}
+
+/** A credit wallet with `credits` purchased credits in the shared bucket. */
+export async function seedWallet(tenant: string, credits: number): Promise<void> {
+  await db.collection(COL.creditWallets).doc(tenant).set({ balance: credits, subscriptionBalance: 0, purchasedBalance: credits, reserved: 0 });
+}
+
+export async function ledger(tenant: string): Promise<AnyDoc[]> {
+  const snap = await db.collection(COL.creditWallets).doc(tenant).collection('ledger').get();
+  return snap.docs.map((d) => ({ ...(d.data() as Record<string, any>), id: d.id }));
+}
+
+/** What the sandbox provider "sent". */
+export async function outbox(): Promise<AnyDoc[]> {
+  const snap = await db.collection(COL.sandboxOutbox).get();
+  return snap.docs.map((d) => ({ ...(d.data() as Record<string, any>), id: d.id }));
+}
+
 export interface ConnectFixture {
   venue: VenueFixture;
   firstName?: string;
