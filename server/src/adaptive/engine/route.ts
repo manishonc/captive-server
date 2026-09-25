@@ -8,7 +8,6 @@
  * anything (deterministic ids, remembered connect ids, idempotent enrolment).
  */
 
-import { FieldPath } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import type { VisitDoc } from '../store/engineTypes';
@@ -241,24 +240,38 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
   await armVisitEnd(ctx, resolved.contactId, visit.visitId, visit.lastSeenAt);
 }
 
+function isAlreadyExists(err: unknown): boolean {
+  const e = err as { code?: number | string; message?: string };
+  return e?.code === 6 || /ALREADY_EXISTS/i.test(String(e?.message));
+}
+
 /**
- * Sign-up breaker: each new person at an access point leaves one marker for that
- * hour (no shared counter to fight over in a burst); their rank by arrival decides —
- * the first `maxNewContactsPerApPerHour` start journeys, the rest don't. True when
- * this person is over the limit (and HeidiFi is alerted, once a day per AP).
+ * Sign-up breaker: an access point has `maxNewContactsPerApPerHour` places an hour
+ * (docs `signups/0`, `signups/1`, …), each created once by the new person whose
+ * task claims it first — never more, however many tasks run at once or in what
+ * order. (Not by arrival: a later guest's journeys may have started before an
+ * earlier guest's task runs.) No shared counter to fight over in a burst: a task
+ * that loses a place tries the next, and once all are taken the rest only read.
+ * A retried task finds the place it holds. True when this person got no place
+ * (and HeidiFi is alerted, once a day per AP).
  */
 async function signupBreakerTripped(ctx: VenueContext, apId: string, contactId: string, at: number, env: RouteEnv): Promise<boolean> {
   const hour = new Date(at).toISOString().slice(0, 13).replace(/\D/g, '');
-  const signups = db.collection(COL.breakers).doc(`${apId}_${hour}`).collection('signups');
-  const when = new Date(at);
-  await signups.doc(contactId).set({ at: when, apId, venueId: ctx.venueId, expireAt: new Date(at + 2 * 24 * HOUR_MS) });
-  const [earlier, tied] = await Promise.all([
-    signups.where('at', '<', when).count().get(),
-    signups.where('at', '==', when).where(FieldPath.documentId(), '<', contactId).count().get(),
-  ]);
-  const rank = earlier.data().count + tied.data().count + 1;
+  const places = db.collection(COL.breakers).doc(`${apId}_${hour}`).collection('signups');
   const limit = env.settings.safety.maxNewContactsPerApPerHour;
-  if (rank <= limit) return false;
+  const [held, taken] = await Promise.all([places.where('contactId', '==', contactId).limit(1).get(), places.count().get()]);
+  if (!held.empty) return false;
+  // Places are claimed in order, so the first `taken` are gone; a race loses one and tries the next.
+  for (let n = taken.data().count; n < limit; n += 1) {
+    const place = places.doc(String(n));
+    try {
+      await place.create({ contactId, at: new Date(at), apId, venueId: ctx.venueId, expireAt: new Date(at + 2 * 24 * HOUR_MS) });
+      return false;
+    } catch (err) {
+      if (!isAlreadyExists(err)) throw err;
+      if ((await place.get()).get('contactId') === contactId) return false; // the same task running twice
+    }
+  }
   await raiseAlert({
     kind: 'signup_breaker',
     dedupeKey: `signup:${apId}:${dayKey(at, ctx.tz)}`,

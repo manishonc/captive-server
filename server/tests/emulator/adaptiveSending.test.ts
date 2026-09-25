@@ -49,7 +49,8 @@ import {
   type VenueFixture,
 } from './helpers';
 import { AdaptiveWorker } from '../../src/adaptive/worker/worker';
-import { claimDue, reclaimExpiredLeases } from '../../src/adaptive/queue/firestoreQueue';
+import { claimDue, completeTask, reclaimExpiredLeases, type ClaimedTask } from '../../src/adaptive/queue/firestoreQueue';
+import { routeEvent } from '../../src/adaptive/engine/route';
 import { sendKeyFor, eventIdFor } from '../../src/adaptive/core/runtime/ids';
 import { HOUR_MS, MINUTE_MS, DAY_MS } from '../../src/adaptive/core/runtime/time';
 import { devProviderEvent } from '../../src/adaptive/service/engine';
@@ -113,6 +114,19 @@ async function welcomed(c: Parameters<typeof connect>[0]): Promise<{ guestId: st
   await runDue();
   const i = await a1For(guestId);
   return { guestId, inst: i, s1: await sendDoc(i.id, 's1') };
+}
+
+/** Claims the `n` queued connect tasks (oldest first) the way a worker would. */
+async function claimConnects(n: number): Promise<ClaimedTask[]> {
+  const tasks = await claimDue('test-burst', now(), 50);
+  assertEqual([tasks.length, tasks.every((t) => t.kind === 'event_route')], [n, true], `${n} connect tasks`);
+  return tasks;
+}
+
+/** Runs the tasks' routing all at the same time (the worker would run 4 at once). */
+async function routeTogether(tasks: ClaimedTask[]): Promise<void> {
+  const env = { now: now(), settings: await readEngineSettings(), workerId: 'test-burst' };
+  await Promise.all(tasks.map((t) => routeEvent(t.payload as { eventId: string }, env)));
 }
 
 async function main() {
@@ -404,6 +418,36 @@ async function main() {
     await runDue();
     const again = (await docsWhere(COL.journeyInstances, 'venueId', A.venueId)).filter((x) => x.journeyKey === 'welcome_second_visit');
     assertEqual(again.length, 3, 'still only the first three after the retries');
+  });
+
+  await test('sign-up breaker: 5 new guests handled at the same moment → exactly 3 start, also when all 5 are retried at once', async () => {
+    await liveVenue();
+    await setSafety({ maxNewContactsPerApPerHour: 3 });
+    for (let k = 0; k < 5; k += 1) await connect({ venue: A, email: `rush${k}@test.local`, consent: true });
+    const tasks = await claimConnects(5);
+    await routeTogether(tasks);
+    const started = (await docsWhere(COL.journeyInstances, 'venueId', A.venueId)).filter((x) => x.journeyKey === 'welcome_second_visit');
+    assertEqual(started.length, 3, 'only three start');
+    assertEqual((await docsWhere(COL.alerts, 'kind', 'signup_breaker')).length, 1, 'one alert');
+    await routeTogether(tasks); // the same five tasks again, all at once (a worker died holding them)
+    const again = (await docsWhere(COL.journeyInstances, 'venueId', A.venueId)).filter((x) => x.journeyKey === 'welcome_second_visit');
+    assertEqual(again.length, 3, 'still three after the retries');
+    await Promise.all(tasks.map((t) => completeTask(t.id, 'test-burst')));
+  });
+
+  await test('sign-up breaker: connects handled newest first (a slow or retried task) → exactly 3 start', async () => {
+    await liveVenue();
+    await setSafety({ maxNewContactsPerApPerHour: 3 });
+    for (let k = 0; k < 5; k += 1) {
+      await connect({ venue: A, email: `late${k}@test.local`, consent: true });
+      await advance(MINUTE_MS);
+    }
+    const tasks = await claimConnects(5); // oldest first
+    const env = { now: now(), settings: await readEngineSettings(), workerId: 'test-burst' };
+    for (const t of [...tasks].reverse()) await routeEvent(t.payload as { eventId: string }, env);
+    const started = (await docsWhere(COL.journeyInstances, 'venueId', A.venueId)).filter((x) => x.journeyKey === 'welcome_second_visit');
+    assertEqual(started.length, 3, 'only three start');
+    await Promise.all(tasks.map((t) => completeTask(t.id, 'test-burst')));
   });
 
   await test('"try later" attempts survive a quiet-hours hold: 3 in total, then the step is skipped', async () => {
