@@ -1,0 +1,77 @@
+{
+  "_README": "Reference only. The Firebase project is shared with other products — NEVER deploy this file with the Firebase CLI (it would replace every index). Create each entry by hand or with the gcloud commands in docs/adaptive-engine.md. The adaptive worker checks these at startup and stays idle while one is missing.",
+  "indexes": [
+    {
+      "collectionGroup": "CaptivePortal_JourneyTasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "dueAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyTasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "leaseUntil", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyInstances",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "contactId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneySends",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "mode", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneySends",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "mode", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneySends",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "mode", "order": "ASCENDING" },
+        { "fieldPath": "purpose", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "dueAt", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "leaseUntil", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyTasks", "fieldPath": "payload", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyEvents", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyEvents", "fieldPath": "recordedAt", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyEvents", "fieldPath": "data", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "decision", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "content", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "trail", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "vars", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_Visits", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_Contacts", "fieldPath": "marketingConsent", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_Contacts", "fieldPath": "engagement", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_ContactPoints", "fieldPath": "tenantContacts", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_ContactPoints", "fieldPath": "suppression", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_NetworkPeople", "fieldPath": "recentMarketingTouches", "indexes": [] }
+  ]
+}

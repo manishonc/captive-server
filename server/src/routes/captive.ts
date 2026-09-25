@@ -21,6 +21,8 @@ import {
   recordHeldVenueMarketingSend,
 } from '../services/venueMarketingCredits';
 import { checkVerificationGate, verificationFields } from '../services/verificationGate';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { adaptiveOnConnect } from '../adaptive/ingest/connect';
 import { resolveVerification, VERIFICATION_PAGE_DEFAULTS } from '../services/verificationConfig';
 import { normalizeMac } from '../services/verificationToken';
 import { scopeKeyFor } from '../services/guestOtp';
@@ -245,6 +247,29 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       vendor: apVendor,
     }).catch((err) => console.error('[DEVICE REGISTRY ERROR]', err));
   }
+
+  // Adaptive Campaigns: hand the connect to the engine. Guarded and never awaited,
+  // so it can't delay or fail the login (adaptive/ingest/hook.ts). It does nothing
+  // unless the venue is live on Adaptive; UniFi APs are handed over by /unifi/authorize.
+  runAdaptiveHook('connect', () =>
+    adaptiveOnConnect({
+      route: 'create-user',
+      wifiGuestId,
+      accessPointId: captivePortalAccessPointId,
+      venueId,
+      apVendor,
+      consentGiven: marketingOptIn,
+      language: guestLanguage,
+      firstName: firstName || null,
+      lastName: lastName || null,
+      email: email || null,
+      phone: phone || null,
+      phoneCountryCode: phoneCountryCode || null,
+      phoneE164: gate.phoneE164,
+      emailVerified: gate.verified.email,
+      phoneVerified: gate.verified.phone,
+    }),
+  );
 
   // Marketing scheduling (event-aware)
   if (marketingOptIn && captivePortalAccessPointId) {
@@ -1467,6 +1492,28 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       vendor: 'unifi',
     }).catch((err) => console.error('[UNIFI DEVICE REGISTRY ERROR]', err));
   }
+
+  // Adaptive Campaigns: the controller has let this guest online, so this is the
+  // moment a UniFi guest counts as connected. Guarded and never awaited.
+  runAdaptiveHook('connect', () =>
+    adaptiveOnConnect({
+      route: 'unifi-authorize',
+      wifiGuestId,
+      accessPointId: captivePortalAccessPointId,
+      venueId,
+      apVendor: 'unifi',
+      consentGiven: marketingOptIn,
+      language: guestLanguage,
+      firstName: firstName || null,
+      lastName: lastName || null,
+      email: email || null,
+      phone: phone || null,
+      phoneCountryCode: phoneCountryCode || null,
+      phoneE164: gate.phoneE164,
+      emailVerified: gate.verified.email,
+      phoneVerified: gate.verified.phone,
+    }),
+  );
 
   if (marketingOptIn && captivePortalAccessPointId) {
     scheduleSmsForEvent(captivePortalAccessPointId, wifiGuestId, phone || '', phoneCountryCode || '', wifiEvent, guestLanguage)

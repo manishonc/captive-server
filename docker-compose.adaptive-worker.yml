@@ -1,0 +1,56 @@
+# Adaptive Campaigns worker — deploy reference for Coolify (Docker Compose build pack),
+# the same way docker-compose.freeradius.yml and docker-compose.mcp.yml are deployed.
+#
+# Same Dockerfile and image as the API (server/), different start command: it runs
+# the journey engine (docs/adaptive-engine.md) and nothing else — no port, no domain.
+# It never imports server.ts, so the Campaign Manager scheduler and the AP monitor
+# don't run twice. Deploy it together with the `server` app on every release (the
+# admin engine card shows both versions).
+#
+# Env: copies of the server app's existing values — nothing new.
+
+services:
+  adaptive-worker:
+    build:
+      context: ./server
+    command: ["node", "dist/adaptive/worker/main.js"]
+    # node isn't PID 1, so SIGTERM reaches the worker, which finishes the tasks in hand.
+    init: true
+    stop_grace_period: 30s
+    # Keeps the engine from starving the API, the portal or the MCP on the shared VM.
+    mem_limit: 384m
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=256
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+      # Derives the identity key. Must equal the server's value (check sameKey on the admin engine status).
+      - GUEST_OTP_PEPPER=${GUEST_OTP_PEPPER}
+      # Sending (used from PR B on; harmless before).
+      - BREVO_API_KEY=${BREVO_API_KEY}
+      - BREVO_SENDER_EMAIL=${BREVO_SENDER_EMAIL}
+      - BREVO_SENDER_NAME=${BREVO_SENDER_NAME}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_MESSAGING_SERVICE_SID=${TWILIO_MESSAGING_SERVICE_SID}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      - SERVER_PUBLIC_URL=${SERVER_PUBLIC_URL}
+      - VISITOR_BASE_URL=${VISITOR_BASE_URL}
+      - UNSUBSCRIBE_SIGNING_SECRET=${UNSUBSCRIBE_SIGNING_SECRET}
+      # Auto top-up hint after a debit (services/autoRefillTrigger.ts).
+      - CMS_INTERNAL_URL=${CMS_INTERNAL_URL}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+    healthcheck:
+      # The worker touches this file on every loop, idle or busy.
+      test: ["CMD", "node", "-e", "const s=require('fs').statSync('/tmp/adaptive-heartbeat');process.exit(Date.now()-s.mtimeMs<120000?0:1)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    networks:
+      - coolify
+    restart: unless-stopped
+
+networks:
+  coolify:
+    external: true
