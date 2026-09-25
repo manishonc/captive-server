@@ -74,6 +74,8 @@ export interface GateInput {
     platformCeiling: number;
     /** Sending code for this channel exists and is configured (false in test builds without adapters). */
     channelReady: boolean;
+    /** A stay journey whose booking was cancelled (or is gone): skipped, no freeze grace, test runs too. */
+    stayCancelled?: boolean;
   };
   address: { blocked: string | null; lowRatingAt: number | null };
   consent: { state: 'granted' | 'revoked' | 'none' };
@@ -122,6 +124,7 @@ function ruleSystem(i: GateInput): RuleCheck {
   const s = i.system;
   const late = i.now - i.intendedAt;
   if (!s.tenantActive) return { rule: 'system', verdict: 'skip', fact: 'account is being deleted', reason: 'tenant_inactive' };
+  if (s.stayCancelled) return { rule: 'system', verdict: 'skip', fact: 'the booking was cancelled', reason: 'stay_cancelled' };
   if (!s.venueOn || !s.journeyOn) {
     const withinFreeze = s.offSinceAt !== null && i.intendedAt <= s.offSinceAt + (s.freezeWindowMs ?? FREEZE_WINDOW_MS);
     if (!withinFreeze) {

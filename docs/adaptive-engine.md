@@ -27,6 +27,8 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
   send_sweep   → a charge that failed after a send the provider accepted, repaired
   rollup_venue → the venue's daily numbers (JourneyStats), every 15 min, 2 min behind real time
   apply_config_inflight → an owner's "apply to guests already in these journeys" save
+  stay_poll    → an Airbnb calendar feed, every 4 h (or Sync now): Stays kept in step with it
+  stay_trigger → a linked guest's stay moment (arrival 17:00, day 2 10:00, …): the stay journey starts
 
 Twilio status / inbound, Brevo webhook, the /u unsubscribe page ── +1 guarded line each ──▶ event + signal task
 the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ─────────────────────▶ event + signal task
@@ -38,6 +40,8 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
   has let the guest online.
 - The worker never imports `server.ts`, so the Campaign Manager scheduler and the AP monitor don't
   run twice.
+- The worker is the only process that reads owners' calendar links (outbound https). The one
+  exception planned is PR D's "Check link", which reads the link once in the API process.
 
 ## Sending (live)
 
@@ -89,6 +93,9 @@ Written once to `CaptivePortal_AdaptiveAlerts` (one per venue, reason and day) a
   sends are blocked by a setup problem, a daily ceiling is reached, the sign-up breaker trips, or provider
   credentials are refused;
 - to the owner (`Users/{tenant}.email`) for a rating of 3★ or less.
+- Airbnb stays: to HeidiFi when two or more bookings vanish from a calendar at once
+  (`stay_feed_suspect`); to the owner once a day while their calendar link has failed for more
+  than 24 h (`stay_feed_failing`), and once per pair of overlapping bookings (`stay_overlap`).
 
 **Sign-up breaker:** more than `safety.maxNewContactsPerApPerHour` (60) new guests at one access point in
 an hour → the rest of that hour's new guests start no journeys (they are still recorded).
@@ -103,7 +110,7 @@ reads them by id.
 | Field | Counts (from `CaptivePortal_JourneyEvents`) |
 |---|---|
 | `entered`, `converted` | guests who started / reached the goal |
-| `ended.{status}`, `exited.{reason}` | how journeys ended (`completed`, `exhausted`, `converted`, `suppressed`, `failed`) and why |
+| `ended.{status}`, `exited.{reason}` | how journeys ended (`completed`, `exhausted`, `converted`, `suppressed`, `failed`, and `cancelled` for a stay journey whose booking was cancelled — reason `stay_cancelled`) and why |
 | `sends.{channel}.{sent,delivered,opened,clicked,bounced,failed,unknown}` | live messages (a message clicked twice counts once) |
 | `bySlot.{slot}` / `byVariant.{variantId}` → `{sent, clicked}` | per time slot and wording |
 | `credits.{channel}` | credits charged for marketing messages (equals the ledger) |
@@ -111,6 +118,7 @@ reads them by id.
 | `skipped.{reason}` | sends skipped or blocked, by the "why" reason |
 | `dryRun.{…}` | everything of test-run guests, same shape — a test run never shows in `sends` or `credits` |
 | `visits.{total, first, revisits, captures}` (`_venue` only) | visits, first visits, revisits, Wi-Fi sign-ins |
+| `stays.{created, changed, cancelled, linked, overlapFlagged, momentsSkipped}` (`_venue` only) | Airbnb bookings synced, moved, cancelled, linked to a guest, overlapping, and stay moments skipped (too late or switched off) — counted whatever the mode, never under `dryRun` |
 | `rollupWatermark`, `updatedAt`, `schemaVersion` | how far the numbers go |
 
 - **How:** after the worker runs a task for a venue, it arms `rollup:{venueId}:{15-min bucket}`, due 2 min
@@ -142,6 +150,151 @@ reads them by id.
   still goes. The switch times are recorded when they happen — `AdaptiveVenues.pausedAt`,
   `AdaptiveVenues.switchedOffAt.{installId}`, `VenuePlaybooks.journeys.{key}.disabledAt` — so a later,
   unrelated save can't re-open the window. A switched-off playbook keeps its settings.
+
+## Airbnb stays (calendar feeds)
+
+Plan §3.3. The owner saves the listing's iCal export link — one feed per venue,
+`CaptivePortal_StayFeeds/venue_{venueId}`. The worker reads it every 4 h and keeps one
+`CaptivePortal_Stays/st_{hash(feedId:uid)}` per booking. The first guest who connects during a stay is
+linked to it, and each switched-on stay journey starts at its moment.
+
+**Reading the link** (`stays/fetch.ts`, `stays/ical.ts`)
+- https only (`webcal://` and `http://` are saved as `https://`, and every link in its standard form, so
+  `HTTPS://`, an upper-case host or `:443` is the same link), port 443, no `user:pass@`, no IP-literal
+  host. Every resolved address must be public — private, loopback, link-local, CGNAT, unique-local,
+  cloud-metadata, NAT64, IPv4-mapped and IPv4-compatible ranges are refused — and the socket connects to
+  the address that was checked. At most 3 redirects, each checked again; 10 s for the whole chain; 1 MB.
+- The link is a secret. It is stored (`url`), only ever shown masked, and never logged; errors
+  are codes (`lastError: 'TIMEOUT' | 'LINK_INVALID' | 'HTTP_503' | …`), turned into the owner's words when
+  shown.
+- **Which events are stays:** Airbnb reservations, and in other feeds (VRBO, PMS) only events whose title
+  starts with "Reserved". Booking.com marks bookings and closures alike, so a Booking.com feed (its PRODID,
+  or `@booking.com` UIDs / "CLOSED - Not available" events with no "Reserved" one) — or another feed with
+  events but no "Reserved" one — is **unsupported** while it has never given a stay: `feedWarning:
+  'unsupported_source'`, no stays, not an error. A feed that once gave a stay (`reservedSeen`) stays
+  supported whatever it looks like later, so its last booking can still be cancelled; a PMS feed passing
+  Booking.com events through keeps its "Reserved" stays. Stored: UID, dates, status — never the calendar's
+  text, names or phone digits. Skipped: cancelled or recurring events, events without a UID, stays over 90
+  nights — a known stay whose reservation event grows past 90 nights is still seen (kept at the dates it
+  had, never missed); a split booking whose merged pieces pass 90 nights keeps its first 90 nights.
+- **Times:** check-in and checkout are the dates at Guest info's check-in/checkout time — the first valid
+  `HH:MM` between 06:00 and 22:00, English first, then the other languages alphabetically. Without one,
+  scheduling uses 15:00 / 10:00, but the wording never prints that: those messages skip as
+  `guest_info_missing`.
+
+**The sync** (`stays/sync.ts`, task `stay_poll`)
+- Each feed polls on its own fixed 4 h grid (`stay_poll:{feedId}:{slot}`). A save, Sync now
+  (`stay_sync:…`, never re-arms) and the worker's watchdog (at start, then hourly) restart a stopped chain
+  on the same slot, so a feed has one chain.
+- One poll at a time per feed (a lease on the feed). A fetch or parse error is recorded, never thrown:
+  `failing` after 3 in a row, and the owner is emailed once a day after 24 h.
+- A new booking → `stay.created`; new dates → `stay.changed` (`datesVersion + 1`); a booking missing →
+  a miss. **Two misses at least 30 min apart (engine clock) → cancelled** (`stay.cancelled`). A 304 or the
+  same content again still counts (its missing bookings are `lastMissingStayIds`). From checkout day on a
+  stay is frozen: never missed, never cancelled.
+- **Two or more bookings gone at once** are held for 24 h (`feedWarning: 'mass_missing'`, one HeidiFi
+  alert): a wrong link or a cut-off file looks the same. Saving a different link lifts the hold at once. A
+  single missing booking always follows the two-miss rule. A booking still in the content is seen (its
+  misses reset) also while the hold is on — only the missing ones are held.
+- Overlapping bookings (back-to-back is not one) → both `overlap_flagged`, nobody new is linked, the owner
+  is emailed. A stay already linked keeps running. A booking missing from the content is on its way out,
+  not an overlap (a cancel-and-rebook of the same dates flags nothing); it isn't linked either, and —
+  outside the 24 h hold for several bookings gone at once — it doesn't count as upcoming.
+- A feed deleted, or saved with another link, while a poll runs: that poll's remaining writes are refused
+  (each checks the feed and its lease first) and it ends `superseded`; the save's own sync waits for it
+  (put back for 60 s) and then reads the new link.
+- Each change is written in one transaction with its event and, for a change or a cancellation, an
+  `event_route` task that brings it to the guest's journeys (linked or not — the task reads the Stay fresh).
+
+**Linking a guest** (`stays/link.ts`, in the worker's connect handling)
+- Every fresh connect at an Airbnb venue can link, after the usual gates (an install, launch not off, an
+  email or phone, the sign-up breaker, not handled late). The window is 12 h before check-in until
+  checkout. On a turnover day it opens at the previous stay's checkout, and nobody seen at the venue during
+  the previous stay is linked — every stay checking out that day counts (also an `overlap_flagged` one, or
+  two of them after a double booking), and the window opens at the latest of their checkouts. A booking
+  missing from the calendar's last content (the feed's `lastMissingStayIds`) is never linked — until its
+  checkout day, when absence is no longer a signal (D-C31: some feeds drop a stay that day) and it links
+  like any confirmed stay. The first guest wins; `linkMode` (test/live) is frozen then.
+- A guest already linked to a stay here that isn't over is never linked to another. **Known limit:** a
+  guest with two back-to-back bookings is linked only to the first; the second runs without them.
+- Then each stay journey's moment is scheduled (`stay_trigger:{stayId}:{journey}:{datesVersion}:{moment}`),
+  for every stay journey the venue could run: its installs' (a paused playbook, Guest info switched off)
+  at their pinned version, and the catalogue's other stay journeys for its type (a playbook turned on
+  later) at the published one. Whether it is switched on is checked when the moment comes. Up to 12 h
+  late runs at once; later is skipped (`stay.moment_skipped`) — only for a journey the venue has set up.
+
+**At the moment** (`stays/moments.ts`, task `stay_trigger`) everything is checked again: the stay isn't
+cancelled (a linked, overlapping one keeps its moments), it is still this guest's and the same dates
+version, it's at most 12 h late, launch isn't off (a guest linked in a test run stays one), and the journey
+is switched on (a journey the venue has but that is off or paused → `stay.moment_skipped` /
+`switched_off`; one it never set up passes quietly). Then a `stay.moment` event starts the journey. Its time is the later of the moment and the
+link, so a guest linked after the venue went live still gets the moment that brought them in.
+- **Checkout reminder vs Stay guide:** the Checkout reminder (Guest info) doesn't start when this stay's
+  Stay guide covers the guest: 2+ nights, Stay guide on (or switched off within the freeze window before
+  the moment, with 15 min to spare for the worker's lag — near the edge both go rather than neither), and its
+  instance for this stay active or completed. A late-linked guest, a 1-night stay, or
+  a Stay guide paused or switched off earlier gets the reminder.
+- A guest linked while the stay playbook is paused, or before it is turned on, gets the moments that come
+  once it runs.
+- **Known limits:** a moment that comes while the venue is paused starts nothing and is lost (Stay guide's
+  welcome passed while paused means no Stay guide for that stay; the Checkout reminder then covers the
+  guest); when checkout moves earlier so that Stay guide's "day before checkout, 17:00" has passed, Stay
+  guide finishes without checkout instructions and the reminder stays quiet.
+
+**While a stay journey runs** it reads its Stay fresh at every step. `stay.changed` moves a wait anchored
+on the stay (a target already past takes `past`; a wait counted from arrival that now ends at or after
+checkout — the stay was shortened — is past too; a wait already due whose anchor didn't move just fires);
+`stay.cancelled` — or a Stay that is gone — ends the journey as `cancelled` / `stay_cancelled`. A send due
+on a Stay that is cancelled but whose event hasn't arrived yet goes to gate rule 1, which skips it
+(`send.skipped`, "the booking was cancelled", test runs too) and ends the journey the same way; the live
+claim reads the Stay again, so a cancel between the first look and the send is caught there. The checkout message has a second wording without the late-checkout sentence, used when the price is
+0 or cleared. The info page link (`{{link.hub}}`) is only sent when Guest info has content, and Local tips
+only when there are tips.
+
+**Launch mode off** stops each feed's chain at its next poll — no fetch, no write, no re-arm, so an
+account that was never on writes nothing — except a feed with a linked stay that isn't over (checkout + 3
+days), which keeps syncing so a running Stay guide still hears about changes. While off nobody new is
+linked and no new moment starts.
+
+**The sandbox calendar** (local only; D-C23, instead of the plan's "local calendar file"): a feed link
+`sandbox:calendar/<name>` reads `CaptivePortal_AdaptiveSandboxCalendars/<name>` from the emulator, so the
+API, a worker in another container and the skill share it. Anywhere else a `sandbox:` link is refused like
+any non-https link.
+
+The owner routes (save, check link, sync now, status, delete) come with PR D; PR C has the service they
+mount (`service/stays.ts`).
+
+**Open follow-ups** (found in PR C's reviews, disputed there, not fixed yet — decide before live):
+1. **A first activation reaches past guests.** A guest linked while only Guest info is on gets the
+   catalogue's stay moments scheduled. If the stay playbook is then turned on for the first time, their
+   review ask (checkout day 15:00) and book-direct offer (checkout + 3 days) still start — also for a
+   guest who checked out before it was turned on, against "past guests aren't messaged". Suggested
+   guard in `handleStayTrigger`: a journey the venue didn't have at link time (payload `installId` is
+   `''`) starts only if `stay.checkOutAt > install.liveSince`.
+2. **A shortened stay with a checkout after 11:00** still sends the mid-stay message (check-in + 2 days,
+   11:00) on checkout morning, and then no checkout instructions. Suggested: an arrival-anchored wait
+   whose target falls on or after the checkout's local day takes `past`.
+3. **A due wait and a plain wake skip the "not after checkout" rule.** The `stay.changed` shortcut that
+   fires a due wait, and a timer wake after a shortening, can send the mid-stay message after the new
+   checkout. Suggested: apply the same `past` rule there as when a wait is entered.
+4. **Checkout day:** a booking that vanished from the calendar the evening before its checkout day can
+   still be linked that morning (absence isn't a signal from checkout day on, D-C31). Option: also
+   skip a stay with `missingCount > 0`.
+5. **A same-link save during a failing poll's fetch** is overwritten by that poll's error write (old
+   error count, `failing`, `failingSince`). Suggested: compute the error fields from the feed read in
+   `finishFeed`'s transaction.
+6. **The checkout overlap rule is not airtight.** The Checkout reminder stays quiet when Stay guide still
+   sends inside the freeze (with 15 min to spare), but a Stay guide checkout message held past the freeze
+   — quiet hours in the guest's phone zone deferring it, or a worker more than 15 min late — is then
+   skipped too: neither goes. Suggested: keep the step's first planned time for the freeze check across a
+   quiet-hours or ceiling hold (as a pause already does).
+7. **Over-90-night edge cases:** a known stay kept at its old dates after its event grew past 90 nights
+   with a later check-in can overlap a new booking in the dates it gave up (a false overlap flag); a
+   split booking whose merged pieces pass 90 nights is shortened to its first 90 nights. Both need a
+   booking over 90 nights, which is unsupported anyway.
+8. **Tests:** no emulator test covers the link query returning an `overlap_flagged` previous stay; the
+   sign-up breaker (PR B) can let one extra new guest through under load (its test flaked once) — a
+   separate fix is in progress.
 
 ## Switches — `CaptivePortal_AdaptiveConfig/global`
 
@@ -182,12 +335,18 @@ reads them by id.
    # PR B2: the daily numbers read a venue's log in commit order; "apply to running guests" pages a journey's guests
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyEvents --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=recordedAt,order=ascending
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyInstances --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=journeyKey,order=ascending --field-config=field-path=status,order=ascending
+   # PR C: the stays a connecting guest could be linked to
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_Stays --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=status,order=ascending --field-config=field-path=checkOutAt,order=ascending
    ```
+
+   The other stay lookups (`Stays` by `feedId`, by `venueId` + `contactId`; `StayFeeds` by `status`;
+   `JourneyInstances` by `context.stayId` + `status`) are equality-only and use the automatic single-field
+   indexes — don't exempt those fields. The worker probes them all.
 
    TTL policies:
 
    ```bash
-   for C in CaptivePortal_JourneyTasks CaptivePortal_JourneyEvents CaptivePortal_JourneySends CaptivePortal_JourneyInstances CaptivePortal_Visits CaptivePortal_AdaptiveAlerts signups; do
+   for C in CaptivePortal_JourneyTasks CaptivePortal_JourneyEvents CaptivePortal_JourneySends CaptivePortal_JourneyInstances CaptivePortal_Visits CaptivePortal_AdaptiveAlerts signups CaptivePortal_Stays; do
      gcloud firestore fields ttls update expireAt --collection-group=$C --enable-ttl --project=$P
    done
    ```
@@ -195,7 +354,8 @@ reads them by id.
    Single-field exemptions: see `fieldOverrides` in the JSON, e.g.
    `gcloud firestore indexes fields update dueAt --collection-group=CaptivePortal_JourneyTasks --disable-indexes --project=$P`.
    The JourneyStats count maps (`sends`, `skipped`, `exited`, `ended`, `bySlot`, `byVariant`, `credits`,
-   `utility`, `dryRun`, `visits`) are only read by doc id, so their indexes can be switched off the same way.
+   `utility`, `dryRun`, `visits`, `stays`) are only read by doc id, so their indexes can be switched off the same way.
+   PR C also exempts `CaptivePortal_StayFeeds` `url` (the calendar link, a secret) and `lastError`, never queried.
    Wait until every index shows **Enabled**.
 
 2. **Check** that `GUEST_OTP_PEPPER` is set on the `server` app. The identity key is derived from
@@ -244,9 +404,13 @@ handles expires after 30 days.
 
 ## Rollback (fastest first)
 
-1. `killSwitch.sendingPaused = true`. Live sends hold, and no deploy is needed.
-2. `launch.default = "off"` (and remove the overrides). No new journeys start.
-3. Stop the `adaptive-worker` app in Coolify. Tasks wait in Firestore.
+1. `killSwitch.sendingPaused = true`. Live sends hold, and no deploy is needed. **This is the way to hold
+   live stay messages** too.
+2. `launch.default = "off"` (and remove the overrides). No new journeys start: no new stay links, no new
+   stay moments, and calendar polling stops for feeds with no linked stay that isn't over. **It doesn't
+   stop Stay guides that are already running:** they keep their mode and keep sending, and their feeds
+   keep syncing so they hear about changes — use step 1 to hold them.
+3. Stop the `adaptive-worker` app in Coolify. Tasks wait in Firestore; calendar polling stops.
 4. Revert the PR. The login hook does nothing while every account is off.
 
 ## Local test stack
@@ -261,11 +425,24 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 
 | Route | What it does |
 |---|---|
-| `POST /internal/adaptive/dev/clock` `{ "advance": "48h" }` | Moves the fake clock |
+| `POST /internal/adaptive/dev/clock` `{ "advance": "48h" }` or `{ "at": "2026-10-12T13:10:00Z" }` | Moves the fake clock (forward, or to a moment — never earlier than real time: activations are stamped in real time; `{ "reset": true }` goes back to it) |
 | `POST /internal/adaptive/dev/launch` `{ "accounts": { "tenant_demo": "test" } }` | Sets launch modes |
 | `GET /internal/adaptive/dev/guest-log?email=…` | Shows events, sends and the "why" sentences |
 | `POST /internal/adaptive/dev/provider-event` `{ "sendKey", "event": "delivered\|opened\|click\|rating\|stop\|reply…" }` | Fakes a webhook / CMS signal for one send, through the real hook functions |
 | `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` | Rolls the daily numbers up now (no 2-min lag) and returns the JourneyStats docs |
+| `PUT /internal/adaptive/dev/calendar/:name` `{ "venueId"?, "stays": [{ "checkIn": "today", "checkOut": "5n" }] }` or `{ "ics" }` | Writes the sandbox calendar a `sandbox:calendar/<name>` feed reads (Airbnb-shaped; `today`, `+Nd`, `YYYY-MM-DD`; checkout also `Nn` nights) |
+| `GET /internal/adaptive/dev/calendar/:name` | That calendar as `text/calendar` |
+| `POST /internal/adaptive/dev/stay-feed` `{ "venueId", "url" }` | Saves the venue's calendar link (the service PR D's route will mount) |
+| `POST /internal/adaptive/dev/stay-sync` `{ "venueId" }` | Polls the feed now, in the API process under the worker's feed lease; starts its 4 h chain if it isn't running (no `nextPollAt`, or one more than 1 h past); returns what changed and the stays |
+| `POST /internal/adaptive/dev/stay-check` `{ "venueId", "url" }` | "Check link": fetch + parse, store nothing → `{ ok, upcoming, nextCheckIn }` or `{ ok: false, errorCode }` |
+
+`GET /dev/guest-log` also lists the guest's stays. Misses count at most every 30 minutes on the fake
+clock, so to cancel a booking by hand: remove it, `/dev/stay-sync`, `/dev/clock { "advance": "30m" }`,
+`/dev/stay-sync` again (the skill's `set-stay.sh --cancel`). After `advance-time.sh --reset` moves the
+clock back, the feed's next poll (its `stay_poll` task and `nextPollAt`) is still at the old, later
+engine time: the worker doesn't poll the feed until the engine clock gets there, and `/dev/stay-sync`
+polls once per call without restarting the chain (it only restarts one with no `nextPollAt`, or one
+more than 1 h past). Reload the data to start over.
 
 Tests:
 
@@ -274,6 +451,8 @@ npx tsx tests/adaptiveRuntimeCore.test.ts      # pure, no Firestore
 npx tsx tests/adaptiveCompose.test.ts          # message composition (pure)
 npx tsx tests/adaptiveProviders.test.ts        # Brevo / Twilio clients against a fake HTTP layer
 npx tsx tests/adaptiveRollupsEdits.test.ts     # daily-number counting + the mid-journey config swap (pure)
+npx tsx tests/adaptiveStaysCore.test.ts        # the iCal reader, the safe fetcher (fake DNS + HTTP), stay times, the sync rules (pure)
+npx tsx tests/adaptiveStaysEngine.test.ts      # stays in the interpreter, gate, numbers, wording and link window (pure)
 bash tests/emulator/run.sh                     # needs Docker; starts a throwaway emulator on 127.0.0.1:8085
                                                # (project demo-adaptive-test); ADAPTIVE_TEST_EMULATOR=host:port reuses one
 ```

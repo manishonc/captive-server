@@ -116,6 +116,24 @@ settings are kept, so switching back is one call.
 | `POST /ingest/rating` | `{ shortCode, stars: 1–5, feedback? ≤1000 }` | A rating submitted from a journey rating link. ≤ 2★ stops marketing to that guest at that venue; ≤ 3★ emails the owner (the feedback goes only into that email). |
 | `POST /dev/clock`, `/dev/launch`, `/dev/provider-event`; `GET /dev/guest-log` | | Local sandbox only (404 in production) |
 | `POST /dev/rollup` | `{ venueId? }` | Local sandbox only: the daily numbers (JourneyStats) rolled up now, and the docs |
+| `PUT /dev/calendar/:name` | `{ ics }` or `{ venueId?, stays: [{ uid?, checkIn, checkOut? \| nights? }] }` | Local sandbox only: the calendar a `sandbox:calendar/<name>` feed reads. `checkIn`: `today`, `+Nd`, `-Nd` or `YYYY-MM-DD` (the engine clock's today in the venue's zone); `checkOut`: the same or `Nn` (nights). The first stay keeps its UID across calls, so new dates are a date change. |
+| `GET /dev/calendar/:name` | — | Local sandbox only: that calendar as `text/calendar` |
+| `POST /dev/stay-feed` | `{ venueId, url }` | Local sandbox only: saves the venue's calendar link → `{ feed, stays, syncQueued }` (the service PR D's `PUT …/stay-feed` mounts) |
+| `POST /dev/stay-sync` | `{ venueId }` | Local sandbox only: polls the feed now under the worker's feed lease (misses count at most every 30 min on the fake clock) and starts its 4 h chain if it isn't running (no `nextPollAt`, or one more than 1 h past) → `{ result: { outcome, created, changed, missed, cancelled, … }, feed, stays }` |
+| `POST /dev/stay-check` | `{ venueId, url }` | Local sandbox only: "Check link", fetch + parse, nothing stored → `{ ok: true, upcoming, nextCheckIn? }` or `{ ok: false, errorCode, error }` (`unsupported_source` for Booking.com and feeds without "Reserved" events) |
+
+`GET /admin/engine` also returns `feeds: { total, failing }` (Airbnb calendar feeds).
+
+**Calendar links (PR C service, routes in PR D).** `server/src/adaptive/service/stays.ts` has
+`saveStayFeed`, `checkStayFeed`, `syncStayFeedNow`, `deleteStayFeed` and `getStayFeed` for PR D's
+`GET/PUT/DELETE /tenants/:t/venues/:v/stay-feed`, `POST …/stay-feed/check` and `POST …/stay-feed/sync`.
+They check the venue belongs to the tenant (403); saving and checking a link also need an Airbnb venue
+(400), while reading, syncing and deleting don't (a feed stays readable and removable after the venue
+type changes). A bad link is a 400 with the owner's sentence for its rule (e.g. `"That calendar link
+isn't valid"`, `"The link must start with https:// (or webcal://)."`) that never repeats the link; the
+link is only ever returned masked
+(`https://www.airbnb.com/….ics`: the host and whether it is an `.ics` file, nothing of the path or
+query), and errors are codes (`lastError`) with the owner's words beside them (`lastErrorWords`).
 
 ## Check codes
 

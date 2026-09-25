@@ -2,7 +2,7 @@
  * Sending exactly once (plan §3.7) — the three phases of a live send:
  *
  *  1. One transaction: re-read what can change between the gate and now (the
- *     pause, consent, blocks, the weekly limit, a low rating) and run the gate
+ *     pause, consent, blocks, the weekly limit, a low rating, a cancelled stay) and run the gate
  *     again on it; then create the send record `dispatching`, add the weekly
  *     touch, bump the instance and park it on the send with a backstop timer.
  *  2. The provider call — one request, no automatic retries, 15 s timeout.
@@ -77,7 +77,8 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
   const marketing = p.purpose === 'marketing';
   const readRev = inst.state.rev;
   return db.runTransaction(async (tx) => {
-    const [instSnap, sendSnap, cfgSnap, contactSnap, cpSnap, npSnap, cvSnap] = await Promise.all([
+    const stayId = inst.meta.context?.stayId ?? null;
+    const [instSnap, sendSnap, cfgSnap, contactSnap, cpSnap, npSnap, cvSnap, staySnap] = await Promise.all([
       tx.get(instanceRef(inst.id)),
       tx.get(sendRef(sendKey)),
       tx.get(db.collection(COL.config).doc(CONFIG_DOC_ID)),
@@ -85,6 +86,8 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
       p.pointId ? tx.get(db.collection(COL.contactPoints).doc(p.pointId)) : Promise.resolve(null),
       tx.get(db.collection(COL.networkPeople).doc(inst.meta.networkId)),
       tx.get(db.collection(COL.contactVenues).doc(`${inst.meta.contactId}_${inst.meta.venueId}`)),
+      // A stay journey: the booking may have been cancelled since the first look (gate rule 1).
+      stayId ? tx.get(db.collection(COL.stays).doc(stayId)) : Promise.resolve(null),
     ]);
     if (!instSnap.exists || Number(instSnap.get('rev')) !== readRev || instSnap.get('status') !== 'active') return { kind: 'conflict' } as const;
     if (sendSnap.exists) return { kind: 'conflict' } as const;
@@ -98,7 +101,7 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
     const touches = (np?.recentMarketingTouches ?? []).filter((t) => t.sendKey !== sendKey && (tsMs(t.at) ?? 0) >= p.now - TOUCH_WINDOW_MS);
     const gi: GateInput = {
       ...p.gateInput,
-      system: { ...p.gateInput.system, paused: settings.paused },
+      system: { ...p.gateInput.system, paused: settings.paused, stayCancelled: stayId ? !staySnap?.exists || staySnap.get('status') === 'cancelled' : false },
       address: { blocked: point?.suppression?.[p.channel]?.reason ?? null, lowRatingAt: tsMs(cv.lowRatingAt) },
       consent: { state: consentFor(contact, inst.meta.venueId)[p.channel]?.state ?? 'none' },
       weekly: { ...p.gateInput.weekly, count: touches.filter((t) => (tsMs(t.at) ?? 0) >= weekAgo).length },

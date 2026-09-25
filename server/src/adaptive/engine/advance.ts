@@ -24,6 +24,8 @@ import { instanceRef, loadInstance, stateUpdate, type LoadedInstance } from './i
 import { runSend } from './sendPath';
 import { decideConfigSwap } from '../core/runtime/configSwap';
 import { MINUTE_MS } from '../core/runtime/time';
+import { loadStay } from '../stays/store';
+import { stayFacts } from '../stays/plan';
 
 export type AdvanceInput =
   | { kind: 'start' }
@@ -58,10 +60,13 @@ export async function advance(
   );
   // Everything below (the pinned values, the send record, the "why" record) sees the version actually used.
   if (swap.kind === 'swap') inst = { ...inst, meta: { ...inst.meta, configVersion: swap.use, pendingConfigVersion: null, pendingConfigAt: null } };
-  const [ctx, pinned, contact] = await Promise.all([
+  // A stay journey reads its Stay fresh every time, so new dates are seen (never frozen at entry).
+  const stayId = inst.meta.context?.stayId ?? null;
+  const [ctx, pinned, contact, stay] = await Promise.all([
     loadVenueContext(inst.meta.venueId),
     pinnedConfig(inst.meta.installId, swap.use, inst.meta.journeyKey),
     loadContact(inst.meta.contactId),
+    stayId ? loadStay(stayId) : Promise.resolve(null),
   ]);
 
   let state: InstanceState = inst.state;
@@ -71,7 +76,15 @@ export async function advance(
   const events: EventInput[] = [];
   const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode: inst.meta.mode };
 
-  if (!found) {
+  if (stayId && !stay) {
+    // The Stay is gone (deleted with the tenant, or past its TTL): it counts as cancelled
+    // and the journey ends — its dates can't be read any more. A Stay that is still there
+    // but cancelled runs on to its next send, where gate rule 1 skips it as
+    // `stay_cancelled` (recorded, with the owner's sentence) and ends the journey.
+    changed = true;
+    state = { ...state, status: 'cancelled', exitReason: 'stay_cancelled', waiting: null };
+    events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'cancelled', reason: 'stay_cancelled' } });
+  } else if (!found) {
     changed = true;
     state = { ...state, status: 'failed', exitReason: 'template_version_missing', waiting: null };
     events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'failed', reason: 'template_version_missing' } });
@@ -84,13 +97,18 @@ export async function advance(
       offers: pinned.offers,
       // instance.* is overlaid by the interpreter from its working state.
       facts: ctx
-        ? journeyFacts(ctx, contact, {
-            isFirstVisit: inst.meta.context.isFirstVisit,
-            visitNumber: inst.meta.context.visitNumber ?? undefined,
-            isRevisit: inst.meta.context.isRevisit ?? undefined,
-          })
+        ? journeyFacts(
+            ctx,
+            contact,
+            {
+              isFirstVisit: inst.meta.context.isFirstVisit,
+              visitNumber: inst.meta.context.visitNumber ?? undefined,
+              isRevisit: inst.meta.context.isRevisit ?? undefined,
+            },
+            stay ? stayFacts(stay) : {},
+          )
         : () => undefined,
-      stay: null,
+      stay: stay ? { checkInAt: stay.checkInAt, checkOutAt: stay.checkOutAt, nights: stay.nights } : null,
     };
 
     let pending: RuntimeInput | null = null;
@@ -121,6 +139,7 @@ export async function advance(
           settings: env.settings,
           workerId: env.workerId,
           pendingEvents: events,
+          stay,
         });
         if (outcome.kind === 'conflict') return { status: 'conflict' };
         if (outcome.kind === 'busy') return { status: 'retry', atMs: outcome.retryAt };
@@ -151,6 +170,12 @@ export async function advance(
         if (outcome.suppress) {
           state = { ...state, status: 'suppressed', exitReason: 'switched_off', waiting: null };
           events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'suppressed', reason: 'switched_off' } });
+          break;
+        }
+        if (outcome.stayCancelled) {
+          // The gate found the booking cancelled (e.g. between this run's read and the claim): end, don't move on.
+          state = { ...state, status: 'cancelled', exitReason: 'stay_cancelled', waiting: null };
+          events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'cancelled', reason: 'stay_cancelled' } });
           break;
         }
         pending = { kind: 'send_result', nodeId: sendNode, outcome: outcome.outcome, touch: outcome.touch, ladderPos: outcome.ladderPos };

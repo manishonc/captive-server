@@ -30,6 +30,11 @@ export const COL = {
   breakers: 'CaptivePortal_AdaptiveBreakers',
   /** Local sandbox only: messages the fake provider "sent". */
   sandboxOutbox: 'CaptivePortal_AdaptiveSandboxOutbox',
+  // Airbnb stays (PR C)
+  stayFeeds: 'CaptivePortal_StayFeeds',
+  stays: 'CaptivePortal_Stays',
+  /** Local sandbox only: calendar texts the `sandbox:calendar/<name>` links read. */
+  sandboxCalendars: 'CaptivePortal_AdaptiveSandboxCalendars',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',
@@ -55,3 +60,5 @@ export const ENGINE_STATUS_DOC_ID = 'engine_status';
 export const DEV_CLOCK_DOC_ID = 'dev_clock';
 export const contactVenueId = (contactId: string, venueId: string) => `${contactId}_${venueId}`;
 export const guestInfoId = (venueId: string) => `venue_${venueId}`;
+/** One calendar feed per venue, by construction (D-C34): a second save updates the same doc. */
+export const stayFeedId = (venueId: string) => `venue_${venueId}`;

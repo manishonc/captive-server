@@ -201,6 +201,11 @@ Runs the Adaptive Campaigns journey engine: it leases due tasks from Firestore, 
 guests who connect, and walks them through their steps. It has no port and no domain. Design and
 switches: `docs/adaptive-engine.md`.
 
+It also reads owners' Airbnb calendar links (iCal) every 4 hours, over outbound https to the public
+internet — the only process that does. The fetcher refuses anything that isn't public https (private,
+link-local, cloud-metadata and Docker-network addresses included), so no inbound or firewall change is
+needed.
+
 ### Files
 - `docker-compose.adaptive-worker.yml` — same `server/` Dockerfile and image, command
   `node dist/adaptive/worker/main.js`
@@ -228,6 +233,7 @@ Copies of the `server` app's existing values; no new variables:
 - **Before the first deploy,** create the Firestore indexes in `firestore.adaptive.indexes.json` by hand.
   The worker stays idle and reports any missing index.
 - **Stopping it is safe.** Tasks wait in Firestore, and journeys continue when it starts again.
+- **Calendar polling** stops with it and resumes on start (a watchdog restarts any feed whose poll was missed).
 - **Limits.** Memory is capped at 384 MB. SIGTERM finishes the tasks in hand (30 s grace).
 
 ---

@@ -90,10 +90,11 @@ function enterNode(nodeId: string, state: InstanceState, ctx: InterpreterContext
       let target: number;
       if (c.anchor) {
         if (!ctx.stay) return { fail: 'no_stay' };
-        const base = c.anchor === 'stay.checkInAt' ? ctx.stay.checkInAt : ctx.stay.checkOutAt;
-        const shifted = base + offsetMs(c.offset);
-        target = c.at ? atLocalTime(new Date(shifted), ctx.venueTz, c.at, 0).getTime() : shifted;
+        target = stayTarget(c, ctx.stay, ctx.venueTz);
         if (target <= now) return { go: 'past' };
+        // A wait counted from arrival that would end after checkout (the stay was shortened)
+        // is over: a during-the-stay message never goes after the guest has left.
+        if (c.anchor === 'stay.checkInAt' && target >= ctx.stay.checkOutAt) return { go: 'past' };
       } else {
         if (!c.at) return { fail: 'bad_step_config' };
         const today = atLocalTime(new Date(now), ctx.venueTz, c.at, 0).getTime();
@@ -167,6 +168,21 @@ function eventForNode(event: EngineEvent, state: InstanceState): NodeResult | nu
   return null;
 }
 
+/** When a `wait_until` anchored on the stay ends: the anchor ± offset, at the local time on that day. */
+function stayTarget(c: { anchor?: string; offset?: string; at?: string }, stay: NonNullable<InterpreterContext['stay']>, tz: string): number {
+  const base = c.anchor === 'stay.checkInAt' ? stay.checkInAt : stay.checkOutAt;
+  const shifted = base + offsetMs(c.offset);
+  return c.at ? atLocalTime(new Date(shifted), tz, c.at, 0).getTime() : shifted;
+}
+
+/** Waiting in a `wait_until` anchored on the stay's dates. */
+function isAnchoredTimerWait(state: InstanceState, def: JourneyDefinition): boolean {
+  const w = state.waiting;
+  const node = def.nodes[state.cursor.nodeId];
+  if (!w || w.kind !== 'timer' || w.nodeId !== state.cursor.nodeId || node?.type !== 'wait_until') return false;
+  return Boolean((node.config as { anchor?: unknown } | undefined)?.anchor);
+}
+
 // ── The loop ─────────────────────────────────────────────────────────────────
 
 function within(startedAt: number, window: string, now: number): boolean {
@@ -225,8 +241,9 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
         state.counters.opens += 1;
       }
       // Exit rules are checked before the step, so e.g. a rating ends a journey mid-wait.
+      // A cancelled booking ends its stay journeys as `cancelled` (D-C19), not completed.
       if (def.exitOn.some((x) => x.event === event.type && matchesWhere(x.where, event))) {
-        result = { exit: 'completed', reason: `exit_on:${event.type}` };
+        result = event.type === 'stay.cancelled' ? { exit: 'cancelled', reason: 'stay_cancelled' } : { exit: 'completed', reason: `exit_on:${event.type}` };
         break;
       }
       // The goal is checked continuously and counted once per instance.
@@ -235,6 +252,21 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
         state.goal = { reachedAt: now, eventId: event.id };
         effects.push({ type: 'emit', eventType: 'journey.converted', data: { goalEvent: event.type, eventId: event.id } });
         result = def.goal.onReach ? moveTo(def.goal.onReach) : { exit: def.goal.exit, reason: 'goal' };
+        break;
+      }
+      // New stay dates move a wait anchored on them (plan §3.3 item 3): the step is entered
+      // again with the new dates — a new target and token (the old timer then does nothing),
+      // or `past` when the new target has gone by.
+      if (event.type === 'stay.changed' && isAnchoredTimerWait(state, def)) {
+        // The wait was already due and this anchor didn't move (the other date or a time
+        // changed): it simply fires, rather than being re-entered as "past" and skipped.
+        const w = state.waiting!;
+        const c = parseConfig<{ anchor?: string; offset?: string; at?: string }>('wait_until', def.nodes[state.cursor.nodeId]?.config);
+        if (c && ctx.stay && w.untilAt !== null && w.untilAt <= now && stayTarget(c, ctx.stay, ctx.venueTz) === w.untilAt) {
+          result = { go: 'done' };
+          break;
+        }
+        result = moveTo(state.cursor.nodeId);
         break;
       }
       result = eventForNode(event, state);

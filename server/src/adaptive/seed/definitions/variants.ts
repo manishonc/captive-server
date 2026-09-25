@@ -246,6 +246,39 @@ export const VARIANTS_V1: VariantSeedInput[] = [
     },
   },
 
+  // PR C, wording fix #1: the checkout message without the late-checkout sentence, used when
+  // the owner's late-checkout price is 0 or cleared (D-C22). A is never picked then (it uses
+  // {{slot.late_checkout_price}}); B only then.
+  {
+    poolKey: 'stay_checkout',
+    journeyKey: 'stay_guide',
+    letter: 'B',
+    name: 'Checkout instructions (no late check-out)',
+    purpose: 'service',
+    axes: { hook: 'helpful', length: 'short', tone: 'clear', emoji: false },
+    when: { not: { fact: 'slot.late_checkout_price', gt: 0 } },
+    channels: {
+      sms: { text: `${HI_EN}, check-out tomorrow is at {{guestinfo.checkOutTime}}. Need anything? Ask your host: {{guestinfo.hostContactUrl}}` },
+      email: {
+        subject: 'Your check-out tomorrow',
+        preheader: 'Time and a few simple steps',
+        bodyFormat: 'text',
+        body: `${HI_EN},\n\ncheck-out tomorrow is at {{guestinfo.checkOutTime}}. The details are here: {{link.hub}}\n\nNeed anything before you leave? Just ask your host: {{guestinfo.hostContactUrl}}\n\nSafe travels,\n{{venue.name}}`,
+      },
+    },
+    locales: {
+      de: {
+        sms: { text: `${HI_DE}, morgen ist Check-out um {{guestinfo.checkOutTime}}. Brauchst du noch etwas? Frag deinen Gastgeber: {{guestinfo.hostContactUrl}}` },
+        email: {
+          subject: 'Dein Check-out morgen',
+          preheader: 'Zeit und ein paar einfache Schritte',
+          bodyFormat: 'text',
+          body: `${HI_DE},\n\nmorgen ist Check-out um {{guestinfo.checkOutTime}}. Alle Details findest du hier: {{link.hub}}\n\nBrauchst du vor der Abreise noch etwas? Frag einfach deinen Gastgeber: {{guestinfo.hostContactUrl}}\n\nGute Reise,\n{{venue.name}}`,
+        },
+      },
+    },
+  },
+
   // ── Local tips, stay review, book direct ───────────────────────────────────
   {
     poolKey: 'local_tips',

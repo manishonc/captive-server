@@ -1,8 +1,9 @@
 /**
  * Alerts (plan §2.6, §3.5, §3.9): to HeidiFi when something needs a person —
  * a setup problem blocks sends, a daily ceiling is reached, a burst of sign-ups
- * trips the breaker, provider credentials fail — and to the owner for a low
- * private rating.
+ * trips the breaker, provider credentials fail, several bookings vanish from a
+ * calendar at once — and to the owner for a low private rating, a calendar link
+ * that keeps failing, or two bookings that overlap.
  *
  * Each alert has a deterministic id from its dedupe key (e.g. once per venue,
  * reason and day), so it is recorded — and emailed — at most once. HeidiFi's
@@ -21,7 +22,18 @@ import { sendEmail } from '../../services/brevo';
 import { escapeHtml } from '../send/compose';
 import { sandboxEnabled } from './clock';
 
-export type AlertKind = 'setup_block' | 'venue_ceiling' | 'platform_ceiling' | 'signup_breaker' | 'provider_config' | 'low_rating';
+export type AlertKind =
+  | 'setup_block'
+  | 'venue_ceiling'
+  | 'platform_ceiling'
+  | 'signup_breaker'
+  | 'provider_config'
+  | 'low_rating'
+  // Airbnb stays (PR C): a calendar link failing for over 24 h (owner, daily), several
+  // bookings vanishing at once (HeidiFi, D-C35), two bookings overlapping (owner, D-C10)
+  | 'stay_feed_failing'
+  | 'stay_feed_suspect'
+  | 'stay_overlap';
 
 export interface AlertInput {
   kind: AlertKind;

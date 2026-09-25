@@ -15,6 +15,8 @@ import type { Channel, Lang } from '../core/constants';
 import type { ContactDoc } from '../store/engineTypes';
 import type { VariantDoc } from '../store/types';
 import { localDateForRender } from '../core/runtime/time';
+import { evaluateCondition, factsFrom } from '../core/runtime/conditions';
+import type { StayTimes } from '../stays/times';
 
 export type LinkKind = 'offer' | 'rating' | 'hub' | 'booking' | 'unsubscribe';
 
@@ -28,6 +30,8 @@ export interface RenderInputs {
   offers: Offer[];
   guestInfo: Record<string, any> | null;
   links: Partial<Record<LinkKind, string>>;
+  /** A stay journey's booking (read fresh), with the venue-level check-in/out times (D-C20). */
+  stay?: { checkInAt: number; checkOutAt: number; nights: number; times: StayTimes } | null;
 }
 
 const GUEST_INFO_FIELDS = [
@@ -80,7 +84,56 @@ export function renderValues(i: RenderInputs): RenderValues {
       }
     }
   }
+  if (i.stay) {
+    values['stay.checkInDate'] = localDateForRender(new Date(i.stay.checkInAt), i.tz);
+    values['stay.checkOutDate'] = localDateForRender(new Date(i.stay.checkOutAt), i.tz);
+    values['stay.nights'] = String(i.stay.nights);
+    // The times the stay was scheduled with, in every language — or none: the 15:00 / 10:00
+    // scheduling fallback is never printed, so a checkout message without a valid time in
+    // Guest info is skipped as guest_info_missing (fail closed).
+    for (const [field, time] of [['checkInTime', i.stay.times.checkIn], ['checkOutTime', i.stay.times.checkOut]] as const) {
+      if (time) {
+        values[`guestinfo.${field}`] = time;
+        values[`guestinfo.secret.${field}`] = time;
+      } else {
+        delete values[`guestinfo.${field}`];
+        delete values[`guestinfo.secret.${field}`];
+      }
+    }
+  }
   return values;
+}
+
+/** Guest info has something on it (any language) — else the info page would be empty (D-C21). */
+export function guestInfoHasContent(guestInfo: Record<string, any> | null): boolean {
+  const locales = (guestInfo?.locales ?? {}) as Record<string, Record<string, unknown> | undefined>;
+  return Object.values(locales).some((l) => GUEST_INFO_FIELDS.some((f) => typeof l?.[f] === 'string' && (l[f] as string).trim().length > 0));
+}
+
+/** One Guest info field in the guest's language, else English. */
+export function guestInfoField(guestInfo: Record<string, any> | null, lang: Lang, field: string): string | null {
+  for (const l of [lang, 'en']) {
+    const v = guestInfo?.locales?.[l]?.[field];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+const SLOT_FIELD = /\{\{\s*slot\.([A-Za-z0-9_]+)/g;
+
+/**
+ * Wording a guest can get with these owner values (D-C22): its `when` holds (read against
+ * `slot.*`), and every `{{slot.X}}` it uses has a value — not 0, not cleared — so a late
+ * checkout "for CHF 0" is never sent. Wording without a `when` is judged by the slots alone.
+ */
+export function variantEligible(v: Pick<VariantDoc, 'channels' | 'locales'> & { when?: VariantDoc['when'] }, slots: Record<string, SlotValue>): boolean {
+  if (v.when && !evaluateCondition(v.when, factsFrom({ slot: slots }))) return false;
+  const text = JSON.stringify([v.channels ?? {}, v.locales ?? {}]);
+  for (const m of text.matchAll(SLOT_FIELD)) {
+    const value = slots[m[1]];
+    if (value === undefined || value === null || value === '' || value === 0) return false;
+  }
+  return true;
 }
 
 /** The wording for one channel in the guest's language (English fallback). */
@@ -133,7 +186,8 @@ export function renderMessage(content: any, channel: Channel, values: RenderValu
 
 /** Why a missing value blocks a send, in the gate's words. */
 export function missingReason(missing: string[]): string {
-  if (missing.some((m) => m.startsWith('guestinfo.'))) return 'guest_info_missing';
+  // The info page link is withheld when Guest info is empty (or has no tips, for Local tips).
+  if (missing.some((m) => m.startsWith('guestinfo.') || m === 'link.hub')) return 'guest_info_missing';
   if (missing.includes('link.booking')) return 'booking_link_missing';
   return `missing_value:${missing[0]}`;
 }

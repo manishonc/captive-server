@@ -6,6 +6,7 @@
 import type { Timestamp } from 'firebase-admin/firestore';
 import type {
   ChannelContent,
+  Condition,
   I18n,
   JourneyDefinition,
   JourneyTemplateHeader,
@@ -101,6 +102,8 @@ export interface VariantDoc {
   channels: ChannelContent;
   locales: Partial<Record<string, ChannelContent>>;
   mergeFieldsUsed: string[];
+  /** Only picked when this holds, read against `slot.*` (e.g. the checkout wording without late checkout). */
+  when?: Condition | null;
   contentHash: string;
   lint: { status: 'pending' | 'passed' | 'failed'; issues: unknown[]; linterVersion: string | null };
   approval: { by: string; at: StoredTime } | null;

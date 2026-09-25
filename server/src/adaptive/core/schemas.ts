@@ -317,6 +317,8 @@ export const variantSeedSchema = z.object({
   axes: variantAxesSchema,
   channels: channelContentSchema,
   locales: z.partialRecord(langSchema, channelContentSchema).default({}),
+  /** Only picked when this holds, read against `slot.*` (PR C: the checkout wording without late checkout). */
+  when: conditionSchema.optional(),
 });
 export type VariantSeed = z.infer<typeof variantSeedSchema>;
 
