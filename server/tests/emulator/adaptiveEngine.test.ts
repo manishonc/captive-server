@@ -46,6 +46,8 @@ import {
   runDue,
   runUntil,
   seedCatalogue,
+  seedWallet,
+  setSafety,
   setClock,
   setLaunch,
   setupVenue,
@@ -153,7 +155,7 @@ async function main() {
     assertEqual(a2.length, 1, 'the review ask started once for her visit');
   });
 
-  await test('a test-run guest stays a test run after going live; no live journeys start while nothing can send (PR A)', async () => {
+  await test('a test-run guest stays a test run after going live; a new guest is sent for real (sandbox)', async () => {
     await fresh();
     const t0 = nextTuesday1240();
     await setClock(t0);
@@ -162,6 +164,7 @@ async function main() {
     await runDue();
     await advance(15 * MINUTE_MS);
     await runDue();
+    await seedWallet(A.tenant, 1000);
     await setLaunch({ [A.tenant]: 'live' }, { paused: false });
     await connect({ venue: A, email: 'live-guest@test.local', consent: true });
     await runUntil(t0 + 4 * DAY_MS);
@@ -170,7 +173,10 @@ async function main() {
     assert(testInst, 'the test-run journey is there');
     assert((await sendsFor(testInst.id)).length >= 2, 'it carried on after the account went live');
     assert((await sendsFor(testInst.id)).every((s) => s.status === 'dry_run'), 'the test-run guest only ever gets dry runs');
-    assertEqual(a1s.filter((i) => i.mode === 'live').length, 0, 'no live journey starts while no sending channel exists (PR A)');
+    const liveInst = a1s.find((i) => i.mode === 'live');
+    assert(liveInst, 'the new guest started a live journey');
+    const liveSends = await sendsFor(liveInst.id);
+    assert(liveSends.length >= 1 && liveSends.every((x) => x.mode === 'live' && x.status === 'sent'), `live sends went out: ${liveSends.map((x) => x.status)}`);
     await setLaunch({ [A.tenant]: 'test' }, { paused: true });
   });
 
@@ -521,6 +527,7 @@ async function main() {
     await fresh();
     await setClock(nextTuesday1240());
     await setLaunch({ [A.tenant]: 'test' });
+    await setSafety({ maxNewContactsPerApPerHour: 100_000 }); // 1,000 new guests at one AP would trip the sign-up breaker
     const n = Number(process.env.ADAPTIVE_RESTART_N || 1000);
     for (let i = 0; i < n; i += 50) {
       await Promise.all(Array.from({ length: Math.min(50, n - i) }, (_, k) => connect({ venue: A, email: `bulk${i + k}@test.local`, consent: true })));

@@ -18,6 +18,8 @@
 import { Router, Request, Response } from 'express';
 import twilio from 'twilio';
 import { classifyInbound, setChannelOptOut } from '../services/optOut';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { adaptiveOnInboundSms } from '../adaptive/ingest/signals';
 
 const router = Router();
 
@@ -51,10 +53,23 @@ router.post('/', async (req: Request, res: Response) => {
   const from = String(req.body?.From ?? '').trim();
   const body = String(req.body?.Body ?? '');
   const kind = classifyInbound(body);
+  // Adaptive Campaigns: STOP / START and plain replies (fire-and-forget; the TwiML reply doesn't change).
+  const adaptive = () =>
+    runAdaptiveHook('twilio-inbound', () =>
+      adaptiveOnInboundSms({
+        from,
+        body,
+        legacyKind: kind,
+        messageSid: String(req.body?.MessageSid ?? ''),
+        optOutType: req.body?.OptOutType ? String(req.body.OptOutType) : null,
+        signatureChecked: Boolean(publicUrl && process.env.TWILIO_AUTH_TOKEN),
+      }),
+    );
 
   res.type('text/xml');
 
   if (!from || !kind) {
+    if (from) adaptive();
     // Not an opt-out keyword — nothing to do (no auto-reply to arbitrary texts).
     return res.send(twiml());
   }
@@ -65,6 +80,7 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     if (kind === 'stop') {
       await setChannelOptOut(from, 'sms', true);
+      adaptive();
       return res.send(
         twilioHandlesReplies
           ? twiml()
@@ -73,6 +89,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
     if (kind === 'start') {
       await setChannelOptOut(from, 'sms', false);
+      adaptive();
       return res.send(
         twilioHandlesReplies ? twiml() : twiml('You are resubscribed to messages. Reply STOP to unsubscribe.'),
       );
@@ -85,6 +102,7 @@ router.post('/', async (req: Request, res: Response) => {
     );
   } catch (err) {
     console.error('[TWILIO INBOUND ERROR]', err);
+    if (kind === 'stop' || kind === 'start') adaptive();
     // Still 200 with empty TwiML — Twilio retries would just repeat the failure.
     return res.send(twiml());
   }

@@ -17,6 +17,8 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../firebase';
 import { verifyUnsubscribeToken, UnsubscribePayload } from '../services/unsubscribe';
 import { blocklistContact } from '../services/brevo';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { adaptiveOnUnsubscribe } from '../adaptive/ingest/signals';
 
 const router = Router();
 const USERS = 'CaptivePortal_Users';
@@ -89,6 +91,8 @@ router.post('/:token', async (req: Request, res: Response) => {
     console.error('[UNSUB] failed to apply unsubscribe', err);
     return res.status(500).send(htmlPage('Something went wrong', 'Please try again later.'));
   }
+  // Adaptive Campaigns: no more Adaptive email from this venue either (fire-and-forget).
+  runAdaptiveHook('unsubscribe', () => adaptiveOnUnsubscribe(payload));
   return res
     .status(200)
     .send(htmlPage('You’re unsubscribed', 'You will no longer receive marketing emails from this venue.'));

@@ -36,6 +36,8 @@ const MAX_CONFLICT_RETRIES = 5;
 
 export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { now: number; settings: EngineSettings; workerId: string; taskDueAt: number }): Promise<AdvanceResult> {
   const { now } = env;
+  // A replayed webhook or a retried task delivers the same event again: count it once.
+  if (input.kind === 'event' && (inst.state.seenEventIds ?? []).includes(input.event.id)) return { status: 'done' };
   const cat = await loadCatalogue();
   const found = templateVersion(cat, inst.meta.journeyKey, inst.meta.templateVersion);
   const [ctx, pinned, contact] = await Promise.all([
@@ -100,12 +102,15 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
           taskDueAt: env.taskDueAt,
           settings: env.settings,
           workerId: env.workerId,
+          pendingEvents: events,
         });
         if (outcome.kind === 'conflict') return { status: 'conflict' };
         if (outcome.kind === 'busy') return { status: 'retry', atMs: outcome.retryAt };
         changed = true;
         events.push(...outcome.events.map((e) => ({ ...common, ...e })));
         if (outcome.kind === 'later') {
+          // A live dispatch that has to wait already bumped the instance.
+          if (outcome.revAfter !== undefined && outcome.revAfter !== null) expectedRev = outcome.revAfter;
           const token = `${sendNode}@${now}:${outcome.reason}`;
           state = {
             ...state,
@@ -118,6 +123,7 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
               slot: outcome.slot,
               lastDeferReason: outcome.reason,
               ...(outcome.creditsWaitStartedAt !== undefined ? { creditsWaitStartedAt: outcome.creditsWaitStartedAt } : {}),
+              ...(outcome.dispatchAttempts !== undefined ? { dispatchAttempts: outcome.dispatchAttempts } : {}),
             },
           };
           tasks.push(nodeTask(inst, 'send_due', sendNode, token, outcome.at));
@@ -135,11 +141,13 @@ export async function advance(inst: LoadedInstance, input: AdvanceInput, env: { 
       }
 
       if (!pending) break;
+      const handled = pending.kind === 'event' ? pending.event.id : null;
       const r = step(state, pending, { ...interp, now });
       pending = null;
       if (r.unchanged) break;
       changed = true;
       state = r.state;
+      if (handled) state = { ...state, seenEventIds: [...(state.seenEventIds ?? []), handled].slice(-20) };
       for (const e of r.effects) {
         if (e.type === 'timer') tasks.push(nodeTask(inst, 'wake', e.nodeId, e.token, e.at));
         else if (e.type === 'emit') events.push({ ...common, nodeId: state.cursor.nodeId, type: e.eventType, occurredAt: now, data: e.data });

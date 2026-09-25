@@ -23,6 +23,7 @@ import type { Channel, Lang } from '../core/constants';
 import { SCHEMA_VERSION } from '../core/constants';
 import { contactPointId } from './key';
 import { phoneCountry } from '../core/runtime/phoneCountry';
+import { tsMs } from '../store/time';
 
 export interface ResolveInput {
   tenantUserId: string;
@@ -76,6 +77,11 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
     ]);
     const cpEmail = cpEmailSnap?.exists ? (cpEmailSnap.data() as ContactPointDoc) : null;
     const cpPhone = cpPhoneSnap?.exists ? (cpPhoneSnap.data() as ContactPointDoc) : null;
+    // A START recorded after the last STOP beats an old STOP flag still found on a
+    // guest doc (the flag scan is cached for a few minutes).
+    const keywords = (cpPhone as unknown as { smsKeywordAt?: { start?: unknown; stop?: unknown } } | null)?.smsKeywordAt;
+    const startedAgain = (tsMs(keywords?.start) ?? 0) > (tsMs(keywords?.stop) ?? 0);
+    const legacySmsStop = input.legacy.smsStop && !startedAgain;
 
     const fromEmail = cpEmail?.tenantContacts?.[input.tenantUserId] ?? null;
     const fromPhone = cpPhone?.tenantContacts?.[input.tenantUserId] ?? null;
@@ -105,11 +111,14 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
     ];
     const legacyRevoke: Partial<Record<Channel, boolean>> = {
       email: input.legacy.emailUnsubscribed,
-      sms: input.legacy.smsStop,
+      sms: legacySmsStop,
       whatsapp: input.legacy.whatsappStop,
     };
     for (const ch of channelsWithAddress) {
-      if (legacyRevoke[ch] && current[ch]?.state !== 'revoked') {
+      // Only a yes (now or earlier) is taken back; with no yes there is nothing to revoke
+      // (and a later START must not turn this into a yes the guest never gave).
+      const hadYes = input.consentGiven || current[ch]?.state === 'granted';
+      if (legacyRevoke[ch] && hadYes && current[ch]?.state !== 'revoked') {
         events.push({ channel: ch, action: 'revoke', source: 'import_legacy', revokedVia: 'channel' });
       }
     }
@@ -149,6 +158,7 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
         at: now,
         eventId: ref.id,
         revokedVia: e.action === 'revoke' ? e.revokedVia ?? null : null,
+        source: e.source,
       };
       current[e.channel] = entry;
       projectionUpdates[e.channel] = entry;
@@ -249,7 +259,7 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
       // Old STOP flags block SMS / WhatsApp for every owner (one shared sender).
       if (kind === 'phone') {
         const suppression: Record<string, unknown> = {};
-        if (input.legacy.smsStop && !existing?.suppression?.sms) suppression.sms = { reason: 'stop', source: 'import_legacy', at: now };
+        if (legacySmsStop && !existing?.suppression?.sms) suppression.sms = { reason: 'stop', source: 'import_legacy', at: now };
         if (input.legacy.whatsappStop && !existing?.suppression?.whatsapp) suppression.whatsapp = { reason: 'stop', source: 'import_legacy', at: now };
         if (Object.keys(suppression).length) base.suppression = { ...(existing?.suppression ?? {}), ...suppression };
       }

@@ -25,6 +25,8 @@ import {
   recordMarketingOpen,
 } from '../services/marketingTracking';
 import { normalizeBrevoStatus } from '../services/deliveryStatus';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { adaptiveOnBrevoEvents } from '../adaptive/ingest/signals';
 
 const router = Router();
 
@@ -66,6 +68,8 @@ router.post('/', async (req: Request, res: Response) => {
         console.error('[BREVO WEBHOOK] event processing error:', event, err);
       }
     }
+    // Adaptive Campaigns: events for its sends (named by their X-Mailin-custom header).
+    runAdaptiveHook('brevo', () => adaptiveOnBrevoEvents(events));
   } catch (err) {
     console.error('[BREVO WEBHOOK ERROR]', err);
   }

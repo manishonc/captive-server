@@ -96,6 +96,15 @@ Turning a playbook on sets the venue's previously active playbook to `inactive`
 in the same transaction — a venue has at most one active marketing playbook. Its
 settings are kept, so switching back is one call.
 
+## Engine — `/internal/adaptive` (see docs/adaptive-engine.md)
+
+| Method + path | Body | What |
+|---|---|---|
+| `GET /admin/engine` | — | Workers (heartbeat, version, identity key), queue, index check, launch |
+| `POST /ingest/click` | `{ shortCode }` | The CMS resolver forwards a **counted** (non-bot) click on a journey short link. Ids are read from the short-link and send docs, never from the caller. `{ ok, ignored }` — `ignored: true` for any link that isn't an Adaptive journey link. |
+| `POST /ingest/rating` | `{ shortCode, stars: 1–5, feedback? ≤1000 }` | A rating submitted from a journey rating link. ≤ 2★ stops marketing to that guest at that venue; ≤ 3★ emails the owner (the feedback goes only into that email). |
+| `POST /dev/clock`, `/dev/launch`, `/dev/provider-event`; `GET /dev/guest-log` | | Local sandbox only (404 in production) |
+
 ## Check codes
 
 | Where | Codes |

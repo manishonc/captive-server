@@ -6,10 +6,11 @@
  *   → facts (contact, consent, blocks, caps, weekly touches, counts, credits)
  *   → channel → wording → render → the 10-rule gate → the "why" record
  *   → test run: write a `dry_run` send record and carry on as if sent
- *     live:     (PR B) phase 1 transaction → provider → record
+ *     live:     mint the links → phase 1 transaction → provider → record → charge
+ *               (send/dispatch.ts)
  *
- * PR A has no provider adapters at all: a live account is stopped by rule 1
- * ("sending isn't set up"), so nothing can leave the building.
+ * The SMS is priced on exactly the text that goes out: same-length placeholders
+ * for the links until the gate says yes, the STOP line in the guest's language.
  */
 
 import { db } from '../../firebase';
@@ -17,10 +18,10 @@ import { COL, contactVenueId } from '../store/collections';
 import type { ContactDoc, ContactPointDoc, ContactVenueDoc, JourneySendDoc, NetworkPersonDoc } from '../store/engineTypes';
 import type { AdaptiveConfig, JourneyDefinition } from '../core/schemas';
 import type { Channel, Lang } from '../core/constants';
-import { getNodeContract } from '../core/registry';
+import { canonicalField, getNodeContract, parseMergeExpressions } from '../core/registry';
 import { sendKeyFor } from '../core/runtime/ids';
 import { checkChannel, pickChannel, pickTime, pickVariant, type ChannelCheck, type ChannelFacts, type ChannelRule } from '../core/runtime/pickers';
-import { checkSystem, runGate, type GateInput } from '../core/runtime/gate';
+import { checkSystem, runGate, type GateInput, type GateResult } from '../core/runtime/gate';
 import { buildDecision, type DecisionRecord } from '../core/runtime/decision';
 import { DAY_MS, HOUR_MS, MINUTE_MS, atLocalTime, durationMs } from '../core/runtime/time';
 import { phoneCountry } from '../core/runtime/phoneCountry';
@@ -31,13 +32,19 @@ import { consentFor } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
 import type { EngineSettings } from '../store/engineSettings';
 import { retentionFrom, tsMs } from '../store/time';
-import { getCreditConfig, creditsForMessage, getWalletSnapshot } from '../../services/credits';
+import { getCreditConfig, creditsForMessage, getWalletSnapshot, onCreditsSpent, providerCostForMessage } from '../../services/credits';
 import { spendableForChannel } from '../../services/creditBuckets';
 import { getEntitlements } from '../../services/entitlements';
-import { ensureSmsOptOutSuffix } from '../../services/smsBilling';
+import { smsSegments } from '../../services/smsBilling';
 import { maskDestination } from '../../services/phone';
+import type { ChannelAdapter, Outbound } from '../send/adapters/types';
+import { composeEmail, maskSecretValues, smsFinalText } from '../send/compose';
+import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBookingUrl } from '../send/links';
+import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
+import { dayKey, raiseAlert } from './alerts';
 import { journeyStillOn, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
-import { DRY_RUN_LINKS, missingReason, renderMessage, renderValues, variantContent } from './renderSend';
+import { DRY_RUN_LINKS, missingReason, renderMessage, renderValues, variantContent, type LinkKind } from './renderSend';
+import { renderText } from '../core/render';
 import { platformLiveSendsSince, venueLiveSendsSince, venueServiceSendsSince } from './counts';
 import { instanceRef, type LoadedInstance } from './instanceStore';
 import type { EventInput } from './events';
@@ -65,14 +72,26 @@ export type SendOutcome =
       suppress: boolean;
       events: EventInput[];
     }
-  | { kind: 'later'; at: number; intendedAt: number; slot: string; reason: string; creditsWaitStartedAt?: number; events: EventInput[] }
+  | {
+      kind: 'later';
+      at: number;
+      intendedAt: number;
+      slot: string;
+      reason: string;
+      creditsWaitStartedAt?: number;
+      /** A provider "try again later": how many so far. */
+      dispatchAttempts?: number;
+      /** Set when this step already bumped the instance (a dispatch that has to wait). */
+      revAfter?: number | null;
+      events: EventInput[];
+    }
   /** Another worker is in the middle of this send: look again shortly. */
   | { kind: 'busy'; retryAt: number }
   /** The instance moved on while we looked (rev changed): the caller re-reads. */
   | { kind: 'conflict' };
 
-/** Adapters register here in PR B. PR A registers none, so live sends are blocked by rule 1. */
-export const channelAdapters: Partial<Record<Channel, { ready(): boolean }>> = {};
+/** The provider adapters (send/adapters/index.ts fills this in the worker). A channel without a ready adapter is not used live. */
+export const channelAdapters: Partial<Record<Channel, ChannelAdapter>> = {};
 
 const DISPATCH_BUSY_RETRY_MS = 2 * MINUTE_MS;
 
@@ -94,13 +113,15 @@ export interface SendArgs {
   taskDueAt: number;
   settings: EngineSettings;
   workerId: string;
+  /** Events earlier steps of this run produced, not yet committed: a live claim writes them (and removes them here). */
+  pendingEvents?: EventInput[];
 }
 
 export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const { inst, nodeId, now } = a;
   const node = a.definition.nodes[nodeId];
   const parsed = getNodeContract('send')!.configSchema.safeParse(node?.config ?? {});
-  if (!parsed.success) return skipOutcome('bad_step_config');
+  if (!parsed.success) return skipOutcome('bad_step_config', a.now);
   const cfg = parsed.data as SendConfig;
   const sendKey = sendKeyFor(inst.id, nodeId);
   const mode = inst.meta.mode;
@@ -114,7 +135,12 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     if (s.status === 'dispatching') {
       const leaseUntil = tsMs(s.dispatchLease?.until) ?? 0;
       if (leaseUntil > Date.now()) return { kind: 'busy', retryAt: now + DISPATCH_BUSY_RETRY_MS };
-      await existing.ref.update({ status: 'unknown', updatedAt: new Date() });
+      // The worker died mid-send: it may have left, so never send again (compare-and-set).
+      await markStuckUnknown(sendKey);
+    }
+    // Accepted but not yet charged (the worker died between the two): charge now.
+    if (s.mode === 'live' && s.sentAt && s.credits && s.credits.amount >= 1 && !s.credits.ledgerId) {
+      await chargeSend(sendKey).catch(() => scheduleChargeRepair(inst.meta.tenantUserId, inst.meta.venueId, sendKey, now));
     }
     const went = !['failed', 'bounced', 'cancelled'].includes(s.status);
     // Keep the ladder position the send moved to, so "next on ladder" moves on.
@@ -159,7 +185,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
 
   // ── 2. Facts ──
   const contact = await loadContact(inst.meta.contactId);
-  if (!contact || contact.status !== 'active') return skipOutcome('contact_gone');
+  if (!contact || contact.status !== 'active') return skipOutcome('contact_gone', now);
 
   const [cvSnap, cpEmailSnap, cpPhoneSnap, npSnap, guestInfo, tenantSnap] = await Promise.all([
     db.collection(COL.contactVenues).doc(contactVenueId(inst.meta.contactId, inst.meta.venueId)).get(),
@@ -189,6 +215,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       const country = phoneCountry(contact.phoneE164)?.country ?? null;
       if (!country || !a.settings.sms.allowedCountries.includes(country)) ruleFail = 'country_not_allowed';
     } else if (email && cfg.purpose === 'marketing' && !unsubscribeReady) ruleFail = 'email_unsubscribe_not_configured';
+    // Live: a channel whose provider isn't set up is skipped, so the ladder moves on (e.g. to email).
+    if (!ruleFail && mode === 'live' && !channelAdapters[channel]?.ready()) ruleFail = 'channel_not_ready';
     return {
       channel,
       hasAddress: email ? Boolean(contact.email) : Boolean(contact.phoneE164),
@@ -249,12 +277,15 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     const decision = buildDecision({ now, mode, poolKey: cfg.pool, purpose: cfg.purpose, gate, channelChecks: [], channel: { picked: null, rule: 'not reached' }, variant: { picked: null, method: 'none' }, slot: slotRecord, credits: null, versions });
     if (pre.verdict === 'defer' && pre.until !== undefined) {
       const firstOfReason = inst.state.waiting?.lastDeferReason !== pre.reason;
+      if (firstOfReason) void alertFor(pre.reason ?? null, a, tz);
       return {
         kind: 'later',
         at: pre.until,
         intendedAt,
         slot,
         reason: pre.reason ?? 'defer',
+        creditsWaitStartedAt: inst.state.waiting?.creditsWaitStartedAt,
+        ...(inst.state.waiting?.nodeId === nodeId && inst.state.waiting?.dispatchAttempts !== undefined ? { dispatchAttempts: inst.state.waiting.dispatchAttempts } : {}),
         events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until } }] : [],
       };
     }
@@ -265,6 +296,10 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const ladder = a.definition.channelLadder;
   const allChannels = Array.from(new Set<Channel>([...ladder, 'email', 'sms', 'whatsapp']));
   const checks: ChannelCheck[] = allChannels.map((c) => checkChannel(cfg.purpose, channelFacts(c)));
+  // A channel skipped because HeidiFi's setup is missing (worker env): one alert a day, platform-wide.
+  for (const c of checks) {
+    if (!c.ok && (c.reason === 'channel_not_ready' || c.reason === 'email_unsubscribe_not_configured') && ladder.includes(c.channel)) void alertSkippedChannel(c.channel, c.reason, a);
+  }
   const eligible = checks.filter((c) => c.ok).map((c) => c.channel);
   const pick = pickChannel({
     rule: cfg.channel,
@@ -288,7 +323,17 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   };
 
   if (!pick.channel) {
-    const decision = buildDecision({ ...baseDecision, gate: null, variant: { picked: null, method: 'none' }, credits: null });
+    // Say why in the owner's words when the only obstacle was their own audience choice.
+    // Among the channels this guest could be reached on at all (has an address, not switched off).
+    const reachable = checks.filter((c) => !c.ok && ladder.includes(c.channel) && c.reason !== 'no_address' && c.reason !== 'whatsapp_off');
+    const onlyAudience = reachable.length > 0 && reachable.every((c) => c.reason === 'audience');
+    const decision = buildDecision({
+      ...baseDecision,
+      gate: null,
+      variant: { picked: null, method: 'none' },
+      credits: null,
+      ...(onlyAudience ? { noChannel: { rule: 'channel_rules' as const, reason: 'audience', fact: 'the owner chose to message verified guests only' } } : {}),
+    });
     return skipWith(decision, a, sendKey);
   }
   const channel = pick.channel;
@@ -300,26 +345,45 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   );
   const variant = variants.find((v) => v.id === vpick.variantId)!;
   const vc = variantContent(variant, channel, lang)!;
-  const links = { ...DRY_RUN_LINKS };
-  if (!guestInfo?.locales?.[lang]?.directBookingUrl && !guestInfo?.locales?.en?.directBookingUrl) delete (links as any).booking;
-  const values = renderValues({
-    lang: vc.locale,
-    tz,
-    contact,
-    venueName: a.ctx?.venueName ?? '',
-    vars: inst.state.vars,
-    slots: a.pinned.slots,
-    offers: a.pinned.offers,
-    guestInfo,
-    links,
-  });
+  // Links: same-length stand-ins for pricing and the gate (real ones are minted only
+  // once the gate says yes), readable ones for the stored preview.
+  const bookingUrl = validBookingUrl(guestInfo?.locales?.[lang]?.directBookingUrl ?? guestInfo?.locales?.en?.directBookingUrl);
+  const guestId = inst.meta.context.guestId ?? contact.guestIds?.[contact.guestIds.length - 1] ?? null;
+  const priceLinks: Partial<Record<LinkKind, string>> = pricingLinks(['offer', 'rating', 'hub', 'booking']);
+  const previewLinks: Partial<Record<LinkKind, string>> = { ...DRY_RUN_LINKS };
+  for (const links of [priceLinks, previewLinks]) {
+    if (!bookingUrl) delete links.booking;
+    if (typeof inst.state.vars.offerKey !== 'string') delete links.offer;
+  }
+  const unsubscribeUrl = channel === 'email' && cfg.purpose === 'marketing' && mode === 'live' ? unsubscribeUrlFor(guestId, inst.meta.venueId, sendKey) : '';
+  if (unsubscribeUrl) priceLinks.unsubscribe = unsubscribeUrl;
+  else if (channel === 'email' && cfg.purpose === 'marketing' && mode === 'test') priceLinks.unsubscribe = DRY_RUN_LINKS.unsubscribe;
+  const valuesWith = (links: Partial<Record<LinkKind, string>>) =>
+    renderValues({
+      lang: vc.locale,
+      tz,
+      contact,
+      venueName: a.ctx?.venueName ?? '',
+      vars: inst.state.vars,
+      slots: a.pinned.slots,
+      offers: a.pinned.offers,
+      guestInfo,
+      links,
+    });
+  const values = valuesWith(priceLinks);
   const rendered = renderMessage(vc.content, channel, values);
-  const smsText = channel === 'sms' ? ensureSmsOptOutSuffix(rendered.text) : undefined;
+  const preheader = channel === 'email' ? renderText(String((vc.content as { preheader?: string }).preheader ?? ''), values) : null;
+  if (preheader?.unknown.length) rendered.missing.push(...preheader.unknown);
+  const previewRendered = renderMessage(vc.content, channel, maskSecretValues(valuesWith(previewLinks)));
+  const smsText = channel === 'sms' ? smsFinalText(rendered.text, vc.locale, String((vc.content as { text?: string }).text ?? '')) : undefined;
 
   // ── 6. Price + the full gate ──
   const creditConfig = await getCreditConfig();
   const price = cfg.purpose === 'marketing' ? creditsForMessage(creditConfig, channel, smsText) : 0;
-  const spendable = wallet ? spendableForChannel(wallet.channelBalances, channel) : null;
+  const providerCostMinor = providerCostForMessage(creditConfig, channel, smsText);
+  const segments = smsText !== undefined ? smsSegments(smsText) : null;
+  // A wallet in the red is suspended: nothing is spendable.
+  const spendable = wallet ? (wallet.suspended ? 0 : spendableForChannel(wallet.channelBalances, channel)) : null;
   const weekAgo = now - 7 * DAY_MS;
   const weekly = (np?.recentMarketingTouches ?? []).filter((t) => (tsMs(t.at) ?? 0) >= weekAgo).length;
   const tmplCaps = a.definition.caps;
@@ -361,44 +425,334 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     credits: { price, spendable: live ? spendable : null, waitStartedAt: inst.state.waiting?.creditsWaitStartedAt ?? null, queueHours: rules.creditQueueHours },
   };
   const gate = runGate(gateInput);
-  const decision = buildDecision({
-    ...baseDecision,
-    gate,
-    variant: { picked: variant.id, method: `${vpick.method}${vc.fallback ? ':en_fallback' : ''}` },
-    credits: cfg.purpose === 'marketing' ? { price, balance: spendable } : null,
-  });
+  const decisionFor = (g: GateResult) =>
+    buildDecision({
+      ...baseDecision,
+      gate: g,
+      variant: { picked: variant.id, method: `${vpick.method}${vc.fallback ? ':en_fallback' : ''}` },
+      credits: cfg.purpose === 'marketing' ? { price, balance: spendable } : null,
+    });
+  const decision = decisionFor(gate);
 
   const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, nodeId, sendKey, channel, variantId: variant.id, slot };
 
   // ── 5. Outcome ──
-  if (gate.verdict === 'defer' && gate.until !== null) {
-    const keepsIntended = gate.reason === 'paused' || gate.reason === 'lapse_unknown';
-    const firstOfReason = inst.state.waiting?.lastDeferReason !== gate.reason;
-    return {
-      kind: 'later',
-      at: gate.until,
-      intendedAt: keepsIntended ? intendedAt : gate.until,
-      slot,
-      reason: gate.reason ?? 'defer',
-      creditsWaitStartedAt: gate.reason === 'credits' ? inst.state.waiting?.creditsWaitStartedAt ?? now : undefined,
-      events: firstOfReason ? [{ ...common, type: 'send.deferred', occurredAt: now, data: { decision, until: gate.until } }] : [],
-    };
-  }
+  if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz });
 
   if (gate.verdict === 'allow' && mode === 'test') {
-    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered, decision, price, ladderPos: pick.ladderPos, contact, common });
+    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, price, ladderPos: pick.ladderPos, contact, common });
   }
 
   if (gate.verdict === 'allow') {
-    // Live dispatch arrives with the adapters in PR B; until then rule 1 blocks it.
-    return skipWith({ ...decision, result: 'block', rule: 'system', reason: 'channel_not_ready' }, a, sendKey, common);
+    return dispatchLive({
+      a,
+      sendKey,
+      channel,
+      cfg,
+      decision,
+      decisionFor,
+      gateInput,
+      variantId: variant.id,
+      locale: vc.locale,
+      content: vc.content,
+      slot,
+      intendedAt,
+      ladderPos: pick.ladderPos,
+      contact,
+      rendered,
+      previewRendered,
+      valuesWith,
+      price,
+      providerCostMinor,
+      rateCardVersion: creditConfig.rateCardVersion,
+      creditConfig,
+      guestId,
+      bookingUrl,
+      unsubscribeUrl,
+      common,
+      tz,
+    });
   }
 
+  if (gate.verdict === 'block') void alertFor(gate.reason, a, tz);
   return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off');
 }
 
-function skipOutcome(reason: string): SendOutcome {
-  return { kind: 'done', outcome: 'skipped', touch: null, revAfter: null, suppress: false, events: [{ type: 'send.skipped', occurredAt: Date.now(), data: { reason } }] };
+/** A held-back send: when to look again, and the "why" once per reason. */
+function deferred(
+  gate: GateResult,
+  decision: DecisionRecord,
+  a: SendArgs,
+  x: { intendedAt: number; slot: string; sendKey: string; common: Record<string, unknown>; tz: string; revAfter?: number | null; dispatchAttempts?: number },
+): SendOutcome {
+  const { inst } = a;
+  const keepsIntended = gate.reason === 'paused' || gate.reason === 'lapse_unknown';
+  const firstOfReason = inst.state.waiting?.lastDeferReason !== gate.reason;
+  if (firstOfReason) {
+    void alertFor(gate.reason, a, x.tz);
+    // Waiting for credits: nudge the auto top-up once (plan §3.5 rule 10).
+    if (gate.reason === 'credits') void onCreditsSpent(inst.meta.tenantUserId).catch(() => undefined);
+  }
+  return {
+    kind: 'later',
+    at: gate.until!,
+    intendedAt: keepsIntended ? x.intendedAt : gate.until!,
+    slot: x.slot,
+    reason: gate.reason ?? 'defer',
+    // The 72 h credit wait keeps counting through quiet hours and pauses.
+    creditsWaitStartedAt: gate.reason === 'credits' ? inst.state.waiting?.creditsWaitStartedAt ?? a.now : inst.state.waiting?.creditsWaitStartedAt,
+    ...(x.revAfter !== undefined ? { revAfter: x.revAfter } : {}),
+    // "Try later" attempts survive a quiet-hours or credits hold of the same step.
+    ...((x.dispatchAttempts ?? (inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts : undefined)) !== undefined
+      ? { dispatchAttempts: x.dispatchAttempts ?? inst.state.waiting!.dispatchAttempts }
+      : {}),
+    events: firstOfReason ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until } } as EventInput] : [],
+  };
+}
+
+const SETUP_BLOCKS = new Set(['channel_not_ready', 'rate_card_invalid', 'provider_unavailable', 'email_unsubscribe_not_configured', 'unsupported_format']);
+
+/** Tells HeidiFi — once per venue, reason and day — when sends stop for a reason a person must fix. */
+async function alertFor(reason: string | null, a: SendArgs, tz: string): Promise<void> {
+  if (!reason || a.inst.meta.mode !== 'live') return;
+  const day = dayKey(a.now, tz);
+  const venue = a.ctx?.venueName || a.inst.meta.venueId;
+  if (reason === 'venue_ceiling' || reason === 'platform_ceiling') {
+    const venueWide = reason === 'venue_ceiling';
+    await raiseAlert({
+      kind: venueWide ? 'venue_ceiling' : 'platform_ceiling',
+      dedupeKey: `${reason}:${venueWide ? a.inst.meta.venueId : 'all'}:${day}`,
+      audience: 'heidifi',
+      tenantUserId: a.inst.meta.tenantUserId,
+      venueId: a.inst.meta.venueId,
+      subject: venueWide ? `Adaptive: daily send limit reached at ${venue}` : 'Adaptive: platform daily send limit reached',
+      text: venueWide
+        ? `${venue} reached ${a.settings.safety.maxSendsPerVenuePerDay} messages today. Further sends wait until tomorrow.`
+        : `The platform reached ${a.settings.safety.maxSendsPlatformPerDay} messages in 24 hours. Further sends wait.`,
+    });
+    return;
+  }
+  if (SETUP_BLOCKS.has(reason)) {
+    await raiseAlert({
+      kind: 'setup_block',
+      dedupeKey: `setup:${reason}:${a.inst.meta.venueId}:${day}`,
+      audience: 'heidifi',
+      tenantUserId: a.inst.meta.tenantUserId,
+      venueId: a.inst.meta.venueId,
+      subject: `Adaptive: sends blocked at ${venue} (${reason})`,
+      text: `A ${a.inst.meta.journeyKey} message at ${venue} was not sent: ${reason}. This needs a fix on HeidiFi's side.`,
+    });
+  }
+}
+
+/** A channel skipped for every guest because the worker lacks its settings (not a venue problem). */
+async function alertSkippedChannel(channel: Channel, reason: string, a: SendArgs): Promise<void> {
+  if (a.inst.meta.mode !== 'live') return;
+  const what = reason === 'channel_not_ready' ? 'its provider credentials are missing on the adaptive-worker app' : 'UNSUBSCRIBE_SIGNING_SECRET / SERVER_PUBLIC_URL are missing on the adaptive-worker app';
+  await raiseAlert({
+    kind: 'setup_block',
+    dedupeKey: `setup_skip:${reason}:${channel}:${dayKey(a.now, 'Europe/Zurich')}`,
+    audience: 'heidifi',
+    subject: `Adaptive: ${channel.toUpperCase()} is skipped for live guests (${reason})`,
+    text: `${channel.toUpperCase()} messages are skipped at live venues because ${what}. Guests get the next channel on their journey's ladder where they have one.`,
+  });
+}
+
+interface LiveArgs {
+  a: SendArgs;
+  sendKey: string;
+  channel: Channel;
+  cfg: SendConfig;
+  decision: DecisionRecord;
+  decisionFor: (g: GateResult) => DecisionRecord;
+  gateInput: GateInput;
+  variantId: string;
+  locale: Lang;
+  content: any;
+  slot: string;
+  intendedAt: number;
+  ladderPos: number;
+  contact: ContactDoc;
+  rendered: { subject?: string; text: string; fieldsUsed: string[] };
+  previewRendered: { subject?: string; text: string };
+  valuesWith: (links: Partial<Record<LinkKind, string>>) => Record<string, string | undefined>;
+  price: number;
+  providerCostMinor: number;
+  rateCardVersion: number;
+  creditConfig: Awaited<ReturnType<typeof getCreditConfig>>;
+  guestId: string | null;
+  bookingUrl: string | null;
+  unsubscribeUrl: string;
+  common: Record<string, unknown>;
+  tz: string;
+}
+
+/** Live: mint the links, build the exact message, then the three phases (send/dispatch.ts). */
+async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
+  const { a, sendKey } = d;
+  const { inst } = a;
+  const marketing = d.cfg.purpose === 'marketing';
+  const block = (reason: string): SendOutcome => {
+    void alertFor(reason, a, d.tz);
+    return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common);
+  };
+  if (d.channel === 'whatsapp') return block('channel_not_ready');
+  const channel = d.channel;
+  const adapter = channelAdapters[channel];
+  if (!adapter?.ready()) return block('channel_not_ready');
+  if (marketing && (!Number.isInteger(d.price) || d.price < 1)) return block('rate_card_invalid');
+  const attempts = inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts ?? 0 : 0;
+  if (attempts >= MAX_DISPATCH_ATTEMPTS) return block('provider_unavailable');
+  const address = channel === 'email' ? d.contact.email : d.contact.phoneE164;
+  if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common);
+  if (channel === 'email' && marketing && !d.unsubscribeUrl) return block('email_unsubscribe_not_configured');
+
+  // Real links, only now that the gate said yes.
+  const preheaderFields = parseMergeExpressions(String(d.content.preheader ?? '')).map((e) => canonicalField(e.name));
+  const kinds = linkKindsUsed([...d.rendered.fieldsUsed, ...preheaderFields]);
+  const minted = await mintLinks(kinds, {
+    venueId: inst.meta.venueId,
+    sendKey,
+    instanceId: inst.id,
+    contactId: inst.meta.contactId,
+    variantId: d.variantId,
+    channel,
+    guestId: d.guestId ?? '',
+    bookingUrl: d.bookingUrl,
+  });
+  const finalValues = d.valuesWith({ ...minted.urls, ...(d.unsubscribeUrl ? { unsubscribe: d.unsubscribeUrl } : {}) });
+  const final = renderMessage(d.content, channel, finalValues);
+  if (final.missing.length) return block(missingReason(final.missing));
+
+  let message: Outbound;
+  let smsBody: string | null = null;
+  if (channel === 'sms') {
+    smsBody = smsFinalText(final.text, d.locale, String(d.content.text ?? ''));
+    message = { kind: 'sms', to: address, body: smsBody, sendKey };
+  } else {
+    const poweredBy = await getEntitlements(inst.meta.tenantUserId)
+      .then((e) => !e.flags?.hidePoweredBy)
+      .catch(() => true);
+    const composed = composeEmail({
+      body: final.text,
+      bodyFormat: d.content.bodyFormat ?? 'text',
+      preheader: renderText(String(d.content.preheader ?? ''), finalValues).text,
+      lang: d.locale,
+      unsubscribeUrl: marketing ? d.unsubscribeUrl : null,
+      poweredBy,
+    });
+    if ('error' in composed) return block('unsupported_format');
+    message = { kind: 'email', to: address, subject: final.subject ?? '', html: composed.html, text: composed.text, sendKey, unsubscribeUrl: marketing ? d.unsubscribeUrl : null };
+  }
+  // Priced on the placeholders; the real links have the same length, so this is the same number.
+  const price = marketing ? creditsForMessage(d.creditConfig, channel, smsBody ?? undefined) : 0;
+  if (price !== d.price) console.warn('[ADAPTIVE] final SMS priced differently than the gate saw:', sendKey, d.price, price);
+  const segments = smsBody !== null ? smsSegments(smsBody) : null;
+  const preview = (d.previewRendered.subject ? `${d.previewRendered.subject} — ` : '') + d.previewRendered.text;
+  const pointId = channel === 'email' ? d.contact.emailPointId : d.contact.phonePointId;
+  const doc: JourneySendDoc = {
+    tenantUserId: inst.meta.tenantUserId,
+    venueId: inst.meta.venueId,
+    contactId: inst.meta.contactId,
+    instanceId: inst.id,
+    journeyKey: inst.meta.journeyKey,
+    nodeId: a.nodeId,
+    templateVersion: inst.meta.templateVersion,
+    configVersion: inst.meta.configVersion,
+    mode: 'live',
+    purpose: d.cfg.purpose,
+    channel,
+    toPointId: pointId ?? null,
+    toMasked: maskDestination(channel, address),
+    variantId: d.variantId,
+    locale: d.locale,
+    slot: d.slot,
+    status: 'dispatching',
+    provider: adapter.provider,
+    providerMessageId: null,
+    errorCode: null,
+    errorMessage: null,
+    credits: marketing ? { amount: price, ledgerId: null, rateCardVersion: d.rateCardVersion } : null,
+    providerCostMinor: d.providerCostMinor,
+    smsSegments: segments,
+    shortCodes: minted.codes,
+    content: { ...(d.previewRendered.subject ? { subject: d.previewRendered.subject } : {}), preview: preview.slice(0, 280), bodyHash: sha256Hex(d.rendered.text).slice(0, 32) },
+    engagement: { deliveredAt: null, openedAt: null, firstClickAt: null, clicks: 0, repliedAt: null },
+    attribution: null,
+    decision: d.decision,
+    dispatchLease: dispatchLease(a.workerId),
+    createdAt: new Date(a.now),
+    sentAt: null,
+    updatedAt: new Date(a.now),
+    expireAt: retentionFrom(a.now),
+    schemaVersion: SCHEMA_VERSION,
+    ladderPos: d.ladderPos,
+    kind: 'journey',
+  };
+  const live: LiveSend = {
+    inst,
+    nodeId: a.nodeId,
+    sendKey,
+    now: a.now,
+    workerId: a.workerId,
+    channel,
+    purpose: d.cfg.purpose,
+    adapter,
+    doc,
+    message,
+    gateInput: d.gateInput,
+    pointId: pointId ?? null,
+    intendedAt: d.intendedAt,
+    slot: d.slot,
+    variantId: d.variantId,
+    ladderPos: d.ladderPos,
+    common: d.common,
+    pendingEvents: [...(a.pendingEvents ?? [])],
+  };
+
+  // ── Phase 1: re-check and claim ──
+  const claim = await claimSend(live);
+  // The claim wrote this run's earlier events; the final commit must not write them again.
+  if (claim.kind === 'ok') a.pendingEvents?.splice(0, live.pendingEvents.length);
+  if (claim.kind === 'conflict') return { kind: 'conflict' };
+  if (claim.kind === 'gate') {
+    // Something changed since the first look (paused, a STOP, the weekly limit…).
+    const g = claim.gate;
+    const decision = d.decisionFor(g);
+    if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz });
+    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off');
+  }
+
+  // ── Phase 2 + 3: the provider, then the record ──
+  const result = await callProvider(adapter, message);
+  const recorded = await recordResult(live, result, attempts);
+  if (recorded.kind === 'sent') {
+    return {
+      kind: 'done',
+      outcome: 'sent',
+      touch: { channel, variantId: d.variantId, slot: d.slot, sendKey, purpose: d.cfg.purpose, at: a.now },
+      ladderPos: d.ladderPos,
+      revAfter: claim.revAfter,
+      suppress: false,
+      events: [],
+    };
+  }
+  if (recorded.kind === 'failed') return { kind: 'done', outcome: 'skipped', touch: null, revAfter: claim.revAfter, suppress: false, events: [] };
+  return {
+    kind: 'later',
+    at: a.now + recorded.delayMs,
+    intendedAt: d.intendedAt,
+    slot: d.slot,
+    reason: 'provider_retry',
+    creditsWaitStartedAt: inst.state.waiting?.creditsWaitStartedAt,
+    dispatchAttempts: attempts + 1,
+    revAfter: claim.revAfter,
+    events: [],
+  };
+}
+
+function skipOutcome(reason: string, at: number = Date.now()): SendOutcome {
+  return { kind: 'done', outcome: 'skipped', touch: null, revAfter: null, suppress: false, events: [{ type: 'send.skipped', occurredAt: at, data: { reason } }] };
 }
 
 function skipWith(decision: DecisionRecord, a: SendArgs, sendKey: string, common?: Record<string, unknown>, suppress = false): SendOutcome {

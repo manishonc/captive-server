@@ -25,6 +25,11 @@ export const COL = {
   journeyEvents: 'CaptivePortal_JourneyEvents',
   journeyStats: 'CaptivePortal_JourneyStats',
   venueGuestInfo: 'CaptivePortal_VenueGuestInfo',
+  // Sending (PR B)
+  alerts: 'CaptivePortal_AdaptiveAlerts',
+  breakers: 'CaptivePortal_AdaptiveBreakers',
+  /** Local sandbox only: messages the fake provider "sent". */
+  sandboxOutbox: 'CaptivePortal_AdaptiveSandboxOutbox',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',
