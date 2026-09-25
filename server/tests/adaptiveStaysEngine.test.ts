@@ -22,7 +22,7 @@ import { aggregate, countsFor, type RollupEvent } from '../src/adaptive/rollups/
 import { missingReason, renderMessage, renderValues, variantContent, variantEligible, guestInfoHasContent } from '../src/adaptive/engine/renderSend';
 import { buildSeedPlan } from '../src/adaptive/seed/buildSeed';
 import { resolveStayTimes, stayInstants } from '../src/adaptive/stays/times';
-import { seenDuring, seenDuringAny, windowCandidates, type StaySnap } from '../src/adaptive/stays/plan';
+import { COVER_MARGIN_MS, guideStillSends, seenDuring, seenDuringAny, windowCandidates, type StaySnap } from '../src/adaptive/stays/plan';
 
 let passed = 0;
 let failed = 0;
@@ -193,6 +193,15 @@ test('a cancelled stay skips service and marketing sends, in test runs too, with
   }
   assertEqual(runGate(gateInput({ stayCancelled: false })).verdict, 'allow', 'not cancelled: allowed');
   assertEqual(runGate(gateInput()).verdict, 'allow', 'not a stay journey: allowed');
+});
+
+test('the checkout overlap rule near the freeze edge leans towards sending (both messages rather than neither)', () => {
+  const moment = zonedTime(2026, 10, 16, 17, 0, TZ).getTime();
+  const freeze = 60 * 60_000;
+  assert(guideStillSends(moment, moment - 30 * 60_000, freeze), 'paused 30 min before: Stay guide still sends (the reminder stays quiet)');
+  assert(!guideStillSends(moment, moment - 59 * 60_000, freeze), 'paused 59 min before: its send may land after the freeze → the reminder goes');
+  assert(guideStillSends(moment, moment - freeze + COVER_MARGIN_MS, freeze) && !guideStillSends(moment, moment - freeze + COVER_MARGIN_MS - 1, freeze), 'the edge is freeze − 15 min');
+  assert(!guideStillSends(moment, null, freeze), 'never switched off: not this rule');
 });
 
 test('the owner\'s sentence, EN and DE', () => {

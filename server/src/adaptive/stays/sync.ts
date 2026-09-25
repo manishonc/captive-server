@@ -431,7 +431,7 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
   }
 
   // ── The sync ──
-  const hash = parse ? staysHash(parse.stays) : null;
+  const hash = parse ? staysHash(parse.stays, parse.skippedLongUids) : null;
   const unchanged = !parse || (Boolean(feed.lastContentHash) && hash === feed.lastContentHash);
   const known = await loadFeedStays(feedId);
   await opts.onRead?.();
@@ -443,7 +443,8 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
     // A 304 has no body: the absent set is the last successful parse's, still countable.
     absent = (Array.isArray(feed.lastMissingStayIds) ? feed.lastMissingStayIds : []).filter((id) => countableIds.has(id));
   } else {
-    const inContent = new Set(parse!.stays.map((p) => stayIdFor(feedId, p.uid)));
+    // A reservation skipped only for being over 90 nights is still in the calendar: seen, not missing.
+    const inContent = new Set([...parse!.stays.map((p) => p.uid), ...parse!.skippedLongUids].map((uid) => stayIdFor(feedId, uid)));
     absent = countable.filter((s) => !inContent.has(s.id)).map((s) => s.id);
   }
   // The owner saved a different link: bookings missing from it are expected, so no hold (D-C35).
@@ -469,16 +470,23 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
   const byId = new Map(known.map((s) => [s.id, s]));
   // Most polls change nothing: a stay whose snapshot needs no write gets no transaction.
   // (The only other writer, a link, touches none of the fields this decides on.)
+  // A stay that is in the content is seen, so its misses reset — also on a suspect parse:
+  // that can't cancel anything; the guard only holds back the miss pass below.
   const upsert = async (id: string, p: { uid: string; checkIn: string; checkOut: string }) => {
     const before = byId.get(id) ?? null;
     const instants = stayInstants(p.checkIn, p.checkOut, tz, c.times);
-    if (c.lost || (before && decideUpsert(before, p, instants, { today, now, resetMisses: !sus.suspect }).kind === 'none')) return;
-    count(await applyUpsert(c, id, p, !sus.suspect));
+    if (c.lost || (before && decideUpsert(before, p, instants, { today, now, resetMisses: true }).kind === 'none')) return;
+    count(await applyUpsert(c, id, p, true));
     await tick();
   };
   if (!unchanged) {
-    // New stays and date changes apply even on a suspect parse; it just resets nothing.
+    // New stays and date changes apply even on a suspect parse.
     for (const p of parse!.stays) await upsert(stayIdFor(feedId, p.uid), p);
+    // A known stay extended past 90 nights: seen, kept at the dates it had.
+    for (const uid of parse!.skippedLongUids) {
+      const s = byId.get(stayIdFor(feedId, uid));
+      if (s && s.status !== 'cancelled') await upsert(s.id, { uid, checkIn: s.checkIn, checkOut: s.checkOut });
+    }
   } else {
     // The same content: the stays in it are seen again (misses reset), and a Guest info
     // check-in/out time change still moves them (D-C20).

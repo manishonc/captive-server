@@ -5,7 +5,7 @@
  *
  *  - One feed per venue: doc `CaptivePortal_StayFeeds/venue_{venueId}`, read and written in
  *    one transaction (D-C34), so two saves at once give one feed.
- *  - Airbnb venues only (D-C7). The link is stored as it is and only ever shown masked;
+ *  - Airbnb venues only (D-C7). The link is stored unencrypted, in its standard form, and only ever shown masked;
  *    no error carries it (`new URL()` would put it on `err.input`, and the routers print
  *    unexpected errors whole).
  *  - Nothing is scheduled while the account's launch mode is off (stage 0 writes nothing
@@ -52,8 +52,8 @@ async function ownedVenue(tenantUserId: string, venueId: string, opts: { airbnb:
 }
 
 /**
- * The link to store: trimmed, `webcal://` and `http://` read as `https://`, and passing the
- * fetcher's rules (https, port 443, no credentials, no IP literal). A `sandbox:calendar/…`
+ * The link to store: trimmed, `webcal://` and `http://` read as `https://`, passing the
+ * fetcher's rules (https, port 443, no credentials, no IP literal), in its standard form. A `sandbox:calendar/…`
  * link only in the local sandbox. A bad link → 400 with no part of it in the error.
  */
 export function normalizeFeedUrl(raw: unknown): string {
@@ -67,12 +67,12 @@ export function normalizeFeedUrl(raw: unknown): string {
   }
   const url = trimmed.replace(/^webcal:\/\//i, 'https://').replace(/^http:\/\//i, 'https://');
   try {
-    checkFeedUrl(url);
+    // The standard form, so `HTTPS://`, an upper-case host or `:443` is the same link, not a new one.
+    return checkFeedUrl(url).href;
   } catch (err) {
     const code = err instanceof FeedFetchError ? err.code : 'BAD_URL';
     throw new ApiError('bad_request', code === 'BAD_URL' ? INVALID : feedWords(code) ?? INVALID);
   }
-  return url;
 }
 
 const iso = (v: unknown) => {

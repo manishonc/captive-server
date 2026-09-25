@@ -34,7 +34,7 @@ import { enabledJourneys, journeyOnState, loadContact, loadVenueContext, type Ve
 import { enrolForEvent } from '../engine/enrol';
 import { instanceRef, loadInstance } from '../engine/instanceStore';
 import { loadStay, type LoadedStay } from './store';
-import { stayFacts } from './plan';
+import { guideStillSends, stayFacts } from './plan';
 import { MOMENT_GRACE_MS, momentFor, planMoment, stayTriggerKey } from './times';
 
 export interface StayTriggerPayload {
@@ -157,7 +157,8 @@ function stricter(linkMode: RunMode | null, current: RunMode): RunMode {
  * this stay's Stay guide covers the guest, i.e. at the reminder's moment
  *  - the stay has 2+ nights (for 1 night Stay guide's checkout step is already past), and
  *  - Stay guide is on by the gate's own rule (on, or switched off / paused within the
- *    freeze window before the moment — then the gate still sends its checkout message), and
+ *    freeze window before the moment — then the gate still sends its checkout message; with
+ *    a 15 min margin for the worker's lag, so near the edge the reminder goes too), and
  *  - this stay's Stay guide instance is active or completed.
  * Read from the Stay and the instance docs — never from "has the other task run yet"
  * (both fire at the same moment, 4 tasks run at a time).
@@ -170,7 +171,7 @@ export async function stayGuideCovers(ctx: VenueContext, stay: LoadedStay, momen
   if (on.venueOn && on.journeyOn) return true;
   const cat = await loadCatalogue();
   const freezeMs = (Number.isFinite(cat.config.freezeWindowMinutes) ? cat.config.freezeWindowMinutes : 60) * MINUTE_MS;
-  return on.offSinceAt !== null && momentAt <= on.offSinceAt + freezeMs;
+  return guideStillSends(momentAt, on.offSinceAt, freezeMs);
 }
 
 export type StayTriggerOutcome = 'gone' | 'stale' | 'too_late' | 'off' | 'switched_off' | 'not_installed' | 'covered' | 'enrolled' | 'not_enrolled';

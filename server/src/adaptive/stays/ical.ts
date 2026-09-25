@@ -62,6 +62,11 @@ export interface IcalParse {
   counts: IcalCounts;
   /** Any event's SUMMARY starts with "Reserved" (whatever became of the event). */
   hasReservedEvent: boolean;
+  /**
+   * UIDs of reservations skipped only for being longer than MAX_NIGHTS: still in the calendar,
+   * so a known stay extended past 90 nights is seen (kept as it was), never missed.
+   */
+  skippedLongUids: string[];
 }
 
 export class IcalParseError extends Error {
@@ -299,11 +304,12 @@ function sourceOf(prodid: string, events: RawEvent[]): FeedSource {
   if (uids.some((u) => u.endsWith('@airbnb.com')) || events.some((e) => AIRBNB_RESERVATION.test(textOf(e, 'DESCRIPTION')) && /airbnb\./i.test(textOf(e, 'DESCRIPTION')))) {
     return 'airbnb';
   }
-  if (uids.some((u) => u.endsWith('@booking.com'))) return 'booking';
-  // Booking.com's own marker — unless the feed also has reservations (a PMS feed mixing in
-  // Booking.com closures): then its "Reserved" events are still stays.
+  // Booking.com's own markers (its UIDs, its closures) — unless the feed also has
+  // reservations (a PMS feed passing Booking.com events through): then its "Reserved"
+  // events are still stays.
   const summaries = events.map((e) => textOf(e, 'SUMMARY'));
-  if (summaries.some((s) => BOOKING_CLOSED.test(s)) && !summaries.some((s) => RESERVED.test(s))) return 'booking';
+  if (summaries.some((s) => RESERVED.test(s))) return 'generic';
+  if (uids.some((u) => u.endsWith('@booking.com')) || summaries.some((s) => BOOKING_CLOSED.test(s))) return 'booking';
   return 'generic';
 }
 
@@ -326,6 +332,7 @@ export function parseIcal(input: Buffer | string, venueTz: string): IcalParse {
   const source = sourceOf(prodid, events);
   const counts: IcalCounts = { events: events.length, stays: 0, ignored: 0, skippedRecurring: 0, skippedInvalid: 0, skippedLong: 0, cancelled: 0, duplicateUid: 0, overCap };
   const byUid = new Map<string, ParsedStay>();
+  const longUids = new Set<string>();
   let hasReservedEvent = false;
 
   for (const ev of events) {
@@ -351,6 +358,7 @@ export function parseIcal(input: Buffer | string, venueTz: string): IcalParse {
     }
     if (nights > MAX_NIGHTS) {
       counts.skippedLong += 1;
+      if (isStay(source, ev)) longUids.add(uid);
       continue;
     }
     if (!isStay(source, ev)) {
@@ -375,7 +383,8 @@ export function parseIcal(input: Buffer | string, venueTz: string): IcalParse {
 
   const stays = [...byUid.values()].sort((a, b) => (a.checkIn === b.checkIn ? (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0) : a.checkIn < b.checkIn ? -1 : 1));
   counts.stays = stays.length;
-  return { source, stays, counts, hasReservedEvent };
+  const skippedLongUids = [...longUids].filter((u) => !byUid.has(u)).sort();
+  return { source, stays, counts, hasReservedEvent, skippedLongUids };
 }
 
 /**
@@ -384,11 +393,20 @@ export function parseIcal(input: Buffer | string, venueTz: string): IcalParse {
  * feed, or an Airbnb feed with only blocks, is a normal feed with no stays.
  */
 export function isUnsupported(parse: Pick<IcalParse, 'source' | 'counts' | 'hasReservedEvent'>, reservedSeen: boolean): boolean {
+  // A feed that gave a stay stays supported, so its last booking can still be cancelled —
+  // also when only Booking.com-looking closures are left in it.
+  if (reservedSeen) return false;
   if (parse.source === 'booking') return true;
   return parse.source === 'generic' && parse.counts.events > 0 && !parse.hasReservedEvent && !reservedSeen;
 }
 
-/** Hash of the normalized stays — the raw body changes on every fetch (DTSTAMP). */
-export function staysHash(stays: ParsedStay[]): string {
-  return contentChecksum(stays.map((s) => [s.uid, s.checkIn, s.checkOut]));
+/**
+ * Hash of the normalized stays — the raw body changes on every fetch (DTSTAMP). Over-long
+ * reservations count too (so one leaving the calendar is a change); none → the same hash as
+ * before they existed.
+ */
+export function staysHash(stays: ParsedStay[], skippedLongUids: string[] = []): string {
+  const rows: string[][] = stays.map((s) => [s.uid, s.checkIn, s.checkOut]);
+  for (const uid of skippedLongUids) rows.push(['long', uid]);
+  return contentChecksum(rows);
 }

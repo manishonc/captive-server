@@ -213,8 +213,9 @@ export interface JourneyEventDoc {
 
 /**
  * `CaptivePortal_StayFeeds/venue_{venueId}` — one booking calendar per venue (plan §4.1,
- * Appendix A; the doc id is D-C34). The URL is stored as it is and never logged or shown
- * unmasked; `lastError` holds a code, never a message.
+ * Appendix A; the doc id is D-C34). The URL is stored unencrypted, in its standard form
+ * (`normalizeFeedUrl`), and never logged or shown unmasked; `lastError` holds a code, never
+ * a message.
  */
 export interface StayFeedDoc {
   tenantUserId: string;

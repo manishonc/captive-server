@@ -104,6 +104,9 @@ export async function devClock(body: { advance?: string; reset?: boolean; at?: s
   else if (body.at) {
     const at = Date.parse(body.at);
     if (!Number.isFinite(at)) throw new ApiError('bad_request', 'at must be an ISO date-time');
+    // Forward only: activations are stamped in real time, so a clock behind it would drop
+    // every event before them (enrol skips events before an install went live).
+    if (at < Date.now()) throw new ApiError('bad_request', 'at must not be earlier than the real time (use reset)');
     await setSandboxClock(at);
   } else if (body.advance) await advanceSandboxClock(durationMs(body.advance));
   await refreshClock(true);
@@ -372,8 +375,8 @@ export async function devStaySync(body: unknown) {
   await refreshClock(true);
   const settings = await readEngineSettings();
   const result = await pollFeed(stayFeedId(p.venueId), { now: now(), settings }, { kind: 'manual', owner: `dev:${randomUUID()}` });
-  // Written outside a worker task: arm the venue's daily numbers here.
-  await ensureRollup(p.venueId, tenant);
+  // Written outside a worker task: arm the venue's daily numbers here (only when it wrote).
+  if (result.outcome !== 'off' && result.outcome !== 'no_feed') await ensureRollup(p.venueId, tenant);
   const view = await getStayFeed(tenant, p.venueId);
   return { now: new Date(now()).toISOString(), result, ...view };
 }

@@ -27,8 +27,8 @@ import { stayFeedId } from '../../src/adaptive/store/collections';
 import { readEngineSettingsStrict } from '../../src/adaptive/store/engineSettings';
 import { pollFeed, stayFeedWatchdog } from '../../src/adaptive/stays/sync';
 import { putSandboxCalendar } from '../../src/adaptive/stays/source';
-import { checkStayFeed, deleteStayFeed, getStayFeed, saveStayFeed } from '../../src/adaptive/service/stays';
-import { getEngineStatus } from '../../src/adaptive/service/engine';
+import { checkStayFeed, deleteStayFeed, getStayFeed, normalizeFeedUrl, saveStayFeed } from '../../src/adaptive/service/stays';
+import { devClock, getEngineStatus } from '../../src/adaptive/service/engine';
 import { rollupVenue } from '../../src/adaptive/rollups/rollup';
 import { checkIndexes } from '../../src/adaptive/worker/indexCheck';
 import adaptiveRouter from '../../src/adaptive/api/router';
@@ -273,6 +273,65 @@ async function main() {
     assertEqual([byUid['old@x'].contactId, byUid['old@x'].status, Boolean(byUid['new@x'].contactId)], [null, 'confirmed', true], 'linked to the new booking');
   });
 
+  await test('a known stay extended past 90 nights stays as it was (not missing, never cancelled)', async () => {
+    await freshStay([{ uid: 'long@x', checkIn: day(1), checkOut: day(61) }]);
+    await writeCalendar('r', [{ uid: 'long@x', checkIn: day(1), checkOut: day(101) }]);
+    for (let i = 0; i < 3; i += 1) {
+      const r = await sync();
+      assertEqual([r.outcome, r.missed, r.cancelled], ['synced', 0, 0], `poll ${i + 1}: nothing missing`);
+      await setClock(now() + 31 * 60_000);
+    }
+    const st = (await staysAt())[0];
+    assertEqual([st.status, st.checkOut, st.missingCount], ['confirmed', day(61), 0], 'confirmed, at the dates it had');
+    await writeCalendar('r', []);
+    assertEqual((await sync()).missed, 1, 'when it really leaves the calendar, it is missed');
+  });
+
+  await test('a suspect parse still resets the misses of the stays that are in it', async () => {
+    const A = { uid: 'a@x', checkIn: day(1), checkOut: day(3) };
+    const B = { uid: 'b@x', checkIn: day(4), checkOut: day(6) };
+    const X = { uid: 'x@x', checkIn: day(8), checkOut: day(10) };
+    await freshStay([A, B, X]);
+    const x = async () => (await staysAt()).find((st) => st.externalUid === 'x@x')!;
+    await writeCalendar('r', [A, B]);
+    assertEqual((await sync()).missed, 1, 'X missing once');
+    await setClock(now() + 31 * 60_000);
+    await writeCalendar('r', [X]);
+    const r = await sync();
+    assertEqual([r.feedWarning, r.missed, (await x()).missingCount], ['mass_missing', 0, 0], 'A and B gone at once: held; X is in it → its miss is reset');
+    await setClock(now() + 31 * 60_000);
+    await writeCalendar('r', [A, B]);
+    assertEqual((await sync()).cancelled, 0, 'X gone alone again: a first miss, not a cancellation');
+    assertEqual([(await x()).status, (await x()).missingCount], ['confirmed', 1], 'still confirmed');
+  });
+
+  await test('a PMS feed with a Booking.com closure: its reservation is a stay; once only the closure is left it is missed and cancelled', async () => {
+    const pms = (withBooking: boolean) =>
+      [
+        'BEGIN:VCALENDAR',
+        'PRODID:-//Some PMS//EN',
+        ...(withBooking ? ['BEGIN:VEVENT', 'UID:res-1@pms.test', `DTSTART;VALUE=DATE:${day(2).replace(/-/g, '')}`, `DTEND;VALUE=DATE:${day(5).replace(/-/g, '')}`, 'SUMMARY:Reserved - GUESTNAME', 'END:VEVENT'] : []),
+        'BEGIN:VEVENT',
+        'UID:8736@booking.com',
+        `DTSTART;VALUE=DATE:${day(9).replace(/-/g, '')}`,
+        `DTEND;VALUE=DATE:${day(11).replace(/-/g, '')}`,
+        'SUMMARY:CLOSED - Not available',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n') + '\r\n';
+    await freshStay([]);
+    await putSandboxCalendar('pms', pms(true));
+    await saveStayFeed(R.tenant, R.venueId, 'sandbox:calendar/pms', ACTOR);
+    await runDue();
+    assertEqual((await staysAt()).map((st) => st.status), ['confirmed'], 'a stay from the reservation');
+    await putSandboxCalendar('pms', pms(false));
+    const first = await sync();
+    assertEqual([first.outcome, first.missed], ['synced', 1], 'not unsupported: the miss counts');
+    await setClock(now() + 31 * 60_000);
+    assertEqual((await sync()).cancelled, 1, 'cancelled');
+    assertEqual((await feedDoc())!.feedWarning, null, 'no unsupported warning');
+  });
+
   await test('two bookings vanishing at once: held 24 h (mass_missing, one alert, new stays still apply), then cancelled on 304s', async () => {
     await freshStay([
       { uid: 'a@x', checkIn: day(1), checkOut: day(3) },
@@ -353,6 +412,19 @@ async function main() {
   });
 
   console.log('\nNever leaks the link');
+
+  await test('the same link typed differently is the same link; the dev clock moves forward only', async () => {
+    const plain = normalizeFeedUrl('https://www.airbnb.com/calendar/ical/1.ics?s=abc');
+    assertEqual(normalizeFeedUrl('HTTPS://WWW.AIRBNB.COM:443/calendar/ical/1.ics?s=abc'), plain, 'scheme, host case and :443');
+    assertEqual(normalizeFeedUrl('webcal://www.airbnb.com/calendar/ical/1.ics?s=abc'), plain, 'webcal://');
+    let refused = '';
+    try {
+      await devClock({ at: new Date(Date.now() - 3_600_000).toISOString() });
+    } catch (err) {
+      refused = String((err as Error).message);
+    }
+    assert(refused.includes('earlier than the real time'), `an \`at\` in the past is refused: ${refused}`);
+  });
 
   await test('LEAKCHECK: a malformed link reaches no response, log line, feed field or task error', async () => {
     await freshStay([]);

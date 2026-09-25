@@ -76,7 +76,7 @@ for (const [a, p] of [
   DENY.addSubnet(a, p, 'ipv4');
 }
 for (const [a, p] of [
-  ['::', 128],
+  ['::', 96], // unspecified, and the deprecated IPv4-compatible ::a.b.c.d
   ['::1', 128],
   ['64:ff9b::', 96],
   ['64:ff9b:1::', 48],

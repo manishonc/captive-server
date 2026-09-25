@@ -9,13 +9,14 @@
  *  - A booking absent from a parse counts one miss, at most once per 30 minutes on the
  *    engine clock; two misses → cancelled. Never once checkout day has come (frozen).
  *  - Two or more countable bookings absent at once is suspect (a link to another listing,
- *    a cut or reformatted file): no miss, no reset, for up to 24 h. A single one always
+ *    a cut or reformatted file): no miss for up to 24 h (bookings still in it are seen and
+ *    their misses reset — that can't cancel anything). A single one always
  *    follows the plain rule, so a host's only booking can still be cancelled.
  */
 
 import type { ContactVenueDoc } from '../store/engineTypes';
 import { tsMs } from '../store/time';
-import { HOUR_MS } from '../core/runtime/time';
+import { HOUR_MS, MINUTE_MS } from '../core/runtime/time';
 import { addDays } from './ical';
 import { MISSES_TO_CANCEL, MISS_SPACING_MS, SUSPECT_GUARD_MS, type StayInstants } from './times';
 
@@ -69,7 +70,7 @@ const SEEN_REFRESH_MS = 24 * 60 * 60_000;
  *  - new → create, unless it is already over;
  *  - cancelled and back → confirmed again (D-C9), a new dates version even with the same dates;
  *  - other dates or times → changed;
- *  - the same → reset its misses (not on a suspect parse: that resets nothing).
+ *  - the same → reset its misses (unless `resetMisses` is off; the sync always passes it on).
  */
 export function decideUpsert(
   existing: StaySnap | null,
@@ -101,7 +102,7 @@ export function decideMiss(s: StaySnap, ctx: { today: string; now: number }): Mi
 }
 
 export interface SuspectState {
-  /** This parse counts no miss and resets nothing. */
+  /** This parse counts no miss (the bookings in it are still seen: their misses reset). */
   suspect: boolean;
   warning: 'mass_missing' | null;
   suspectSince: number | null;
@@ -144,6 +145,23 @@ export function overlapMap(stays: StaySnap[], today: string): Map<string, string
 /** Facts for `branch` / `entry.when`: `stay.nights`, `stay.checkIn`, … (numbers stay numbers). */
 export function stayFacts(stay: Pick<StaySnap, 'nights' | 'checkIn' | 'checkOut' | 'status' | 'checkInAt' | 'checkOutAt'>) {
   return { stay: { nights: stay.nights, checkIn: stay.checkIn, checkOut: stay.checkOut, checkInAt: stay.checkInAt, checkOutAt: stay.checkOutAt, status: stay.status } };
+}
+
+// ── The checkout overlap rule (stays/moments.ts) ─────────────────────────────
+
+/** How late after its moment the worker may reach Stay guide's checkout step (its wake's lag). */
+export const COVER_MARGIN_MS = 15 * MINUTE_MS;
+
+/**
+ * Does a Stay guide switched off (or paused) at `offSinceAt` still send its checkout message
+ * for a moment at `momentAt`? The gate lets it through while its send time — the moment plus
+ * the worker's lag — is inside the freeze window. Leans towards "no" near the edge, so the
+ * Checkout reminder then goes (both messages at worst). Not airtight: a Stay guide checkout
+ * message held past the freeze — a worker more than 15 min late, or quiet hours in the
+ * guest's phone zone deferring it — can still leave neither (docs, "Open follow-ups").
+ */
+export function guideStillSends(momentAt: number, offSinceAt: number | null, freezeMs: number): boolean {
+  return offSinceAt !== null && momentAt + COVER_MARGIN_MS <= offSinceAt + freezeMs;
 }
 
 // ── Linking a guest to a stay (stays/link.ts) ─────────────────────────────────

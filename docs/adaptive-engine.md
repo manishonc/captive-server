@@ -159,19 +159,24 @@ Plan §3.3. The owner saves the listing's iCal export link — one feed per venu
 linked to it, and each switched-on stay journey starts at its moment.
 
 **Reading the link** (`stays/fetch.ts`, `stays/ical.ts`)
-- https only (`webcal://` and `http://` are saved as `https://`), port 443, no `user:pass@`, no IP-literal
+- https only (`webcal://` and `http://` are saved as `https://`, and every link in its standard form, so
+  `HTTPS://`, an upper-case host or `:443` is the same link), port 443, no `user:pass@`, no IP-literal
   host. Every resolved address must be public — private, loopback, link-local, CGNAT, unique-local,
-  cloud-metadata, NAT64 and IPv4-mapped ranges are refused — and the socket connects to the address that
-  was checked. At most 3 redirects, each checked again; 10 s for the whole chain; 1 MB.
-- The link is a secret. It is stored as it is (`url`), only ever shown masked, and never logged; errors
+  cloud-metadata, NAT64, IPv4-mapped and IPv4-compatible ranges are refused — and the socket connects to
+  the address that was checked. At most 3 redirects, each checked again; 10 s for the whole chain; 1 MB.
+- The link is a secret. It is stored (`url`), only ever shown masked, and never logged; errors
   are codes (`lastError: 'TIMEOUT' | 'LINK_INVALID' | 'HTTP_503' | …`), turned into the owner's words when
   shown.
 - **Which events are stays:** Airbnb reservations, and in other feeds (VRBO, PMS) only events whose title
-  starts with "Reserved". Booking.com marks bookings and closures alike, so a Booking.com feed — or another
-  feed with events but no "Reserved" one that has never given a stay — is **unsupported**:
-  `feedWarning: 'unsupported_source'`, no stays, not an error. Stored: UID, dates, status — never the
-  calendar's text, names or phone digits. Skipped: cancelled or recurring events, events without a UID,
-  stays over 90 nights.
+  starts with "Reserved". Booking.com marks bookings and closures alike, so a Booking.com feed (its PRODID,
+  or `@booking.com` UIDs / "CLOSED - Not available" events with no "Reserved" one) — or another feed with
+  events but no "Reserved" one — is **unsupported** while it has never given a stay: `feedWarning:
+  'unsupported_source'`, no stays, not an error. A feed that once gave a stay (`reservedSeen`) stays
+  supported whatever it looks like later, so its last booking can still be cancelled; a PMS feed passing
+  Booking.com events through keeps its "Reserved" stays. Stored: UID, dates, status — never the calendar's
+  text, names or phone digits. Skipped: cancelled or recurring events, events without a UID, stays over 90
+  nights — a known stay whose reservation event grows past 90 nights is still seen (kept at the dates it
+  had, never missed); a split booking whose merged pieces pass 90 nights keeps its first 90 nights.
 - **Times:** check-in and checkout are the dates at Guest info's check-in/checkout time — the first valid
   `HH:MM` between 06:00 and 22:00, English first, then the other languages alphabetically. Without one,
   scheduling uses 15:00 / 10:00, but the wording never prints that: those messages skip as
@@ -189,7 +194,8 @@ linked to it, and each switched-on stay journey starts at its moment.
   stay is frozen: never missed, never cancelled.
 - **Two or more bookings gone at once** are held for 24 h (`feedWarning: 'mass_missing'`, one HeidiFi
   alert): a wrong link or a cut-off file looks the same. Saving a different link lifts the hold at once. A
-  single missing booking always follows the two-miss rule.
+  single missing booking always follows the two-miss rule. A booking still in the content is seen (its
+  misses reset) also while the hold is on — only the missing ones are held.
 - Overlapping bookings (back-to-back is not one) → both `overlap_flagged`, nobody new is linked, the owner
   is emailed. A stay already linked keeps running. A booking missing from the content is on its way out,
   not an overlap (a cancel-and-rebook of the same dates flags nothing); it isn't linked either, and —
@@ -225,7 +231,8 @@ is switched on (a journey the venue has but that is off or paused → `stay.mome
 link, so a guest linked after the venue went live still gets the moment that brought them in.
 - **Checkout reminder vs Stay guide:** the Checkout reminder (Guest info) doesn't start when this stay's
   Stay guide covers the guest: 2+ nights, Stay guide on (or switched off within the freeze window before
-  the moment), and its instance for this stay active or completed. A late-linked guest, a 1-night stay, or
+  the moment, with 15 min to spare for the worker's lag — near the edge both go rather than neither), and its
+  instance for this stay active or completed. A late-linked guest, a 1-night stay, or
   a Stay guide paused or switched off earlier gets the reminder.
 - A guest linked while the stay playbook is paused, or before it is turned on, gets the moments that come
   once it runs.
@@ -276,7 +283,16 @@ mount (`service/stays.ts`).
 5. **A same-link save during a failing poll's fetch** is overwritten by that poll's error write (old
    error count, `failing`, `failingSince`). Suggested: compute the error fields from the feed read in
    `finishFeed`'s transaction.
-6. **Tests:** no emulator test covers the link query returning an `overlap_flagged` previous stay; the
+6. **The checkout overlap rule is not airtight.** The Checkout reminder stays quiet when Stay guide still
+   sends inside the freeze (with 15 min to spare), but a Stay guide checkout message held past the freeze
+   — quiet hours in the guest's phone zone deferring it, or a worker more than 15 min late — is then
+   skipped too: neither goes. Suggested: keep the step's first planned time for the freeze check across a
+   quiet-hours or ceiling hold (as a pause already does).
+7. **Over-90-night edge cases:** a known stay kept at its old dates after its event grew past 90 nights
+   with a later check-in can overlap a new booking in the dates it gave up (a false overlap flag); a
+   split booking whose merged pieces pass 90 nights is shortened to its first 90 nights. Both need a
+   booking over 90 nights, which is unsupported anyway.
+8. **Tests:** no emulator test covers the link query returning an `overlap_flagged` previous stay; the
    sign-up breaker (PR B) can let one extra new guest through under load (its test flaked once) — a
    separate fix is in progress.
 
@@ -409,7 +425,7 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 
 | Route | What it does |
 |---|---|
-| `POST /internal/adaptive/dev/clock` `{ "advance": "48h" }` or `{ "at": "2026-10-12T13:10:00Z" }` | Moves the fake clock (forward, or to a moment) |
+| `POST /internal/adaptive/dev/clock` `{ "advance": "48h" }` or `{ "at": "2026-10-12T13:10:00Z" }` | Moves the fake clock (forward, or to a moment — never earlier than real time: activations are stamped in real time; `{ "reset": true }` goes back to it) |
 | `POST /internal/adaptive/dev/launch` `{ "accounts": { "tenant_demo": "test" } }` | Sets launch modes |
 | `GET /internal/adaptive/dev/guest-log?email=…` | Shows events, sends and the "why" sentences |
 | `POST /internal/adaptive/dev/provider-event` `{ "sendKey", "event": "delivered\|opened\|click\|rating\|stop\|reply…" }` | Fakes a webhook / CMS signal for one send, through the real hook functions |

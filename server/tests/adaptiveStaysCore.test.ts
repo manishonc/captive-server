@@ -404,7 +404,8 @@ async function main() {
 
   await test('Booking.com: no stays, unsupported (its bookings and closures look the same)', () => {
     const p = parseIcal(F8_BOOKING, ZRH);
-    assertEqual([p.source, p.stays.length, isUnsupported(p, false), isUnsupported(p, true)], ['booking', 0, true, true], 'booking');
+    assertEqual([p.source, p.stays.length, isUnsupported(p, false)], ['booking', 0, true], 'booking');
+    assertEqual(isUnsupported(p, true), false, 'but a feed that gave a stay stays supported, whatever it looks like now');
     const noProdid = parseIcal(F8_BOOKING.replace(/PRODID:[^\r]*\r\n/, 'PRODID:-//Other//EN\r\n').replace(/@booking\.com/g, '@x.test'), ZRH);
     assertEqual(noProdid.source, 'booking', 'recognised by its "CLOSED - Not available" events too');
   });
@@ -423,6 +424,17 @@ async function main() {
     assertEqual(isUnsupported(p, false), false, 'supported');
     const later = parseIcal(F10_VRBO_LATER, ZRH);
     assertEqual([later.stays.length, isUnsupported(later, false), isUnsupported(later, true)], [0, true, false], 'after its only booking went: supported because reservedSeen');
+  });
+
+  await test('a PMS feed passing Booking.com events through: its "Reserved" events are stays; with only a closure left, its misses still count', () => {
+    const head = VRBO_HEAD.map((l) => (l.startsWith('PRODID') ? 'PRODID:-//Some PMS//EN' : l));
+    const closure = ['BEGIN:VEVENT', 'UID:8736@booking.com', 'DTSTART;VALUE=DATE:20261020', 'DTEND;VALUE=DATE:20261022', 'SUMMARY:CLOSED - Not available', 'END:VEVENT'];
+    const p = parseIcal([...head, ...vrboEvent('1', '20261009', '20261012', 'Reserved - GUESTNAME1'), ...closure, 'END:VCALENDAR'].join('\n'), ZRH);
+    assertEqual([p.source, p.stays.length, isUnsupported(p, false)], ['generic', 1, false], 'a Booking.com UID and closure next to a reservation: generic, 1 stay');
+    // Tom's booking is cancelled: only the Booking.com closure is left.
+    const later = parseIcal([...head, ...closure, 'END:VCALENDAR'].join('\n'), ZRH);
+    assertEqual([later.source, later.stays.length], ['booking', 0], 'now it looks like Booking.com');
+    assertEqual([isUnsupported(later, true), isUnsupported(later, false)], [false, true], 'supported because it gave a stay (so the sync counts the miss); unsupported for a feed that never did');
   });
 
   await test('generic duplicate UIDs merge (earliest start, latest end); no overlap', () => {
@@ -465,6 +477,11 @@ async function main() {
   await test('longer than 90 nights is skipped, from any source; floating and Windows-zone times use the venue zone', () => {
     const long = parseIcal(crlf([...AIRBNB_HEAD, ...airbnbEvent('9', '20261001', '20270105', 'HMX'), 'END:VCALENDAR']), ZRH);
     assertEqual([long.stays.length, long.counts.skippedLong], [0, 1], 'Airbnb, 96 nights');
+    assertEqual(long.skippedLongUids, ['1418fb94e984-9@airbnb.com'], 'its UID is kept: a known stay extended past 90 nights is seen, not missing');
+    assertEqual(staysHash(long.stays, long.skippedLongUids) === staysHash([], []), false, 'and it counts in the hash (its leaving is a change)');
+    assertEqual(staysHash([], []), staysHash([]), 'no over-long ones: the same hash as before');
+    const block = parseIcal(crlf([...AIRBNB_HEAD, 'BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261001', 'DTEND;VALUE=DATE:20270105', 'SUMMARY:Airbnb (Not available)', 'UID:blk@airbnb.com', 'END:VEVENT', 'END:VCALENDAR']), ZRH);
+    assertEqual(block.skippedLongUids, [], 'a long block is not a reservation');
     const tz = parseIcal(
       crlf([
         'BEGIN:VCALENDAR',
@@ -532,6 +549,7 @@ async function main() {
     }
     await rejectsWith(fetchFeed('https://calendar.example.test/a.ics', { resolve: dnsTo('93.184.216.34', '10.0.0.5'), timeoutMs: 3000 }), 'BLOCKED_ADDRESS', 'a public + private mix');
     assert(!isBlockedIp('93.184.216.34') && !isBlockedIp('2606:4700::6810:84e5'), 'public addresses pass');
+    assert(isBlockedIp('::7f00:1') && isBlockedIp('::a9fe:a9fe') && isBlockedIp('::'), 'IPv4-compatible ::a.b.c.d (::/96) and :: are blocked');
   });
 
   await test('a public https host: 200 with the body, the checked IP pinned, no final URL in the result', async () => {
@@ -674,7 +692,8 @@ async function main() {
     assertEqual(decideUpsert(snap({ status: 'cancelled' }), { checkIn: '2026-10-10', checkOut: '2026-10-15' }, inst(s), { today, now, resetMisses: true }).kind, 'reinstate', 'back after a cancel (same dates)');
     const missed = snap({ missingCount: 1, lastMissAt: now - 3_600_000 });
     assertEqual(decideUpsert(missed, { checkIn: '2026-10-10', checkOut: '2026-10-15' }, inst(s), { today, now, resetMisses: true }).kind, 'reset', 'seen again → reset');
-    assert(decideUpsert(missed, { checkIn: '2026-10-10', checkOut: '2026-10-15' }, inst(s), { today, now, resetMisses: false }).kind !== 'reset', 'a suspect parse resets nothing');
+    // The sync always resets a stay that is in the content (also on a suspect parse); the flag stays for callers that don't.
+    assert(decideUpsert(missed, { checkIn: '2026-10-10', checkOut: '2026-10-15' }, inst(s), { today, now, resetMisses: false }).kind !== 'reset', 'with resetMisses off nothing is reset');
   });
 
   await test('misses: 30 min apart on the engine clock, cancelled at 2, never once checkout day has come', () => {

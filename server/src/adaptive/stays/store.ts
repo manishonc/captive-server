@@ -62,9 +62,13 @@ export async function loadStay(stayId: string, tx?: Transaction): Promise<Loaded
 /** Every stay of a feed — equality only (single-field index on `feedId`). */
 export const staysOfFeedQuery = (feedId: string) => db.collection(COL.stays).where('feedId', '==', feedId);
 
-/** Stays a connecting guest could be linked to (index venueId↑ status↑ checkOutAt↑). */
+/**
+ * Stays a connecting guest could be linked to (index venueId↑ status↑ checkOutAt↑): the ones
+ * checking out soonest — the stay in its window and, on a turnover day, the previous stays
+ * come first — not every booking of the year on every connect.
+ */
 export const linkCandidatesQuery = (venueId: string, checkOutAfter: Date) =>
-  db.collection(COL.stays).where('venueId', '==', venueId).where('status', 'in', ['confirmed', 'overlap_flagged']).where('checkOutAt', '>', checkOutAfter);
+  db.collection(COL.stays).where('venueId', '==', venueId).where('status', 'in', ['confirmed', 'overlap_flagged']).where('checkOutAt', '>', checkOutAfter).orderBy('checkOutAt').limit(20);
 
 /** A guest's stays at a venue — equality only (merged single-field indexes). */
 export const contactStaysQuery = (venueId: string, contactId: string) =>
