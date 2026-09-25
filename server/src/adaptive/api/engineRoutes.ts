@@ -3,12 +3,18 @@
  * by router.ts before its 404):
  *
  *   GET  /admin/engine        workers, versions, identity-key check, queue, index check
- *   POST /dev/clock           sandbox only — move the fake clock ({ advance: '48h' } | { reset: true })
+ *   POST /dev/clock           sandbox only — move the fake clock ({ advance: '48h' } | { at: ISO } | { reset: true })
  *   POST /dev/launch          sandbox only — set launch modes / the pause
  *   GET  /dev/guest-log       sandbox only — ?email= | ?phone= — events, sends, "why" sentences
  *   POST /dev/rollup          sandbox only — { venueId? } — the daily numbers now (no 2-min lag)
  *   POST /dev/provider-event  sandbox only — { sendKey, event: delivered|failed|opened|bounce|spam|
  *                             unsubscribe|click|rating|stop|start|reply, stars?, text? }
+ *   PUT  /dev/calendar/:name  sandbox only — the calendar a `sandbox:calendar/<name>` feed reads:
+ *                             { ics } or { venueId?, stays: [{ checkIn: today|+Nd|date, checkOut: date|+Nd|Nn }] }
+ *   GET  /dev/calendar/:name  sandbox only — that calendar as text/calendar
+ *   POST /dev/stay-feed       sandbox only — { venueId, url } → save the venue's calendar link
+ *   POST /dev/stay-sync       sandbox only — { venueId } → poll the feed now (same lease as the worker)
+ *   POST /dev/stay-check      sandbox only — { venueId, url } → "Check link" (fetch + parse, store nothing)
  *   POST /ingest/click        the CMS: a counted click on a journey short link { shortCode }
  *   POST /ingest/rating       the CMS: a rating from a journey link { shortCode, stars, feedback? }
  *
@@ -47,6 +53,23 @@ router.post('/dev/clock', handle(async (req) => engine.devClock(req.body ?? {}))
 router.post('/dev/launch', handle(async (req) => engine.devLaunch(req.body ?? {})));
 router.post('/dev/provider-event', handle(async (req) => engine.devProviderEvent(req.body ?? {})));
 router.post('/dev/rollup', handle(async (req) => engine.devRollup(req.body ?? {})));
+router.put('/dev/calendar/:name', handle(async (req) => engine.devPutCalendar(String(req.params.name ?? ''), req.body ?? {})));
+router.get('/dev/calendar/:name', async (req: Request, res: Response) => {
+  try {
+    const ics = await engine.devGetCalendar(String(req.params.name ?? ''));
+    res.type('text/calendar; charset=utf-8').send(ics);
+  } catch (err) {
+    if (err instanceof ApiError) {
+      res.status(err.status).json({ ok: false, error: err.message, code: err.code });
+      return;
+    }
+    console.error('[ADAPTIVE ENGINE API]', (err as Error)?.message ?? err);
+    res.status(500).json({ ok: false, error: 'Something went wrong', code: 'internal' });
+  }
+});
+router.post('/dev/stay-feed', handle(async (req) => engine.devStayFeed(req.body ?? {})));
+router.post('/dev/stay-sync', handle(async (req) => engine.devStaySync(req.body ?? {})));
+router.post('/dev/stay-check', handle(async (req) => engine.devStayCheck(req.body ?? {})));
 
 const clickSchema = z.object({ shortCode: z.string().min(1).max(64) });
 const ratingSchema = z.object({ shortCode: z.string().min(1).max(64), stars: z.number().int().min(1).max(5), feedback: z.string().max(1000).optional().nullable() });

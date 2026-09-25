@@ -210,3 +210,82 @@ export interface JourneyEventDoc {
   expireAt: StoredTime;
   schemaVersion: number;
 }
+
+/**
+ * `CaptivePortal_StayFeeds/venue_{venueId}` — one booking calendar per venue (plan §4.1,
+ * Appendix A; the doc id is D-C34). The URL is stored as it is and never logged or shown
+ * unmasked; `lastError` holds a code, never a message.
+ */
+export interface StayFeedDoc {
+  tenantUserId: string;
+  venueId: string;
+  kind: 'ical';
+  url: string;
+  status: 'active' | 'paused' | 'failing';
+  lastPolledAt: StoredTime;
+  lastSuccessAt: StoredTime;
+  /** A code (`TIMEOUT`, `LINK_INVALID`, `HTTP_503`…), never raw error text. */
+  lastError: string | null;
+  consecutiveErrors: number;
+  /** When the current run of errors started (the owner email after 24 h, D-C25). */
+  failingSince?: StoredTime;
+  etag: string | null;
+  upcomingCount: number;
+  overlapCount?: number;
+  /** Successful parses so far — read with the poll lease, so a stale poll can't write over a newer one. */
+  successSeq: number;
+  /** One poll at a time per feed (real time; the owner is the task or dev call). */
+  pollLease?: { owner: string; until: StoredTime } | null;
+  /** When the chain's next grid-slot poll is due (the watchdog restarts a feed whose value is missing or stale). */
+  nextPollAt?: StoredTime;
+  /** Hash of the last successful parse's normalized stays (a same-hash 200 is unchanged content). */
+  lastContentHash: string | null;
+  /** The countable stays absent from the last successful content (a 304's absent set). */
+  lastMissingStayIds: string[];
+  /** The feed has given at least one stay (a non-Airbnb feed then stays supported, D-C4). */
+  reservedSeen: boolean;
+  feedWarning: 'mass_missing' | 'unsupported_source' | null;
+  /** When the current run of suspect parses began (D-C35). */
+  suspectSince: StoredTime;
+  /** Set when the owner saves a different link: bookings missing from it count at once (no 24 h hold) until the feed is back to normal. */
+  guardLiftedAt?: StoredTime;
+  createdAt: StoredTime;
+  updatedAt: StoredTime;
+  schemaVersion: number;
+}
+
+/**
+ * `CaptivePortal_Stays/st_{hash(feedId:uid)}` — one booking (plan §4.1, Appendix A).
+ * Dates, UID and status only (D-C28): never the calendar's text, names or phone digits.
+ */
+export interface StayDoc {
+  tenantUserId: string;
+  venueId: string;
+  feedId: string;
+  externalUid: string;
+  status: 'confirmed' | 'cancelled' | 'overlap_flagged';
+  /** Venue-local dates; checkout is exclusive. */
+  checkIn: string;
+  checkOut: string;
+  checkInAt: StoredTime;
+  checkOutAt: StoredTime;
+  nights: number;
+  /** +1 on every date or time change and on a reinstatement: moment task keys and change event ids carry it. */
+  datesVersion: number;
+  /** The first guest who connected in the stay's window (never their details). */
+  contactId: string | null;
+  linkedAt: StoredTime;
+  linkedGuestId?: string | null;
+  /** test / live, frozen when the guest was linked (D-C13). */
+  linkMode: 'test' | 'live' | null;
+  lastSeenInFeedAt: StoredTime;
+  missingCount: number;
+  lastMissAt: StoredTime;
+  overlapWith: string[];
+  cancelledAt?: StoredTime;
+  cancelReason?: 'missing' | 'feed_deleted' | null;
+  expireAt: StoredTime;
+  createdAt: StoredTime;
+  updatedAt: StoredTime;
+  schemaVersion: number;
+}

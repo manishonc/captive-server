@@ -101,6 +101,7 @@ const REASON_WORDS: Record<string, Record<'en' | 'de', string>> = {
   lapsed: { en: 'the subscription has lapsed', de: 'das Abo abgelaufen ist' },
   tenant_inactive: { en: 'the account is being closed', de: 'das Konto geschlossen wird' },
   switched_off: { en: 'this journey or venue was switched off', de: 'diese Journey oder dieser Standort ausgeschaltet wurde' },
+  stay_cancelled: { en: 'the booking was cancelled', de: 'die Buchung storniert wurde' },
   stale: { en: 'it was too late to still send it', de: 'es zu spät war, sie noch zu senden' },
   channel_not_ready: { en: 'this channel is not set up yet', de: 'dieser Kanal noch nicht eingerichtet ist' },
   venue_ceiling: { en: 'the daily limit for this venue was reached', de: 'das Tageslimit für diesen Standort erreicht war' },

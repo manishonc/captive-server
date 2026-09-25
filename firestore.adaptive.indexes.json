@@ -68,6 +68,15 @@
         { "fieldPath": "purpose", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_Stays",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "checkOutAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -99,6 +108,10 @@
     { "collectionGroup": "CaptivePortal_Contacts", "fieldPath": "engagement", "indexes": [] },
     { "collectionGroup": "CaptivePortal_ContactPoints", "fieldPath": "tenantContacts", "indexes": [] },
     { "collectionGroup": "CaptivePortal_ContactPoints", "fieldPath": "suppression", "indexes": [] },
-    { "collectionGroup": "CaptivePortal_NetworkPeople", "fieldPath": "recentMarketingTouches", "indexes": [] }
+    { "collectionGroup": "CaptivePortal_NetworkPeople", "fieldPath": "recentMarketingTouches", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "stays", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_Stays", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "url", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "lastError", "indexes": [] }
   ]
 }

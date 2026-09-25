@@ -43,7 +43,9 @@ import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBooking
 import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
 import { dayKey, raiseAlert } from './alerts';
 import { journeyOnState, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
-import { DRY_RUN_LINKS, missingReason, renderMessage, renderValues, variantContent, type LinkKind } from './renderSend';
+import { DRY_RUN_LINKS, guestInfoField, guestInfoHasContent, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from './renderSend';
+import { resolveStayTimes } from '../stays/times';
+import type { LoadedStay } from '../stays/store';
 import { renderText } from '../core/render';
 import { platformLiveSendsSince, venueLiveSendsSince, venueServiceSendsSince } from './counts';
 import { instanceRef, type LoadedInstance } from './instanceStore';
@@ -70,6 +72,8 @@ export type SendOutcome =
       /** The instance rev after the send's own transaction (test run / live dispatch bump it). */
       revAfter: number | null;
       suppress: boolean;
+      /** The booking was cancelled: the journey ends as `cancelled` (D-C19), it doesn't move on. */
+      stayCancelled?: boolean;
       events: EventInput[];
     }
   | {
@@ -115,6 +119,8 @@ export interface SendArgs {
   workerId: string;
   /** Events earlier steps of this run produced, not yet committed: a live claim writes them (and removes them here). */
   pendingEvents?: EventInput[];
+  /** A stay journey's booking, read fresh by `advance` (null when it is gone). */
+  stay?: LoadedStay | null;
 }
 
 export async function runSend(a: SendArgs): Promise<SendOutcome> {
@@ -201,7 +207,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const np = (npSnap.data() ?? null) as NetworkPersonDoc | null;
   const consent = consentFor(contact, inst.meta.venueId);
 
-  const variants = cat.variants.filter((v) => v.poolKey === cfg.pool && v.status === 'active');
+  // Wording the owner's values allow (D-C22: no "late check-out for CHF 0"); built once, so
+  // the channel check and the pick below see the same list.
+  const variants = cat.variants.filter((v) => v.poolKey === cfg.pool && v.status === 'active' && variantEligible(v, a.pinned.slots));
   const unsubscribeReady = Boolean(process.env.UNSUBSCRIBE_SIGNING_SECRET && process.env.SERVER_PUBLIC_URL);
 
   const channelFacts = (channel: Channel): ChannelFacts => {
@@ -267,6 +275,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     platformSendsToday: platformToday,
     platformCeiling: a.settings.safety.maxSendsPlatformPerDay,
     channelReady: true,
+    // Rule 1: the stay isn't cancelled (a stay journey whose Stay is gone counts as cancelled).
+    stayCancelled: Boolean(inst.meta.context.stayId) && (!a.stay || a.stay.status === 'cancelled'),
   };
 
   const versions = { template: inst.meta.templateVersion, config: inst.meta.configVersion, playbook: inst.meta.playbookKey, engine: ENGINE_VERSION };
@@ -289,7 +299,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until } }] : [],
       };
     }
-    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off');
+    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off', pre.reason === 'stay_cancelled');
   }
 
   // ── 4. Channel ──
@@ -351,9 +361,13 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const guestId = inst.meta.context.guestId ?? contact.guestIds?.[contact.guestIds.length - 1] ?? null;
   const priceLinks: Partial<Record<LinkKind, string>> = pricingLinks(['offer', 'rating', 'hub', 'booking']);
   const previewLinks: Partial<Record<LinkKind, string>> = { ...DRY_RUN_LINKS };
+  // D-C21: the info page link only goes out when Guest info has something on it — and
+  // Local tips only when there are tips — else the send is skipped as guest_info_missing.
+  const hubReady = guestInfoHasContent(guestInfo) && (cfg.pool !== 'local_tips' || guestInfoField(guestInfo, lang, 'localTips') !== null);
   for (const links of [priceLinks, previewLinks]) {
     if (!bookingUrl) delete links.booking;
     if (typeof inst.state.vars.offerKey !== 'string') delete links.offer;
+    if (!hubReady) delete links.hub;
   }
   const unsubscribeUrl = channel === 'email' && cfg.purpose === 'marketing' && mode === 'live' ? unsubscribeUrlFor(guestId, inst.meta.venueId, sendKey) : '';
   if (unsubscribeUrl) priceLinks.unsubscribe = unsubscribeUrl;
@@ -369,6 +383,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       offers: a.pinned.offers,
       guestInfo,
       links,
+      // Stay dates and nights, and the check-in/out times the stay was scheduled with (D-C20).
+      stay: inst.meta.context.stayId && a.stay ? { checkInAt: a.stay.checkInAt, checkOutAt: a.stay.checkOutAt, nights: a.stay.nights, times: resolveStayTimes(guestInfo) } : null,
     });
   const values = valuesWith(priceLinks);
   const rendered = renderMessage(vc.content, channel, values);
@@ -475,7 +491,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   }
 
   if (gate.verdict === 'block') void alertFor(gate.reason, a, tz);
-  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off');
+  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off', gate.reason === 'stay_cancelled');
 }
 
 /** A held-back send: when to look again, and the "why" once per reason. */
@@ -720,7 +736,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     const g = claim.gate;
     const decision = d.decisionFor(g);
     if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz });
-    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off');
+    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off', g.reason === 'stay_cancelled');
   }
 
   // ── Phase 2 + 3: the provider, then the record ──
@@ -755,13 +771,14 @@ function skipOutcome(reason: string, at: number = Date.now()): SendOutcome {
   return { kind: 'done', outcome: 'skipped', touch: null, revAfter: null, suppress: false, events: [{ type: 'send.skipped', occurredAt: at, data: { reason } }] };
 }
 
-function skipWith(decision: DecisionRecord, a: SendArgs, sendKey: string, common?: Record<string, unknown>, suppress = false): SendOutcome {
+function skipWith(decision: DecisionRecord, a: SendArgs, sendKey: string, common?: Record<string, unknown>, suppress = false, stayCancelled = false): SendOutcome {
   return {
     kind: 'done',
     outcome: 'skipped',
     touch: null,
     revAfter: null,
     suppress,
+    stayCancelled,
     events: [
       {
         ...(common ?? { tenantUserId: a.inst.meta.tenantUserId, venueId: a.inst.meta.venueId, contactId: a.inst.meta.contactId, instanceId: a.inst.id, journeyKey: a.inst.meta.journeyKey, mode: a.inst.meta.mode, nodeId: a.nodeId, sendKey }),

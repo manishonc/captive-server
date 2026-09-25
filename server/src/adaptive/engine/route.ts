@@ -3,7 +3,9 @@
  *
  * `wifi.connected` → who is this (contact + consent) → which visit → a new visit
  * wakes the guest's running journeys (a revisit can redeem the A1 offer) and
- * starts the journeys it triggers → the 3 h "visit ended" fallback is (re)armed.
+ * starts the journeys it triggers → at an Airbnb venue, the guest may be linked to
+ * the booking they're staying in → the 3 h "visit ended" fallback is (re)armed.
+ * `stay.changed` / `stay.cancelled` go to that stay's running journeys.
  * Every step is safe to repeat: re-running a task after a crash can't double
  * anything (deterministic ids, remembered connect ids, idempotent enrolment).
  */
@@ -29,6 +31,7 @@ import { enrolForEvent, type VisitFacts } from './enrol';
 import { deliverEvent } from './advance';
 import { fromDoc } from './instanceStore';
 import { dayKey, raiseAlert } from './alerts';
+import { handleStayEvent, linkStayOnConnect } from '../stays/link';
 
 export interface RouteEnv {
   now: number;
@@ -51,6 +54,8 @@ export async function routeEvent(payload: { eventId: string; guest?: GuestPayloa
   const event = await loadEvent(payload.eventId);
   if (!event) return;
   if (event.type === 'wifi.connected') return handleConnect(event, payload.guest ?? {}, env);
+  // A booking's dates changed or it was cancelled (stays/sync.ts): to that stay's journeys.
+  if (event.type === 'stay.changed' || event.type === 'stay.cancelled') return handleStayEvent(event, env, mustDeliver);
   // Events tied to one journey (message.*, ratings): the task retries if the journey is busy.
   if (event.instanceId) mustDeliver(await deliverEvent(event.instanceId, event, env));
 }
@@ -237,6 +242,10 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     else if (fresh) await enrolForEvent({ ctx, who: { contactId: resolved.contactId, networkId: resolved.networkId, contact }, event: started, mode, visit: visitFacts, now: env.now });
     else console.warn('[ADAPTIVE] connect handled late — no journeys started:', event.id);
   }
+
+  // Airbnb stays: every fresh connect (not only a new visit) can link the guest to the
+  // booking they're staying in (stays/link.ts) — never a tripped or late one.
+  if (!tripped && fresh) await linkStayOnConnect({ ctx, contactId: resolved.contactId, guestId, at: event.occurredAt, mode, now: env.now });
 
   await armVisitEnd(ctx, resolved.contactId, visit.visitId, visit.lastSeenAt);
 }

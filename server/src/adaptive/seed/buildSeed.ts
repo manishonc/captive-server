@@ -199,6 +199,7 @@ export function buildSeedPlan(now: Date = new Date(), seed = SEED): SeedPlan {
             baseLocale: 'en',
             channels: variant.channels,
             locales: variant.locales,
+            ...(variant.when ? { when: variant.when } : {}),
             mergeFieldsUsed: [...used].sort(),
             contentHash: contentChecksum({ channels: variant.channels, locales: variant.locales }),
             lint: { status: 'pending', issues: [], linterVersion: null },

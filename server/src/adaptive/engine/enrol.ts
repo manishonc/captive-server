@@ -76,6 +76,8 @@ export async function enrolForEvent(args: {
   /** Only these journeys (stay moments name one). */
   onlyJourney?: string;
   stayId?: string | null;
+  /** More facts for `entry.when` (a stay moment adds `stay.*`). */
+  facts?: Record<string, unknown>;
 }): Promise<string[]> {
   const { ctx, who, event } = args;
   const created: string[] = [];
@@ -91,7 +93,7 @@ export async function enrolForEvent(args: {
     // "Only new Wi-Fi guests from today": nothing before this install went live.
     if (j.install.liveSince !== null && event.occurredAt < j.install.liveSince) continue;
     if (j.definition.entry.requires.includes('consent:venue:marketing') && !hasMarketingConsent(who.contact, ctx.venueId)) continue;
-    if (j.definition.entry.when && !evaluateCondition(j.definition.entry.when, journeyFacts(ctx, who.contact, args.visit))) continue;
+    if (j.definition.entry.when && !evaluateCondition(j.definition.entry.when, journeyFacts(ctx, who.contact, args.visit, args.facts))) continue;
     const id = await enrolOne({ ...args, journey: j });
     if (id) created.push(id);
   }

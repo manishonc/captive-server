@@ -11,6 +11,7 @@ import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { venueEventsQuery } from '../rollups/rollup';
 import { activeInstancesQuery } from '../engine/applyInFlight';
+import { contactStaysQuery, failingFeedsQuery, linkCandidatesQuery, stayInstancesQuery, staysOfFeedQuery, watchedFeedsQuery } from '../stays/store';
 
 interface Probe {
   name: string;
@@ -52,6 +53,14 @@ const PROBES: Probe[] = [
   { name: 'JourneyEvents(venueId, recordedAt)', run: () => venueEventsQuery('_probe', past(), null, 1).get() },
   // "Apply to guests already in these journeys" pages through a journey's running guests.
   { name: 'JourneyInstances(venueId, journeyKey, status)', run: () => activeInstancesQuery('_probe', '_probe').limit(1).get() },
+  // Airbnb stays (PR C). The link candidates need the composite; the rest are equality-only,
+  // served by merged single-field indexes — probed so an exempted field shows up here.
+  { name: 'Stays(venueId, status, checkOutAt)', run: () => linkCandidatesQuery('_probe', past()).limit(1).get() },
+  { name: 'Stays(feedId)', run: () => staysOfFeedQuery('_probe').limit(1).get() },
+  { name: 'Stays(venueId, contactId)', run: () => contactStaysQuery('_probe', '_probe').limit(1).get() },
+  { name: 'JourneyInstances(context.stayId, status)', run: () => stayInstancesQuery('_probe').limit(1).get() },
+  { name: 'StayFeeds(status in)', run: () => watchedFeedsQuery().limit(1).get() },
+  { name: 'StayFeeds(status) count', run: () => failingFeedsQuery().count().get() },
 ];
 
 export interface IndexCheckResult {

@@ -14,6 +14,9 @@
  *   send.dry_run and every event of a test-run guest → dryRun{…} (same shape), so a
  *                                      test run never shows up in sends or credits
  *   visit.started / wifi.connected   → visits.{total, first, revisits} / visits.captures (`_venue` only)
+ *   stay.created / changed / cancelled / linked / overlap_flagged / moment_skipped
+ *                                    → stays.{created, changed, cancelled, linked, overlapFlagged,
+ *                                      momentsSkipped} (`_venue` only, whatever the mode)
  *
  * Counters are nested objects of numbers, so a reason like
  * `missing_value:guestinfo.wifiName` stays one map key (never a dotted path).
@@ -43,6 +46,15 @@ export interface RollupEvent {
   mode: 'test' | 'live' | null;
   data: Record<string, unknown>;
 }
+
+const STAY_COUNTERS: Record<string, string> = {
+  'stay.created': 'created',
+  'stay.changed': 'changed',
+  'stay.cancelled': 'cancelled',
+  'stay.linked': 'linked',
+  'stay.overlap_flagged': 'overlapFlagged',
+  'stay.moment_skipped': 'momentsSkipped',
+};
 
 const MESSAGE_STATUS: Record<string, string> = {
   'message.delivered': 'delivered',
@@ -87,6 +99,9 @@ export function countsFor(e: RollupEvent): { both: Counts | null; venueOnly: Cou
   const test = e.mode === 'test' || e.type === 'send.dry_run';
   const wrap = (c: Counts): { both: Counts; venueOnly: null } => ({ both: test ? { dryRun: c } : c, venueOnly: null });
   const channel = statKey(e.channel ?? e.data.channel);
+  // A booking isn't a send: stays count on `_venue` whatever the mode (never under dryRun).
+  const stay = STAY_COUNTERS[e.type];
+  if (stay) return { both: null, venueOnly: { stays: { [stay]: 1 } } };
 
   switch (e.type) {
     case 'journey.entered':

@@ -9,7 +9,10 @@
  *  - heartbeat to `AdaptiveConfig/engine_status` + a file for Docker's healthcheck;
  *  - a watchdog exits if the loop stalls, so Docker restarts the container;
  *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit;
- *  - after a task for a venue, that venue's 15-minute rollup is armed (rollups/rollup.ts).
+ *  - after a task for a venue, that venue's 15-minute rollup is armed (rollups/rollup.ts);
+ *  - Airbnb stays: `stay_poll` reads an owner's calendar link over outbound https (this is
+ *    the only process that does, stays/fetch.ts), `stay_trigger` starts a stay journey at its
+ *    moment; at start and then hourly a watchdog restarts calendar chains that stopped.
  *
  * Identity-key guard (the key is derived from GUEST_OTP_PEPPER, see identity/key.ts).
  * The first connect task whose key (the API's, carried on the task) equals this
@@ -44,6 +47,9 @@ import { checkIndexes, type IndexCheckResult } from './indexCheck';
 import { ensureRollup, rollupVenue } from '../rollups/rollup';
 import { applyConfigInFlight } from '../engine/applyInFlight';
 import { tsMs } from '../store/time';
+import { extendLease } from '../queue/firestoreQueue';
+import { pollFeed, stayFeedWatchdog } from '../stays/sync';
+import { handleStayTrigger, type StayTriggerPayload } from '../stays/moments';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -53,6 +59,7 @@ const BATCH = 10;
 const STALL_MS = 5 * 60_000;
 const HEARTBEAT_FILE = '/tmp/adaptive-heartbeat';
 const WORKER_ENTRY_TTL_MS = 24 * 60 * 60_000;
+const STAY_WATCHDOG_MS = 60 * 60_000;
 
 type WorkerState = 'starting' | 'running' | 'idle_identity' | 'idle_indexes' | 'stopping';
 
@@ -68,6 +75,7 @@ export class AdaptiveWorker {
   private lastLoopAt = Date.now();
   private lastBeatAt = 0;
   private lastReclaimAt = 0;
+  private lastStayWatchdogAt = 0;
   private settings: EngineSettings = SAFE_SETTINGS;
   private settingsAt = 0;
   private state: WorkerState = 'starting';
@@ -144,6 +152,14 @@ export class AdaptiveWorker {
     if (Date.now() - this.lastReclaimAt > 60_000) {
       this.lastReclaimAt = Date.now();
       await reclaimExpiredLeases().catch((err) => console.warn('[ADAPTIVE WORKER] reclaim failed:', err?.message || err));
+    }
+    // Calendar chains that stopped (a feed saved while the account was off, a chain whose
+    // task died) restart once the account isn't off. Nothing to read while every account is.
+    if (Date.now() - this.lastStayWatchdogAt > STAY_WATCHDOG_MS) {
+      this.lastStayWatchdogAt = Date.now();
+      if (anyAccountOn(this.settings)) {
+        await stayFeedWatchdog({ now: now(), settings: this.settings }).catch((err) => console.warn('[ADAPTIVE WORKER] stay feed watchdog failed:', err?.message || err));
+      }
     }
 
     const tasks = await claimDue(this.id, now(), BATCH);
@@ -231,6 +247,23 @@ export class AdaptiveWorker {
         case 'apply_config_inflight':
           // An owner's "apply to guests already in these journeys" save.
           await applyConfigInFlight(task.payload as any);
+          break;
+        case 'stay_poll': {
+          // A calendar feed's poll: its own 4-hourly chain, or a Sync now / a save (`manual`, never re-arms).
+          const manual = task.payload.manual === true;
+          const feedId = typeof task.payload.feedId === 'string' ? task.payload.feedId : '';
+          if (!feedId) break;
+          const r = await pollFeed(feedId, env, { kind: manual ? 'manual' : 'chain', owner: task.id, onProgress: () => extendLease(task.id, this.id) });
+          if (manual && r.outcome === 'busy') {
+            // Another poll holds the feed (maybe of the link this save replaced): read it again shortly.
+            await releaseTask(task.id, this.id, 60_000, env.now);
+            return;
+          }
+          break;
+        }
+        case 'stay_trigger':
+          // A linked guest's stay moment: re-checked now, then the journey starts (or not).
+          await handleStayTrigger(task.payload as unknown as StayTriggerPayload, env);
           break;
         default:
           await releaseTask(task.id, this.id, 10 * 60_000, env.now); // a kind this build doesn't know yet

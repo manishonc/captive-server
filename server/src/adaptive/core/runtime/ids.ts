@@ -17,6 +17,9 @@ export const eventIdFor = (source: string, externalKey: string) => hashId('ev', 
 
 export const visitIdFor = (connectEventId: string) => hashId('vi', connectEventId);
 
+/** One booking of one feed. The feed id is `venue_{venueId}`, so a delete and re-add keeps the stay ids. */
+export const stayIdFor = (feedId: string, uid: string) => hashId('st', `${feedId}:${uid}`);
+
 /** Tasks are spread over 16 shards so several workers can split the queue later. */
 export const SHARDS = 16;
 
