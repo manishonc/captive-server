@@ -140,6 +140,7 @@ async function enrolOne(args: {
       templateVersion: j.templateVersion,
       configVersion: j.configVersion,
       pendingConfigVersion: null,
+      pendingConfigAt: null,
       purpose: j.header.purpose,
       mode: args.mode,
       context: {
@@ -186,6 +187,7 @@ async function enrolOne(args: {
       contactId: who.contactId,
       instanceId,
       journeyKey: j.journeyKey,
+      mode: args.mode,
       data: { entryKey, entryEventId: event.id, mode: args.mode, templateVersion: j.templateVersion, configVersion: j.configVersion },
     });
     return instanceId;

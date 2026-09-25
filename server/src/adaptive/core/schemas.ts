@@ -420,6 +420,8 @@ export const setupInputSchema = z.object({
   overlapAck: z.record(z.string(), z.boolean()).default({}),
   guestInfo: z.boolean().optional(),
   activate: z.boolean().default(false),
+  /** "Apply to guests already in these journeys?" — they move to the new values at their next step. */
+  applyToInFlight: z.boolean().optional(),
 });
 export type SetupInput = z.infer<typeof setupInputSchema>;
 

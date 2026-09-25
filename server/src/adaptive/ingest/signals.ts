@@ -45,6 +45,9 @@ interface SignalEvent {
   journeyKey?: string | null;
   sendKey?: string | null;
   channel?: string | null;
+  /** The send's wording and time slot (the rollups count clicks per variant and slot). */
+  variantId?: string | null;
+  slot?: string | null;
   data?: Record<string, unknown>;
   /** Raw contact details / free text for the worker only. */
   guest?: Record<string, unknown>;
@@ -65,12 +68,12 @@ async function enqueue(e: SignalEvent): Promise<boolean> {
     journeyKey: e.journeyKey ?? null,
     nodeId: null,
     sendKey: e.sendKey ?? null,
-    variantId: null,
+    variantId: e.variantId ?? null,
     channel: e.channel ?? null,
-    slot: null,
+    slot: e.slot ?? null,
     source: e.source,
     occurredAt: new Date(at),
-    recordedAt: new Date(),
+    recordedAt: FieldValue.serverTimestamp(), // commit time (the rollups read the log in this order)
     data: { mode: 'live', ...(e.data ?? {}) },
     expireAt: retentionFrom(at),
     schemaVersion: SCHEMA_VERSION,
@@ -102,7 +105,7 @@ async function enqueue(e: SignalEvent): Promise<boolean> {
   }
 }
 
-function fromSend(sendKey: string, s: JourneySendDoc): Pick<SignalEvent, 'tenantUserId' | 'venueId' | 'contactId' | 'instanceId' | 'journeyKey' | 'sendKey' | 'channel'> {
+function fromSend(sendKey: string, s: JourneySendDoc): Pick<SignalEvent, 'tenantUserId' | 'venueId' | 'contactId' | 'instanceId' | 'journeyKey' | 'sendKey' | 'channel' | 'variantId' | 'slot'> {
   return {
     tenantUserId: s.tenantUserId,
     venueId: s.venueId,
@@ -111,6 +114,8 @@ function fromSend(sendKey: string, s: JourneySendDoc): Pick<SignalEvent, 'tenant
     journeyKey: s.journeyKey,
     sendKey,
     channel: s.channel,
+    variantId: s.variantId ?? null,
+    slot: s.slot ?? null,
   };
 }
 

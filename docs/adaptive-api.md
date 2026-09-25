@@ -89,8 +89,19 @@ SetupInput = {
   overlapAck: { [venueId]: boolean },        // needed when the Marketing tab or an automation also welcomes guests (F03)
   guestInfo?: boolean,                       // Guest info switch for these venues
   activate?: boolean,                        // Turn on (needs adaptive.activate in the CMS)
+  applyToInFlight?: boolean,                 // "Apply to guests already in these journeys?" (default false)
 }
 ```
+
+**`applyToInFlight`** (plan §3.10). Every save creates a new config version; guests already in a
+journey keep the values they started with. With `applyToInFlight: true` (recorded on the version doc),
+the running guests of this playbook at these venues — every journey of it — move to the new values at
+their first step after 60 minutes (`freezeWindowMinutes`). Nothing within 60 minutes of the save uses the
+new values: a send that goes out then keeps the old ones, whether it was planned before the save or a
+delay ending or a click reaches it, and so does a send planned within the 60 minutes that a pause or a
+provider retry holds longer. An offer a guest was already given keeps its wording. Guests who started on
+a different template version than the saved values keep theirs. The response is the same; the worker
+marks the guests within seconds.
 
 Turning a playbook on sets the venue's previously active playbook to `inactive`
 in the same transaction — a venue has at most one active marketing playbook. Its
@@ -104,6 +115,7 @@ settings are kept, so switching back is one call.
 | `POST /ingest/click` | `{ shortCode }` | The CMS resolver forwards a **counted** (non-bot) click on a journey short link. Ids are read from the short-link and send docs, never from the caller. `{ ok, ignored }` — `ignored: true` for any link that isn't an Adaptive journey link. |
 | `POST /ingest/rating` | `{ shortCode, stars: 1–5, feedback? ≤1000 }` | A rating submitted from a journey rating link. ≤ 2★ stops marketing to that guest at that venue; ≤ 3★ emails the owner (the feedback goes only into that email). |
 | `POST /dev/clock`, `/dev/launch`, `/dev/provider-event`; `GET /dev/guest-log` | | Local sandbox only (404 in production) |
+| `POST /dev/rollup` | `{ venueId? }` | Local sandbox only: the daily numbers (JourneyStats) rolled up now, and the docs |
 
 ## Check codes
 

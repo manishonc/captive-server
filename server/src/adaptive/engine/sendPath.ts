@@ -42,7 +42,7 @@ import { composeEmail, maskSecretValues, smsFinalText } from '../send/compose';
 import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBookingUrl } from '../send/links';
 import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
 import { dayKey, raiseAlert } from './alerts';
-import { journeyStillOn, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
+import { journeyOnState, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
 import { DRY_RUN_LINKS, missingReason, renderMessage, renderValues, variantContent, type LinkKind } from './renderSend';
 import { renderText } from '../core/render';
 import { platformLiveSendsSince, venueLiveSendsSince, venueServiceSendsSince } from './counts';
@@ -252,15 +252,15 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     platformToday = pt;
     serviceMonth = sm;
   }
-  const onState = journeyStillOn(a.ctx, inst.meta.installId, inst.meta.journeyKey);
-  const installLive = Boolean(a.ctx && (a.ctx.marketing?.installId === inst.meta.installId || a.ctx.utility?.installId === inst.meta.installId));
+  const onState = await journeyOnState(a.ctx, inst.meta.installId, inst.meta.journeyKey);
   const system: GateInput['system'] = {
     paused: a.settings.paused,
     lapsed,
     tenantActive: tenantSnap.get('active') !== false,
-    venueOn: installLive,
-    journeyOn: onState.on,
+    venueOn: onState.venueOn,
+    journeyOn: onState.journeyOn,
     offSinceAt: onState.offSinceAt,
+    freezeWindowMs: Number.isFinite(rules.freezeWindowMinutes) ? rules.freezeWindowMinutes * MINUTE_MS : undefined,
     staleAfterMs: a.settings.safety.staleAfterHours * HOUR_MS,
     venueSendsToday: venueToday,
     venueCeiling: a.settings.safety.maxSendsPerVenuePerDay,
@@ -286,7 +286,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         reason: pre.reason ?? 'defer',
         creditsWaitStartedAt: inst.state.waiting?.creditsWaitStartedAt,
         ...(inst.state.waiting?.nodeId === nodeId && inst.state.waiting?.dispatchAttempts !== undefined ? { dispatchAttempts: inst.state.waiting.dispatchAttempts } : {}),
-        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until } }] : [],
+        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until } }] : [],
       };
     }
     return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off');
@@ -434,7 +434,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     });
   const decision = decisionFor(gate);
 
-  const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, nodeId, sendKey, channel, variantId: variant.id, slot };
+  const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, channel, variantId: variant.id, slot };
 
   // ── 5. Outcome ──
   if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz });
@@ -764,7 +764,7 @@ function skipWith(decision: DecisionRecord, a: SendArgs, sendKey: string, common
     suppress,
     events: [
       {
-        ...(common ?? { tenantUserId: a.inst.meta.tenantUserId, venueId: a.inst.meta.venueId, contactId: a.inst.meta.contactId, instanceId: a.inst.id, journeyKey: a.inst.meta.journeyKey, nodeId: a.nodeId, sendKey }),
+        ...(common ?? { tenantUserId: a.inst.meta.tenantUserId, venueId: a.inst.meta.venueId, contactId: a.inst.meta.contactId, instanceId: a.inst.id, journeyKey: a.inst.meta.journeyKey, mode: a.inst.meta.mode, nodeId: a.nodeId, sendKey }),
         type: decision.result === 'block' ? 'send.blocked' : 'send.skipped',
         occurredAt: a.now,
         data: { decision },

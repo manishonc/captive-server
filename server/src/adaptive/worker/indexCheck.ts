@@ -9,6 +9,8 @@
 import { FieldPath } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
+import { venueEventsQuery } from '../rollups/rollup';
+import { activeInstancesQuery } from '../engine/applyInFlight';
 
 interface Probe {
   name: string;
@@ -46,6 +48,10 @@ const PROBES: Probe[] = [
   // Twilio status callbacks find their send by the provider id (single-field index; must not be exempted).
   { name: 'JourneySends(providerMessageId)', run: () => db.collection(COL.journeySends).where('providerMessageId', '==', '_probe').limit(1).get() },
   { name: 'Users(email in, unsubscribed)', run: () => db.collection(COL.guests).where('email', 'in', ['_probe', '_probe2']).where('unsubscribed', '==', true).limit(1).get() },
+  // The daily numbers read a venue's log in commit order (recordedAt is exempt from single-field indexing).
+  { name: 'JourneyEvents(venueId, recordedAt)', run: () => venueEventsQuery('_probe', past(), null, 1).get() },
+  // "Apply to guests already in these journeys" pages through a journey's running guests.
+  { name: 'JourneyInstances(venueId, journeyKey, status)', run: () => activeInstancesQuery('_probe', '_probe').limit(1).get() },
 ];
 
 export interface IndexCheckResult {

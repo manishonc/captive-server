@@ -4,7 +4,7 @@
  * same doc again instead of a second one.
  */
 
-import type { Transaction } from 'firebase-admin/firestore';
+import { FieldValue, type Transaction } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { retentionFrom } from '../store/time';
@@ -27,6 +27,8 @@ export interface EventInput {
   variantId?: string | null;
   channel?: string | null;
   slot?: string | null;
+  /** The instance's run mode (test / live): the rollups keep test runs apart. */
+  mode?: 'test' | 'live' | null;
   source?: JourneyEventDoc['source'];
   data?: Record<string, unknown>;
 }
@@ -48,8 +50,12 @@ export function eventDoc(e: EventInput): Record<string, unknown> {
     channel: e.channel ?? null,
     slot: e.slot ?? null,
     source: e.source ?? 'engine',
+    ...(e.mode ? { mode: e.mode } : {}),
     occurredAt: new Date(e.occurredAt),
-    recordedAt: new Date(),
+    // The commit time (not when this object was built): the rollups read the log in
+    // `recordedAt` order up to "now − 2 min", which is only exact if nothing lands later
+    // with an earlier stamp.
+    recordedAt: FieldValue.serverTimestamp(),
     data: stripUndefinedDeep(e.data ?? {}),
     expireAt: retentionFrom(e.occurredAt),
     schemaVersion: SCHEMA_VERSION,

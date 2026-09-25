@@ -6,6 +6,7 @@
  *   POST /dev/clock           sandbox only — move the fake clock ({ advance: '48h' } | { reset: true })
  *   POST /dev/launch          sandbox only — set launch modes / the pause
  *   GET  /dev/guest-log       sandbox only — ?email= | ?phone= — events, sends, "why" sentences
+ *   POST /dev/rollup          sandbox only — { venueId? } — the daily numbers now (no 2-min lag)
  *   POST /dev/provider-event  sandbox only — { sendKey, event: delivered|failed|opened|bounce|spam|
  *                             unsubscribe|click|rating|stop|start|reply, stars?, text? }
  *   POST /ingest/click        the CMS: a counted click on a journey short link { shortCode }
@@ -45,6 +46,7 @@ router.get('/admin/engine', handle(async () => engine.getEngineStatus()));
 router.post('/dev/clock', handle(async (req) => engine.devClock(req.body ?? {})));
 router.post('/dev/launch', handle(async (req) => engine.devLaunch(req.body ?? {})));
 router.post('/dev/provider-event', handle(async (req) => engine.devProviderEvent(req.body ?? {})));
+router.post('/dev/rollup', handle(async (req) => engine.devRollup(req.body ?? {})));
 
 const clickSchema = z.object({ shortCode: z.string().min(1).max(64) });
 const ratingSchema = z.object({ shortCode: z.string().min(1).max(64), stars: z.number().int().min(1).max(5), feedback: z.string().max(1000).optional().nullable() });
