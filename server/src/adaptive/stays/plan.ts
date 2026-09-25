@@ -147,6 +147,18 @@ export function stayFacts(stay: Pick<StaySnap, 'nights' | 'checkIn' | 'checkOut'
   return { stay: { nights: stay.nights, checkIn: stay.checkIn, checkOut: stay.checkOut, checkInAt: stay.checkInAt, checkOutAt: stay.checkOutAt, status: stay.status } };
 }
 
+// ── Past guests (stays/moments.ts) ───────────────────────────────────────────
+
+/**
+ * "Past guests aren't messaged": a guest who checked out before an install went live
+ * (a stay playbook turned on for the first time after they left, say) gets none of its
+ * moments — whatever the moment's own time. `liveSince` null means "no filter", as in
+ * enrolment: a hold that must stop everyone can't be expressed as null.
+ */
+export function checkedOutBeforeLive(stay: Pick<StaySnap, 'checkOutAt'>, liveSince: number | null): boolean {
+  return liveSince !== null && stay.checkOutAt <= liveSince;
+}
+
 // ── The checkout overlap rule (stays/moments.ts) ─────────────────────────────
 
 /** How late after its moment the worker may reach Stay guide's checkout step (its wake's lag). */
@@ -158,7 +170,7 @@ export const COVER_MARGIN_MS = 15 * MINUTE_MS;
  * the worker's lag — is inside the freeze window. Leans towards "no" near the edge, so the
  * Checkout reminder then goes (both messages at worst). Not airtight: a Stay guide checkout
  * message held past the freeze — a worker more than 15 min late, or quiet hours in the
- * guest's phone zone deferring it — can still leave neither (docs, "Open follow-ups").
+ * guest's phone zone deferring it — can still leave neither (docs, "Known limits").
  */
 export function guideStillSends(momentAt: number, offSinceAt: number | null, freezeMs: number): boolean {
   return offSinceAt !== null && momentAt + COVER_MARGIN_MS <= offSinceAt + freezeMs;
@@ -185,6 +197,26 @@ function previousStays(stays: StaySnap[], s: StaySnap): StaySnap[] {
   return stays.filter((p) => p.id !== s.id && p.status !== 'cancelled' && p.checkOut === s.checkIn);
 }
 
+/**
+ * On its checkout day, `s` is the outgoing stay of a turnover (another stay not cancelled
+ * checks in that day): not linked any more that day. Otherwise the next guest — or a
+ * cleaner — who connects before the checkout time would be taken for this stay's guest and
+ * get its review ask and book-direct offer. `today` is the venue-local date of the connect.
+ */
+export function outgoingOnTurnoverDay(stays: StaySnap[], s: Pick<StaySnap, 'id' | 'checkOut'>, today: string): boolean {
+  return today >= s.checkOut && stays.some((n) => n.id !== s.id && n.status !== 'cancelled' && n.checkIn === s.checkOut);
+}
+
+/**
+ * Never linked: not `confirmed`, already linked, missing from the calendar's last content,
+ * or missed by an earlier poll and not seen since (`missingCount > 0`) — from checkout day on
+ * a stay leaves the missing list (absence is no signal then, D-C31), but a booking that
+ * vanished the evening before is still on its way out.
+ */
+export function linkable(s: Pick<StaySnap, 'id' | 'status' | 'contactId' | 'missingCount'>, missing: ReadonlySet<string>): boolean {
+  return s.status === 'confirmed' && !s.contactId && !missing.has(s.id) && !(s.missingCount > 0);
+}
+
 /** When `s`'s link window opens: at the previous stays' latest checkout on a turnover day, else 12 h before check-in. */
 export function windowOpensAt(s: Pick<StaySnap, 'checkInAt'>, previous: Array<Pick<StaySnap, 'checkOutAt'>>): number {
   return previous.length ? Math.max(...previous.map((p) => p.checkOutAt)) : s.checkInAt - LINK_BEFORE_CHECK_IN_MS;
@@ -195,11 +227,14 @@ export function windowOpensAt(s: Pick<StaySnap, 'checkInAt'>, previous: Array<Pi
  * `missing` is the feed's `lastMissingStayIds`: a booking absent from the calendar's last
  * content (the old half of a cancel-and-rebook, one held by the suspect-parse guard) is on
  * its way out and is never linked — it still counts as a previous stay on a turnover day.
+ * `today` (the venue-local date of `at`) applies the turnover-day rule for the outgoing stay
+ * (`outgoingOnTurnoverDay`); the link always passes it.
  */
-export function windowCandidates(stays: StaySnap[], at: number, missing: ReadonlySet<string> = new Set()): Candidate[] {
+export function windowCandidates(stays: StaySnap[], at: number, missing: ReadonlySet<string> = new Set(), today?: string): Candidate[] {
   const out: Candidate[] = [];
   for (const s of stays) {
-    if (s.status !== 'confirmed' || s.contactId || missing.has(s.id)) continue;
+    if (!linkable(s, missing)) continue;
+    if (today !== undefined && outgoingOnTurnoverDay(stays, s, today)) continue;
     const previous = previousStays(stays, s);
     const opensAt = windowOpensAt(s, previous);
     if (opensAt <= at && at < s.checkOutAt) out.push({ stay: s, opensAt, previous });

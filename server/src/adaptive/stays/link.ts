@@ -16,8 +16,11 @@
  *    is linked only to the first.
  *  - Only `confirmed` stays link (not overlapping or cancelled ones), and never one missing
  *    from the calendar's last content (the feed's `lastMissingStayIds`: the old half of a
- *    cancel-and-rebook is on its way out). First guest wins — one transaction on the Stay
- *    (and the feed's missing list); `linkMode` is frozen there (D-C13).
+ *    cancel-and-rebook is on its way out) or missed by a poll and not seen since
+ *    (`missingCount > 0`: on checkout day it has left the missing list). First guest wins —
+ *    one transaction on the Stay (and the feed's missing list); `linkMode` is frozen there (D-C13).
+ *  - The outgoing stay of a turnover isn't linked on its checkout day: an early next guest
+ *    (or a cleaner) would otherwise be taken for its guest.
  *  - Follow-up: the stay's moments, then `stay.linked` as the "done" mark. A link whose
  *    follow-up crashed is finished by the retried task or the guest's next connect.
  */
@@ -33,7 +36,7 @@ import { appendEvent, eventRef } from '../engine/events';
 import { loadVenueContext, type VenueContext } from '../engine/context';
 import { deliverEvent } from '../engine/advance';
 import { contactStaysQuery, linkCandidatesQuery, loadStay, stayInstancesQuery, stayRef, toStay, venueFeedRef } from './store';
-import { seenDuringAny, windowCandidates, windowOpensAt } from './plan';
+import { linkable, outgoingOnTurnoverDay, seenDuringAny, windowCandidates, windowOpensAt } from './plan';
 import { scheduleStayMoments } from './moments';
 
 export interface LinkArgs {
@@ -63,7 +66,7 @@ export async function linkStayOnConnect(a: LinkArgs): Promise<string | null> {
   const stays = (await linkCandidatesQuery(ctx.venueId, new Date(a.at - DAY_MS)).get()).docs.map((d) => toStay(d.id, d.data() as StayDoc));
   if (!stays.length) return null;
   const missingOf = (ids: unknown) => new Set(Array.isArray(ids) ? (ids as string[]) : []);
-  const candidates = windowCandidates(stays, a.at, missingOf((await venueFeedRef(ctx.venueId).get()).get('lastMissingStayIds')));
+  const candidates = windowCandidates(stays, a.at, missingOf((await venueFeedRef(ctx.venueId).get()).get('lastMissingStayIds')), today);
   if (!candidates.length) return null;
   let cv: Partial<ContactVenueDoc> | null | undefined;
   for (const c of candidates) {
@@ -76,7 +79,7 @@ export async function linkStayOnConnect(a: LinkArgs): Promise<string | null> {
       if (!snap.exists) return false;
       const s = toStay(snap.id, snap.data() as StayDoc);
       // First guest wins; the dates may have moved, or a poll found it missing, since the query.
-      if (s.status !== 'confirmed' || s.contactId || missingOf(feedSnap.get('lastMissingStayIds')).has(s.id)) return false;
+      if (!linkable(s, missingOf(feedSnap.get('lastMissingStayIds'))) || outgoingOnTurnoverDay(stays, s, today)) return false;
       const opensAt = windowOpensAt(s, c.previous);
       if (!(opensAt <= a.at && a.at < s.checkOutAt)) return false;
       tx.update(stayRef(s.id), { contactId: a.contactId, linkedAt: new Date(a.at), linkedGuestId: a.guestId, linkMode: a.mode, updatedAt: new Date() });

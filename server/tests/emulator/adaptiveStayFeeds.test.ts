@@ -153,6 +153,36 @@ async function main() {
     assert(alerts.every((a) => a.audience === 'owner' && !String(a.text).includes('sandbox:')), 'to the owner, without the link');
   });
 
+  await test('the owner re-saves the same link while a failing poll fetches: the error counts from the save (1, active, failing since now) — no stale email', async () => {
+    await freshStay([]);
+    await saveStayFeed(R.tenant, R.venueId, 'sandbox:calendar/missing', ACTOR);
+    const since = now() - 3 * 86_400_000; // failing for three days already
+    const failingFor3Days = { consecutiveErrors: 5, status: 'failing', lastError: 'LINK_INVALID', failingSince: new Date(since) };
+    await db.collection(COL.stayFeeds).doc(FEED).update(failingFor3Days);
+    const settings = await readEngineSettingsStrict();
+    const pollAt = now();
+    let saved = false;
+    const r = await pollFeed(FEED, { now: pollAt, settings }, {
+      kind: 'manual',
+      owner: 'test:resave',
+      onFetched: async () => {
+        await saveStayFeed(R.tenant, R.venueId, 'sandbox:calendar/missing', ACTOR);
+        saved = true;
+      },
+    });
+    assert(saved, 'the save ran between the fetch and the write');
+    assertEqual([r.outcome, r.errorCode], ['error', 'LINK_INVALID'], 'the fetch still failed');
+    const f = (await feedDoc())!;
+    assertEqual([f.consecutiveErrors, f.status, f.failingSince.toMillis(), f.lastError], [1, 'active', pollAt, 'LINK_INVALID'], 'counted from the save, not from three days ago');
+    assertEqual((await docsWhere(COL.alerts, 'kind', 'stay_feed_failing')).length, 0, 'no "stopped working since…" email');
+    // Without a save the same poll counts on from the stored values, and the owner is emailed.
+    await db.collection(COL.stayFeeds).doc(FEED).update(failingFor3Days);
+    await pollFeed(FEED, { now: now(), settings }, { kind: 'manual', owner: 'test:plain' });
+    const g = (await feedDoc())!;
+    assertEqual([g.consecutiveErrors, g.status, g.failingSince.toMillis()], [6, 'failing', since], 'counted on');
+    assertEqual((await docsWhere(COL.alerts, 'kind', 'stay_feed_failing')).length, 1, 'emailed once');
+  });
+
   await test('concurrent polls count one miss; a poll holding the feed makes the others wait', async () => {
     await freshStay([{ checkIn: day(2), checkOut: day(5) }]);
     await writeCalendar('r', []);

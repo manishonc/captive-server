@@ -12,6 +12,9 @@
  *    moments that come while it is on.
  *  - A moment up to 12 h past runs at once; later it is skipped and recorded as
  *    `stay.moment_skipped` — never typed `stay.moment`, which would enrol (D-C14).
+ *  - A guest who checked out before the journey's install went live gets none of its
+ *    moments ("past guests aren't messaged"): recorded once as `moment.passed` — not a
+ *    `stay.*` event, those are the stay numbers — so "why" can still say it.
  *  - After a date change only journeys with no instance for this stay are (re)scheduled:
  *    one that started only hears `stay.changed`, one that ended doesn't restart.
  *  - Task keys carry the stay's `datesVersion`, so dates going A → B → A still get a
@@ -25,6 +28,7 @@ import { GUEST_INFO_KEY } from '../store/venueSetups';
 import { getTriggerContract } from '../core/registry';
 import { eventIdFor, instanceIdFor } from '../core/runtime/ids';
 import { MINUTE_MS } from '../core/runtime/time';
+import { tsMs } from '../store/time';
 import type { RunMode } from '../core/runtime/types';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { loadCatalogue, templateVersion } from '../service/catalogue';
@@ -34,7 +38,7 @@ import { enabledJourneys, journeyOnState, loadContact, loadVenueContext, type Ve
 import { enrolForEvent } from '../engine/enrol';
 import { instanceRef, loadInstance } from '../engine/instanceStore';
 import { loadStay, type LoadedStay } from './store';
-import { guideStillSends, stayFacts } from './plan';
+import { checkedOutBeforeLive, guideStillSends, stayFacts } from './plan';
 import { MOMENT_GRACE_MS, momentFor, planMoment, stayTriggerKey } from './times';
 
 export interface StayTriggerPayload {
@@ -69,29 +73,46 @@ async function recordSkipped(stay: LoadedStay, journeyKey: string, momentAt: num
   );
 }
 
+async function recordPassed(stay: LoadedStay, journeyKey: string, momentAt: number, liveSince: number, now: number): Promise<void> {
+  // Uncounted (the rollups ignore the type), at most once per stay and journey. The journey key
+  // is on the event itself so a guest's timeline says which message it was.
+  await appendEvent(
+    {
+      type: 'moment.passed',
+      occurredAt: now,
+      tenantUserId: stay.tenantUserId,
+      venueId: stay.venueId,
+      contactId: stay.contactId,
+      journeyKey,
+      data: { stayId: stay.id, journeyKey, momentAt, reason: 'checked_out_before_live', checkOutAt: stay.checkOutAt, liveSince },
+    },
+    eventIdFor('engine', `stay:${stay.id}:${journeyKey}:passed`),
+  );
+}
+
 /**
  * The venue's installs a stay journey can come from, running or not: the marketing playbook
  * (also while the venue is paused) and Guest info (also while switched off).
  */
-async function venueInstalls(ctx: VenueContext): Promise<Array<{ installId: string; doc: VenuePlaybookDoc }>> {
-  const out: Array<{ installId: string; doc: VenuePlaybookDoc }> = [];
-  if (ctx.marketing) out.push({ installId: ctx.marketing.installId, doc: ctx.marketing.doc });
+async function venueInstalls(ctx: VenueContext): Promise<Array<{ installId: string; doc: VenuePlaybookDoc; liveSince: number | null }>> {
+  const out: Array<{ installId: string; doc: VenuePlaybookDoc; liveSince: number | null }> = [];
+  if (ctx.marketing) out.push({ installId: ctx.marketing.installId, doc: ctx.marketing.doc, liveSince: ctx.marketing.liveSince });
   else if (ctx.adaptive.activeInstallId) {
     const doc = (await db.collection(COL.venuePlaybooks).doc(ctx.adaptive.activeInstallId).get()).data() as VenuePlaybookDoc | undefined;
-    if (doc && doc.state === 'active') out.push({ installId: ctx.adaptive.activeInstallId, doc });
+    if (doc && doc.state === 'active') out.push({ installId: ctx.adaptive.activeInstallId, doc, liveSince: tsMs(ctx.adaptive.activatedAt) });
   }
-  if (ctx.utility) out.push({ installId: ctx.utility.installId, doc: ctx.utility.doc });
+  if (ctx.utility) out.push({ installId: ctx.utility.installId, doc: ctx.utility.doc, liveSince: ctx.utility.liveSince });
   else {
     const installId = ctx.adaptive.utility?.installId ?? venuePlaybookId(ctx.venueId, GUEST_INFO_KEY);
     const doc = (await db.collection(COL.venuePlaybooks).doc(installId).get()).data() as VenuePlaybookDoc | undefined;
-    if (doc) out.push({ installId, doc });
+    if (doc) out.push({ installId, doc, liveSince: tsMs(ctx.adaptive.utility?.enabledAt) });
   }
   return out;
 }
 
-/** A journey some install of this venue has (on or off): only then is a moment it misses worth recording. */
-async function journeyInstalled(ctx: VenueContext, journeyKey: string): Promise<boolean> {
-  return (await venueInstalls(ctx)).some((i) => Boolean(i.doc.journeys?.[journeyKey]));
+/** The install of this venue that has the journey (on or off), if any: only then is a moment it misses worth recording. */
+async function installWith(ctx: VenueContext, journeyKey: string): Promise<{ installId: string; liveSince: number | null } | null> {
+  return (await venueInstalls(ctx)).find((i) => Boolean(i.doc.journeys?.[journeyKey])) ?? null;
 }
 
 /**
@@ -106,10 +127,10 @@ export async function scheduleStayMoments(stay: LoadedStay, ctx: VenueContext, n
   const cat = await loadCatalogue();
   const contract = getTriggerContract('stay.window');
   if (!contract) return out;
-  const pinned = new Map<string, { installId: string; templateVersion: number }>();
+  const pinned = new Map<string, { installId: string; templateVersion: number; liveSince: number | null }>();
   for (const install of await venueInstalls(ctx)) {
     for (const [journeyKey, jc] of Object.entries(install.doc.journeys ?? {})) {
-      if (!pinned.has(journeyKey)) pinned.set(journeyKey, { installId: install.installId, templateVersion: jc.templateVersion });
+      if (!pinned.has(journeyKey)) pinned.set(journeyKey, { installId: install.installId, templateVersion: jc.templateVersion, liveSince: install.liveSince });
     }
   }
   for (const [journeyKey, record] of cat.templates) {
@@ -126,8 +147,9 @@ export async function scheduleStayMoments(stay: LoadedStay, ctx: VenueContext, n
     const momentAt = momentFor(cfg.anchor === 'checkInAt' ? stay.checkInAt : stay.checkOutAt, ctx.tz, cfg.at, cfg.offsetDays);
     const plan = planMoment(momentAt, now);
     if (plan.kind === 'too_late') {
-      // Only for a journey the venue has: a moment of a playbook it never set up isn't "missed".
-      if (pin) {
+      // Only for a journey the venue has: a moment of a playbook it never set up isn't "missed",
+      // nor one of a guest who had left before it went live (dates re-read after a turn-on).
+      if (pin && !checkedOutBeforeLive(stay, pin.liveSince)) {
         await recordSkipped(stay, journeyKey, momentAt, 'too_late', now);
         out.skipped += 1;
       }
@@ -174,7 +196,17 @@ export async function stayGuideCovers(ctx: VenueContext, stay: LoadedStay, momen
   return guideStillSends(momentAt, on.offSinceAt, freezeMs);
 }
 
-export type StayTriggerOutcome = 'gone' | 'stale' | 'too_late' | 'off' | 'switched_off' | 'not_installed' | 'covered' | 'enrolled' | 'not_enrolled';
+export type StayTriggerOutcome =
+  | 'gone'
+  | 'stale'
+  | 'too_late'
+  | 'off'
+  | 'switched_off'
+  | 'not_installed'
+  | 'checked_out_before_live'
+  | 'covered'
+  | 'enrolled'
+  | 'not_enrolled';
 
 /** The `stay_trigger` task: everything is checked again now, then the journey starts (or not). */
 export async function handleStayTrigger(p: StayTriggerPayload, env: { now: number; settings: EngineSettings }): Promise<StayTriggerOutcome> {
@@ -184,8 +216,17 @@ export async function handleStayTrigger(p: StayTriggerPayload, env: { now: numbe
   if (stay.datesVersion !== p.datesVersion) return 'stale'; // the dates moved: a newer task has the new moment
   const ctx = await loadVenueContext(stay.venueId);
   if (!ctx) return 'gone';
+  // Checked out before the journey's install went live (e.g. the stay playbook turned on after
+  // they left): not even a moment after the turn-on reaches them, and none counts as missed —
+  // also when it is off, paused or late now. Read from the install now, never from the payload's
+  // `installId` (a date change re-stamps it with the install of that time).
+  const install = await installWith(ctx, p.journeyKey);
+  if (install && checkedOutBeforeLive(stay, install.liveSince)) {
+    await recordPassed(stay, p.journeyKey, p.momentAt, install.liveSince!, env.now);
+    return 'checked_out_before_live';
+  }
   if (env.now - p.momentAt > MOMENT_GRACE_MS) {
-    if (await journeyInstalled(ctx, p.journeyKey)) await recordSkipped(stay, p.journeyKey, p.momentAt, 'too_late', env.now);
+    if (install) await recordSkipped(stay, p.journeyKey, p.momentAt, 'too_late', env.now);
     return 'too_late';
   }
   const current = modeFor(env.settings, stay.tenantUserId);
@@ -196,7 +237,7 @@ export async function handleStayTrigger(p: StayTriggerPayload, env: { now: numbe
   const journey = (await enabledJourneys(ctx)).find((j) => j.journeyKey === p.journeyKey);
   if (!journey || journey.definition.entry.trigger.type !== 'stay.window') {
     // A journey the venue never set up (e.g. the stay playbook isn't turned on) is quietly passed.
-    if (!(await journeyInstalled(ctx, p.journeyKey))) return 'not_installed';
+    if (!install) return 'not_installed';
     await recordSkipped(stay, p.journeyKey, p.momentAt, 'switched_off', env.now);
     return 'switched_off';
   }

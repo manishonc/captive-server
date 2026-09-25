@@ -23,6 +23,7 @@ import { missingReason, renderMessage, renderValues, variantContent, variantElig
 import { buildSeedPlan } from '../src/adaptive/seed/buildSeed';
 import { resolveStayTimes, stayInstants } from '../src/adaptive/stays/times';
 import { COVER_MARGIN_MS, guideStillSends, seenDuring, seenDuringAny, windowCandidates, type StaySnap } from '../src/adaptive/stays/plan';
+import { checkedOutBeforeLive, linkable, outgoingOnTurnoverDay } from '../src/adaptive/stays/plan';
 
 let passed = 0;
 let failed = 0;
@@ -363,6 +364,125 @@ test('an in-progress stay is preferred when two windows are open', () => {
   const soon = snap('soon', '2026-10-14', '2026-10-16', { checkInAt: now + 2 * HOUR_MS });
   assertEqual(windowCandidates([soon, current], now).map((c) => c.stay.id), ['now', 'soon'], 'in progress first');
   assertEqual(windowCandidates([current, snap('next', '2026-10-13', '2026-10-15')], now).map((c) => c.stay.id), ['now'], 'back to back: the next one waits');
+});
+
+// ── PR C2: the follow-ups ────────────────────────────────────────────────────
+
+console.log('\nPR C2: a wait counted from arrival never ends on checkout day (items 2–3)');
+
+test('a stay shortened to end at 12:00 on the mid-stay day: no mid-stay message, the checkout message the evening before', () => {
+  const def = journey('stay_guide');
+  // Guest info checkout 12:00: Tom, Mon 12 → Sat 17 Oct.
+  const tom12 = { ...tom, checkOutAt: zonedTime(2026, 10, 17, 12, 0, TZ).getTime() };
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, tom12).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, tom12).state;
+  assertEqual([s.cursor.nodeId, iso(s.waiting!.untilAt!)], ['mid_w', iso(zonedTime(2026, 10, 14, 11, 0, TZ).getTime())], 'waiting for Wed 11:00');
+  // Tue: the host shortens it to end Wed 14 Oct at 12:00 (11:00 is before 12:00, but the same day).
+  const short = { ...tom12, checkOutAt: zonedTime(2026, 10, 14, 12, 0, TZ).getTime(), nights: 2 };
+  const r = run(def, s, { kind: 'event', event: event('ev_short12', 'stay.changed') }, zonedTime(2026, 10, 13, 14, 17, TZ).getTime(), short);
+  assertEqual([r.state.cursor.nodeId, iso(r.state.waiting!.untilAt!)], ['co_w', iso(zonedTime(2026, 10, 13, 17, 0, TZ).getTime())], 'on to the checkout message, Tue 17:00');
+  assert(!r.effects.some((e) => e.type === 'send'), 'no mid-stay send');
+  assert(r.state.trail.some((t) => t.nodeId === 'mid_w' && t.outcome === 'past'), 'mid_w left by `past`');
+});
+
+test('a 4-night stay not shortened (checkout 12:00) still gets its mid-stay message', () => {
+  const def = journey('stay_guide');
+  const four = { checkInAt: tomIn, checkOutAt: zonedTime(2026, 10, 16, 12, 0, TZ).getTime(), nights: 4 };
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, four).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, four).state;
+  assertEqual(s.cursor.nodeId, 'mid_w', 'waiting');
+  const r = run(def, s, { kind: 'wake', nodeId: 'mid_w' }, zonedTime(2026, 10, 14, 11, 0, TZ).getTime(), four);
+  assertEqual(r.state.cursor.nodeId, 'mid', 'the mid-stay message goes (Wed, checkout Fri)');
+  assert(r.effects.some((e) => e.type === 'send'), 'a send');
+});
+
+test('a due wait: the booking ended that morning (checkout 10:00), its stay.changed handled at 11:20 → past, no mid-stay message', () => {
+  const def = journey('stay_guide');
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, tom).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, tom).state;
+  const ended = { ...tom, checkOutAt: zonedTime(2026, 10, 14, 10, 0, TZ).getTime(), nights: 2 };
+  const late = zonedTime(2026, 10, 14, 11, 20, TZ).getTime(); // the 11:00 timer hasn't run; check-in didn't move
+  const r = run(def, s, { kind: 'event', event: event('ev_ended', 'stay.changed') }, late, ended);
+  assert(!r.effects.some((e) => e.type === 'send'), 'no mid-stay send after he left');
+  assertEqual([r.state.status, r.state.exitReason], ['completed', 'exit:x'], 'the checkout wait is past too: done (known limit)');
+  assert(!r.state.trail.some((t) => t.nodeId === 'mid_w' && t.outcome === 'done'), 'mid_w did not fire');
+});
+
+test('a plain wake after a shortening the journey has not heard of yet → past (the fresh Stay decides)', () => {
+  const def = journey('stay_guide');
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, tom).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, tom).state;
+  const ended = { ...tom, checkOutAt: zonedTime(2026, 10, 14, 10, 0, TZ).getTime(), nights: 2 };
+  const r = run(def, s, { kind: 'wake', nodeId: 'mid_w' }, zonedTime(2026, 10, 14, 11, 20, TZ).getTime(), ended);
+  assert(!r.effects.some((e) => e.type === 'send'), 'no mid-stay send');
+  assert(r.state.trail.some((t) => t.nodeId === 'mid_w' && t.outcome === 'past'), 'mid_w left by `past`');
+  const same = run(def, s, { kind: 'wake', nodeId: 'mid_w' }, zonedTime(2026, 10, 14, 11, 0, TZ).getTime(), tom);
+  assertEqual(same.state.cursor.nodeId, 'mid', 'not shortened: the wake fires as before');
+  const co = guideAtCheckoutWait(zonedTime(2026, 10, 12, 17, 0, TZ).getTime());
+  const coWake = run(def, co, { kind: 'wake', nodeId: 'co_w' }, zonedTime(2026, 10, 16, 17, 0, TZ).getTime(), tom);
+  assertEqual(coWake.state.cursor.nodeId, 'co', 'a wait counted from checkout: its wake fires as before');
+});
+
+test('a plain wake after the booking was both moved earlier and shortened: judged on the day it would go → past', () => {
+  const def = journey('stay_guide');
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, tom).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, tom).state;
+  // Sun 11 → Wed 14 Oct 10:00: the fresh target (Tue 13 11:00) is before checkout day, but the wake is Wed 11:00.
+  const moved = { checkInAt: zonedTime(2026, 10, 11, 15, 0, TZ).getTime(), checkOutAt: zonedTime(2026, 10, 14, 10, 0, TZ).getTime(), nights: 3 };
+  const r = run(def, s, { kind: 'wake', nodeId: 'mid_w' }, zonedTime(2026, 10, 14, 11, 0, TZ).getTime(), moved);
+  assert(!r.effects.some((e) => e.type === 'send'), 'no mid-stay send an hour after he left');
+  assert(r.state.trail.some((t) => t.nodeId === 'mid_w' && t.outcome === 'past'), 'mid_w left by `past`');
+});
+
+test('a plain wake whose fresh Stay moves the wait onto checkout day (moved later, now 2 nights) → past, although today is mid-stay', () => {
+  const def = journey('stay_guide');
+  const now = zonedTime(2026, 10, 12, 17, 0, TZ).getTime();
+  let s = run(def, freshState(def.start, now), { kind: 'start' }, now, tom).state;
+  s = run(def, s, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, tom).state;
+  // Tue 13 → Thu 15 Oct 10:00: the fresh target is Thu 11:00 (checkout day); the wake is Wed 11:00.
+  const moved = { checkInAt: zonedTime(2026, 10, 13, 15, 0, TZ).getTime(), checkOutAt: zonedTime(2026, 10, 15, 10, 0, TZ).getTime(), nights: 2 };
+  const r = run(def, s, { kind: 'wake', nodeId: 'mid_w' }, zonedTime(2026, 10, 14, 11, 0, TZ).getTime(), moved);
+  assert(!r.effects.some((e) => e.type === 'send'), 'no mid-stay message on a 2-night stay');
+  assertEqual([r.state.cursor.nodeId, iso(r.state.waiting!.untilAt!)], ['co_w', iso(zonedTime(2026, 10, 14, 17, 0, TZ).getTime())], 'on to the checkout message, Wed 17:00');
+});
+
+console.log('\nPR C2: past guests (item 1)');
+
+test('checked out before the install went live → none of its moments; mid-stay or null → no filter', () => {
+  const out = { checkOutAt: zonedTime(2026, 10, 17, 10, 0, TZ).getTime() };
+  assert(checkedOutBeforeLive(out, zonedTime(2026, 10, 17, 12, 0, TZ).getTime()), 'turned on at 12:00, after the 10:00 checkout');
+  assert(checkedOutBeforeLive(out, out.checkOutAt), 'turned on at the checkout instant');
+  assert(!checkedOutBeforeLive(out, zonedTime(2026, 10, 12, 16, 0, TZ).getTime()), 'turned on mid-stay: the later moments still go');
+  assert(!checkedOutBeforeLive(out, null), 'no liveSince: no filter (as enrolment)');
+});
+
+console.log('\nPR C2: who can be linked (item 4)');
+
+test('a booking missed by a poll and not seen since is never linked — also on its checkout day, off the missing list', () => {
+  const at = zonedTime(2026, 10, 22, 9, 0, TZ).getTime();
+  const vanished = snap('B', '2026-10-20', '2026-10-22', { missingCount: 1, lastMissAt: zonedTime(2026, 10, 21, 21, 17, TZ).getTime() });
+  assertEqual(windowCandidates([vanished], at, new Set(), '2026-10-22').length, 0, 'checkout morning: not linked');
+  assertEqual(windowCandidates([{ ...vanished, missingCount: 0, lastMissAt: null }], at, new Set(), '2026-10-22').map((c) => c.stay.id), ['B'], 'seen again (misses reset): linkable');
+  assert(!linkable(vanished, new Set()) && linkable({ ...vanished, missingCount: 0 }, new Set()), 'linkable()');
+  assert(!linkable({ ...vanished, missingCount: 0 }, new Set(['B'])), 'on the missing list: not linkable');
+});
+
+test('turnover day: the outgoing stay nobody linked does not take the next guest arriving early', () => {
+  const prev = snap('prev', '2026-10-20', '2026-10-22');
+  const next = snap('next', '2026-10-22', '2026-10-25');
+  const at = (d: number, h: number) => zonedTime(2026, 10, d, h, 0, TZ).getTime();
+  assertEqual(windowCandidates([prev, next], at(22, 9), new Set(), '2026-10-22').length, 0, 'Thu 09:00: neither (prev is outgoing, next opens at 10:00)');
+  assertEqual(windowCandidates([prev, next], at(21, 20), new Set(), '2026-10-21').map((c) => c.stay.id), ['prev'], 'the evening before: prev links as before');
+  assertEqual(windowCandidates([prev, next], at(22, 11), new Set(), '2026-10-22').map((c) => c.stay.id), ['next'], 'after checkout: the next stay');
+  assert(outgoingOnTurnoverDay([prev, next], prev, '2026-10-22') && !outgoingOnTurnoverDay([prev, next], prev, '2026-10-21'), 'only on its checkout day');
+  assert(outgoingOnTurnoverDay([prev, { ...next, status: 'overlap_flagged' }], prev, '2026-10-22'), 'a flagged next stay counts (fail closed)');
+  assert(!outgoingOnTurnoverDay([prev, { ...next, status: 'cancelled' }], prev, '2026-10-22'), 'a cancelled one does not');
+  assertEqual(windowCandidates([prev], at(22, 9), new Set(), '2026-10-22').map((c) => c.stay.id), ['prev'], 'no next stay: its own guest can still link on checkout morning');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

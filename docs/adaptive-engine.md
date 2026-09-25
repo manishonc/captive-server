@@ -98,7 +98,9 @@ Written once to `CaptivePortal_AdaptiveAlerts` (one per venue, reason and day) a
   than 24 h (`stay_feed_failing`), and once per pair of overlapping bookings (`stay_overlap`).
 
 **Sign-up breaker:** more than `safety.maxNewContactsPerApPerHour` (60) new guests at one access point in
-an hour → the rest of that hour's new guests start no journeys (they are still recorded).
+an hour → the rest of that hour's new guests start no journeys (they are still recorded). Each access point
+and hour has that many places, each taken once by the first new guest's task to claim it, so tasks
+running at the same time can't let more through (#97).
 
 ## Daily numbers — `CaptivePortal_JourneyStats`
 
@@ -187,19 +189,23 @@ linked to it, and each switched-on stay journey starts at its moment.
   (`stay_sync:…`, never re-arms) and the worker's watchdog (at start, then hourly) restart a stopped chain
   on the same slot, so a feed has one chain.
 - One poll at a time per feed (a lease on the feed). A fetch or parse error is recorded, never thrown:
-  `failing` after 3 in a row, and the owner is emailed once a day after 24 h.
+  `failing` after 3 in a row, and the owner is emailed once a day after 24 h. The count is taken from the
+  feed as it is when the error is written, so a save of the same link during a poll's fetch ("try again")
+  makes that error the first of a fresh start.
 - A new booking → `stay.created`; new dates → `stay.changed` (`datesVersion + 1`); a booking missing →
   a miss. **Two misses at least 30 min apart (engine clock) → cancelled** (`stay.cancelled`). A 304 or the
   same content again still counts (its missing bookings are `lastMissingStayIds`). From checkout day on a
-  stay is frozen: never missed, never cancelled.
+  stay is frozen: never missed, never cancelled — and it leaves the missing list, but the same content
+  again doesn't reset a miss it already has (only new content that has it again does).
 - **Two or more bookings gone at once** are held for 24 h (`feedWarning: 'mass_missing'`, one HeidiFi
   alert): a wrong link or a cut-off file looks the same. Saving a different link lifts the hold at once. A
   single missing booking always follows the two-miss rule. A booking still in the content is seen (its
   misses reset) also while the hold is on — only the missing ones are held.
 - Overlapping bookings (back-to-back is not one) → both `overlap_flagged`, nobody new is linked, the owner
   is emailed. A stay already linked keeps running. A booking missing from the content is on its way out,
-  not an overlap (a cancel-and-rebook of the same dates flags nothing); it isn't linked either, and —
-  outside the 24 h hold for several bookings gone at once — it doesn't count as upcoming.
+  not an overlap (a cancel-and-rebook of the same dates flags nothing) — also on its checkout day, when it
+  has left the missing list with a miss on record; it isn't linked either, and — outside the 24 h hold for
+  several bookings gone at once — it doesn't count as upcoming.
 - A feed deleted, or saved with another link, while a poll runs: that poll's remaining writes are refused
   (each checks the feed and its lease first) and it ends `superseded`; the save's own sync waits for it
   (put back for 60 s) and then reads the new link.
@@ -211,17 +217,25 @@ linked to it, and each switched-on stay journey starts at its moment.
   email or phone, the sign-up breaker, not handled late). The window is 12 h before check-in until
   checkout. On a turnover day it opens at the previous stay's checkout, and nobody seen at the venue during
   the previous stay is linked — every stay checking out that day counts (also an `overlap_flagged` one, or
-  two of them after a double booking), and the window opens at the latest of their checkouts. A booking
-  missing from the calendar's last content (the feed's `lastMissingStayIds`) is never linked — until its
-  checkout day, when absence is no longer a signal (D-C31: some feeds drop a stay that day) and it links
-  like any confirmed stay. The first guest wins; `linkMode` (test/live) is frozen then.
+  two of them after a double booking), and the window opens at the latest of their checkouts. The
+  outgoing stay of a turnover (another stay not cancelled checks in on its checkout day) is not linked on
+  that day (from midnight, venue time), so a next guest or a cleaner connecting before its checkout time
+  isn't taken for its guest. The cost: its own guest, if they first connect that day, gets none of its
+  moments — the review ask and book-direct offer (on a 1-night stay also Local tips, due that morning),
+  and between midnight and about 05:00 also the checkout-eve moments still inside the 12 h grace (the
+  Checkout reminder; on a 1-night stay also Stay guide's welcome). A booking
+  missing from the calendar's last content (the feed's `lastMissingStayIds`) is never linked. From its
+  checkout day absence is no longer a signal (D-C31: some feeds drop a stay that day), so it leaves that
+  list — but a booking missed by an earlier poll and not seen since (`missingCount > 0`) still isn't
+  linked. The first guest wins; `linkMode` (test/live) is frozen then.
 - A guest already linked to a stay here that isn't over is never linked to another. **Known limit:** a
   guest with two back-to-back bookings is linked only to the first; the second runs without them.
 - Then each stay journey's moment is scheduled (`stay_trigger:{stayId}:{journey}:{datesVersion}:{moment}`),
   for every stay journey the venue could run: its installs' (a paused playbook, Guest info switched off)
   at their pinned version, and the catalogue's other stay journeys for its type (a playbook turned on
   later) at the published one. Whether it is switched on is checked when the moment comes. Up to 12 h
-  late runs at once; later is skipped (`stay.moment_skipped`) — only for a journey the venue has set up.
+  late runs at once; later is skipped (`stay.moment_skipped`) — only for a journey the venue has set up,
+  and not for a guest who checked out before that install went live.
 
 **At the moment** (`stays/moments.ts`, task `stay_trigger`) everything is checked again: the stay isn't
 cancelled (a linked, overlapping one keeps its moments), it is still this guest's and the same dates
@@ -229,21 +243,35 @@ version, it's at most 12 h late, launch isn't off (a guest linked in a test run 
 is switched on (a journey the venue has but that is off or paused → `stay.moment_skipped` /
 `switched_off`; one it never set up passes quietly). Then a `stay.moment` event starts the journey. Its time is the later of the moment and the
 link, so a guest linked after the venue went live still gets the moment that brought them in.
+- **Past guests aren't messaged:** a guest who checked out at or before the journey's install went live
+  (`checkOutAt <= liveSince`: the activation, or Guest info switched on) gets none of its moments — e.g. the
+  stay playbook turned on for the first time after they left: no review ask, no book-direct offer. Checked
+  first, from the install that has the journey (on, paused or switched off) when the moment comes — never
+  from the task's `installId` (a date change re-stamps it). Recorded once per stay and journey as
+  `moment.passed` (`reason: 'checked_out_before_live'`), which is not a `stay.*` event and isn't counted
+  in the numbers: such a moment is never "missed", also when it comes paused, switched off or late. `liveSince` moves on every activate, so a guest who
+  left before an owner turned the running playbook on again loses the post-stay messages still to come
+  (fails closed). Guest info only has the Checkout reminder, which comes before checkout, so a wizard save
+  can't cut it — a post-checkout Guest info journey would need this rule looked at again.
 - **Checkout reminder vs Stay guide:** the Checkout reminder (Guest info) doesn't start when this stay's
   Stay guide covers the guest: 2+ nights, Stay guide on (or switched off within the freeze window before
   the moment, with 15 min to spare for the worker's lag — near the edge both go rather than neither), and its
   instance for this stay active or completed. A late-linked guest, a 1-night stay, or
   a Stay guide paused or switched off earlier gets the reminder.
 - A guest linked while the stay playbook is paused, or before it is turned on, gets the moments that come
-  once it runs.
+  once it runs — unless they checked out before it went live (see "Past guests aren't messaged").
 - **Known limits:** a moment that comes while the venue is paused starts nothing and is lost (Stay guide's
   welcome passed while paused means no Stay guide for that stay; the Checkout reminder then covers the
   guest); when checkout moves earlier so that Stay guide's "day before checkout, 17:00" has passed, Stay
   guide finishes without checkout instructions and the reminder stays quiet.
 
 **While a stay journey runs** it reads its Stay fresh at every step. `stay.changed` moves a wait anchored
-on the stay (a target already past takes `past`; a wait counted from arrival that now ends at or after
-checkout — the stay was shortened — is past too; a wait already due whose anchor didn't move just fires);
+on the stay (a target already past takes `past`; a wait already due whose anchor didn't move just fires).
+A wait counted from arrival that would end on checkout's local day or later — the stay was shortened — is
+`past`: when it is entered, when its `stay.changed` finds it already due, and when its timer wakes before
+that event arrived — judged on the day it would go and on the fresh Stay's own target (so Stay guide's
+mid-stay message never goes on the day the guest leaves; a journey's own start moment, like Local tips on
+day 2 of a 1-night stay, isn't a wait and isn't covered);
 `stay.cancelled` — or a Stay that is gone — ends the journey as `cancelled` / `stay_cancelled`. A send due
 on a Stay that is cancelled but whose event hasn't arrived yet goes to gate rule 1, which skips it
 (`send.skipped`, "the booking was cancelled", test runs too) and ends the journey the same way; the live
@@ -264,37 +292,27 @@ any non-https link.
 The owner routes (save, check link, sync now, status, delete) come with PR D; PR C has the service they
 mount (`service/stays.ts`).
 
-**Open follow-ups** (found in PR C's reviews, disputed there, not fixed yet — decide before live):
-1. **A first activation reaches past guests.** A guest linked while only Guest info is on gets the
-   catalogue's stay moments scheduled. If the stay playbook is then turned on for the first time, their
-   review ask (checkout day 15:00) and book-direct offer (checkout + 3 days) still start — also for a
-   guest who checked out before it was turned on, against "past guests aren't messaged". Suggested
-   guard in `handleStayTrigger`: a journey the venue didn't have at link time (payload `installId` is
-   `''`) starts only if `stay.checkOutAt > install.liveSince`.
-2. **A shortened stay with a checkout after 11:00** still sends the mid-stay message (check-in + 2 days,
-   11:00) on checkout morning, and then no checkout instructions. Suggested: an arrival-anchored wait
-   whose target falls on or after the checkout's local day takes `past`.
-3. **A due wait and a plain wake skip the "not after checkout" rule.** The `stay.changed` shortcut that
-   fires a due wait, and a timer wake after a shortening, can send the mid-stay message after the new
-   checkout. Suggested: apply the same `past` rule there as when a wait is entered.
-4. **Checkout day:** a booking that vanished from the calendar the evening before its checkout day can
-   still be linked that morning (absence isn't a signal from checkout day on, D-C31). Option: also
-   skip a stay with `missingCount > 0`.
-5. **A same-link save during a failing poll's fetch** is overwritten by that poll's error write (old
-   error count, `failing`, `failingSince`). Suggested: compute the error fields from the feed read in
-   `finishFeed`'s transaction.
-6. **The checkout overlap rule is not airtight.** The Checkout reminder stays quiet when Stay guide still
-   sends inside the freeze (with 15 min to spare), but a Stay guide checkout message held past the freeze
-   — quiet hours in the guest's phone zone deferring it, or a worker more than 15 min late — is then
-   skipped too: neither goes. Suggested: keep the step's first planned time for the freeze check across a
-   quiet-hours or ceiling hold (as a pause already does).
-7. **Over-90-night edge cases:** a known stay kept at its old dates after its event grew past 90 nights
-   with a later check-in can overlap a new booking in the dates it gave up (a false overlap flag); a
-   split booking whose merged pieces pass 90 nights is shortened to its first 90 nights. Both need a
-   booking over 90 nights, which is unsupported anyway.
-8. **Tests:** no emulator test covers the link query returning an `overlap_flagged` previous stay; the
-   sign-up breaker (PR B) can let one extra new guest through under load (its test flaked once) — a
-   separate fix is in progress.
+**Known limits** (found in PR C's reviews, parked on purpose):
+- **The checkout overlap rule is not airtight.** The Checkout reminder stays quiet when Stay guide still
+  sends inside the freeze (with 15 min to spare), but a Stay guide checkout message held past the freeze —
+  quiet hours in the guest's phone zone deferring it, or a worker more than 15 min late — is then skipped
+  too: neither goes. It needs an owner switch-off in the 45 min before the checkout-eve 17:00 and a far
+  phone zone or a late worker. A fix would keep the step's first planned time for the freeze check across
+  a quiet-hours or ceiling hold (never `intendedAt` itself: the 6 h stale rule would then skip every
+  overnight hold), for service sends only — to be done with or before PR D's Replay.
+- **Over-90-night edge cases:** a known stay kept at its old dates after its event grew past 90 nights
+  with a later check-in can overlap a new booking in the dates it gave up (a false overlap flag); a split
+  booking whose merged pieces pass 90 nights is shortened to its first 90 nights. Both need a booking over
+  90 nights, which is unsupported anyway.
+- **A wait counted from checkout whose timer wakes before its `stay.changed`:** if checkout moved earlier
+  and the worker wakes Stay guide's "day before checkout, 17:00" before the change reaches the journey, it
+  still sends (e.g. the booking cut at 16:57 to end that morning, the worker late past 17:00 → the checkout
+  message after the guest left); handled in the other order, the wait is `past` and nothing goes. Only
+  waits counted from arrival are judged on the fresh Stay at a wake.
+- **An early next guest on a turnover day:** a guest first seen at the venue before the previous stay's
+  checkout is never linked to the next stay (D-C11), also when nobody was linked to the previous one. If
+  the next stay's whole party connects before that checkout, it gets no Stay guide and no Checkout
+  reminder. It is no longer taken for the outgoing stay's guest (see "Linking a guest").
 
 ## Switches — `CaptivePortal_AdaptiveConfig/global`
 
