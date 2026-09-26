@@ -31,7 +31,8 @@ import { pickLang } from '../core/schemas';
 import { buildTimeline, type TimelineVenue } from '../core/owner/timeline';
 import { assertLookupKeyMatches } from './identityGuard';
 import { detailLessSignal, isUrgent, refusalText, urgentNote } from '../core/owner/deadTasks';
-import { loadGuestRecord } from './guests';
+import { loadGuestRecord, tenantOfferLabels } from './guests';
+import { accountNameOf } from '../core/owner/accountName';
 import { now, refreshClock } from '../engine/clock';
 import { readEngineSettings } from '../store/engineSettings';
 
@@ -216,7 +217,7 @@ export async function searchGuests(body: unknown) {
     results.push({
       contactId: f.contactId,
       tenantUserId: f.tenantUserId,
-      account: { name: user.get('displayName') ?? user.get('companyName') ?? user.get('name') ?? null, email: user.get('email') ?? null },
+      account: { name: accountNameOf((field) => user.get(field)), email: user.get('email') ?? null },
       matchedBy: f.via,
       name: contact.exists ? [contact.get('firstName'), contact.get('lastName')].filter(Boolean).join(' ') || null : null,
       lastSeenAt: iso(contact.get('lastSeenAt')),
@@ -233,16 +234,17 @@ export async function adminGuest(contactId: string, query: { lang?: unknown }) {
   const snap = await db.collection(COL.contacts).doc(contactId).get();
   if (!snap.exists) throw notFound('No such guest');
   const contact = snap.data() as ContactDoc;
-  const [record, venuesList, places, cat] = await Promise.all([
+  const [record, venuesList, places, cat, offerLabels] = await Promise.all([
     loadGuestRecord(contactId, contact.tenantUserId),
     listTenantVenues(contact.tenantUserId),
     contactVenuesQuery(contactId).get(),
     loadCatalogue(),
+    tenantOfferLabels(contact.tenantUserId, lang),
   ]);
   const venues: Record<string, TimelineVenue> = Object.fromEntries(venuesList.map((v) => [v.venueId, { name: v.name, tz: v.timezone ?? 'Europe/Zurich' }]));
   const journeyNames: Record<string, string> = {};
   for (const [key, rec] of cat.templates) journeyNames[key] = pickLang(rec.header.name, lang);
-  const timeline = buildTimeline({ tenantUserId: contact.tenantUserId, events: record.events, sends: record.sends, consents: record.consents, venues, journeyNames, lang, audience: 'admin' });
+  const timeline = buildTimeline({ tenantUserId: contact.tenantUserId, events: record.events, sends: record.sends, consents: record.consents, venues, journeyNames, lang, audience: 'admin', offerLabels });
   // Provider status history per send: its message.* events in order.
   const statusHistory: Record<string, Array<{ type: string; at: string }>> = {};
   for (const e of [...record.events].sort((a, b) => a.occurredAt - b.occurredAt)) {

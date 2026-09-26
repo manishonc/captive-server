@@ -19,10 +19,13 @@
  *    change triggered through another tenant's message says so without naming it.
  *  - `detail` is filled for admins only (ids, mode, decision checks — still no bodies or
  *    feedback, and free text is scrubbed of addresses and phone numbers).
+ *  - An issued offer is named in German from the venue's offer menu when it has a German label
+ *    (`offerLabels`, PR E follow-up): the event itself stores only the English label.
  */
 
 import { creditsWord, explainDecision, type DecisionRecord } from '../runtime/decision';
 import { isValidTimeZone } from '../runtime/time';
+import type { I18n } from '../schemas';
 
 export type TimelineLang = 'en' | 'de';
 
@@ -112,6 +115,63 @@ export interface BuildTimelineArgs {
   lang: TimelineLang;
   audience: 'owner' | 'admin';
   defaultTz?: string;
+  /**
+   * By venueId, then offerKey: the offer's label in the languages the owner wrote (see
+   * `offerLabelsFrom`). Only this tenant's venues. Left out → the label the event stored.
+   */
+  offerLabels?: OfferLabels;
+}
+
+/** Offer labels by venueId, then offerKey. */
+export type OfferLabels = Record<string, Record<string, I18n>>;
+
+/** What `offerLabelsFrom` reads of a venue setup (`CaptivePortal_VenuePlaybooks`). */
+export interface OfferMenuSetup {
+  venueId: string;
+  playbookKey?: string | null;
+  state?: string | null;
+  offerMenu?: ReadonlyArray<{ offerKey?: unknown; label?: unknown }> | null;
+}
+
+function asI18n(v: unknown): I18n | null {
+  return v && typeof v === 'object' && !Array.isArray(v) && typeof (v as I18n).en === 'string' ? (v as I18n) : null;
+}
+
+/**
+ * The offer labels of a tenant's venue setups. A venue can hold several setups that share an
+ * offerKey (every seeded playbook has `dessert`, `coffee`, …): the venue's active setup wins,
+ * then the others in playbookKey order.
+ */
+export function offerLabelsFrom(setups: ReadonlyArray<OfferMenuSetup>): OfferLabels {
+  const rank = (s: OfferMenuSetup) => (s.state === 'active' ? 0 : 1);
+  const ordered = [...setups].sort((a, b) => rank(a) - rank(b) || String(a.playbookKey ?? '').localeCompare(String(b.playbookKey ?? '')));
+  const out: OfferLabels = {};
+  for (const s of ordered) {
+    if (typeof s?.venueId !== 'string' || !s.venueId) continue;
+    for (const o of s.offerMenu ?? []) {
+      const label = asI18n(o?.label);
+      if (typeof o?.offerKey !== 'string' || !o.offerKey || !label) continue;
+      const byKey = (out[s.venueId] ??= {});
+      if (!Object.prototype.hasOwnProperty.call(byKey, o.offerKey)) byKey[o.offerKey] = label;
+    }
+  }
+  return out;
+}
+
+function menuLabel(labels: OfferLabels, venueId: string | null, offerKey: string | null): I18n | null {
+  const has = (o: object, k: string | null): k is string => k !== null && Object.prototype.hasOwnProperty.call(o, k);
+  if (!has(labels, venueId)) return null;
+  const byKey = labels[venueId];
+  return has(byKey, offerKey) ? asI18n(byKey[offerKey]) : null;
+}
+
+/**
+ * An issued offer's name: in German the menu's German label when there is one; otherwise the
+ * label the event stored (English, as it was when issued), then the menu's English label.
+ */
+export function offerLabelText(l: TimelineLang, stored: string | null, menu: I18n | null | undefined): string | null {
+  const clean = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return (l === 'de' ? clean(menu?.de) : null) ?? clean(stored) ?? clean(menu?.en);
 }
 
 /** Every event type with its own sentence (anything else is "Something else happened"). */
@@ -272,6 +332,7 @@ interface Ctx {
   admin: boolean;
   journey: (key: string | null) => string;
   send: TimelineSendInput | null;
+  offerLabels: OfferLabels;
 }
 
 const EXIT_ON_WORDS: Record<string, Record<L, string>> = {
@@ -452,7 +513,8 @@ function eventSentence(c: Ctx, ev: TimelineEventInput, journeyKey: string | null
     }
 
     case 'offer.issued': {
-      const label = str(data.label);
+      const menu = menuLabel(c.offerLabels, ev.venueId ?? c.send?.venueId ?? null, str(data.offerKey));
+      const label = offerLabelText(l, str(data.label), menu);
       const days = num(data.days);
       const valid = days !== null ? t(l, `valid for ${plural(l, days, ['day', 'days'], ['Tag', 'Tage'])}`, `${plural(l, days, ['day', 'days'], ['Tag', 'Tage'])} gültig`) : null;
       const parts = [label ? quoted(l, label) : null, valid].filter(Boolean).join(', ');
@@ -791,6 +853,7 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
   const venues = args.venues ?? {};
   const sends = args.sends ?? {};
   const names = args.journeyNames ?? {};
+  const offerLabels = args.offerLabels ?? {};
   const fallbackTz = isValidTimeZone(args.defaultTz) ? args.defaultTz : FALLBACK_TZ;
   const own = (venueId: string | null | undefined) => typeof venueId === 'string' && Object.prototype.hasOwnProperty.call(venues, venueId);
   const tzOf = (venueId: string | null | undefined) => {
@@ -860,7 +923,7 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
     const journeyKey = str(ev.journeyKey) ?? str(data.journeyKey);
     const channel = str(ev.channel) ?? str(data.channel) ?? send?.channel ?? (decision?.channel?.picked ?? null);
     const tz = tzOf(ev.venueId ?? send?.venueId);
-    const ctx: Ctx = { l, tz, admin, journey, send };
+    const ctx: Ctx = { l, tz, admin, journey, send, offerLabels };
 
     let sentence: string;
     let credits: number | null = null;

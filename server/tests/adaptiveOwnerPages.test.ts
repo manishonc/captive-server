@@ -34,6 +34,7 @@ import {
   offerStatus,
   pageField,
   secretsShown,
+  staffNameOf,
   type InfoStay,
 } from '../src/adaptive/core/owner/publicPages';
 
@@ -90,11 +91,17 @@ const FULL: GuestInfoLocale = {
 
 // ── Offer status ─────────────────────────────────────────────────────────────
 
-test('offer status: redeemed wins over expired', () => {
-  assertEqual(offerStatus(EXPIRES + DAY, EXPIRES, true), 'redeemed', 'after expiry');
-  assertEqual(offerStatus(EXPIRES + 1, EXPIRES, true), 'redeemed', '1 ms after expiry');
+test('offer status: redeemed within validity → redeemed', () => {
   assertEqual(offerStatus(EXPIRES - DAY, EXPIRES, true), 'redeemed', 'before expiry');
+  assertEqual(offerStatus(EXPIRES, EXPIRES, true), 'redeemed', 'now === expiresAt');
   assertEqual(offerStatus(SENT, null, true), 'redeemed', 'no expiry');
+  assertEqual(offerStatus(SENT + 400 * DAY, null, true), 'redeemed', 'no expiry, long after the send');
+});
+
+test('offer status: redeemed, then past expiry → expired (expiry comes first, PR E follow-up)', () => {
+  assertEqual(offerStatus(EXPIRES + 1, EXPIRES, true), 'expired', '1 ms after expiry');
+  assertEqual(offerStatus(EXPIRES + DAY, EXPIRES, true), 'expired', 'a day after expiry');
+  assertEqual(offerStatus(EXPIRES + 1, EXPIRES, true), offerStatus(EXPIRES + 1, EXPIRES, false), 'the same as an offer never redeemed');
 });
 
 test('offer status: valid at the expiry instant, expired 1 ms after', () => {
@@ -455,6 +462,23 @@ test('merge returns the warnings for the merged result, never as errors', () => 
   assertEqual(codes(empty), ['GI10', 'GI11', 'GI12', 'GI13'], 'everything deleted: all four warnings');
   const { issues: mixed } = merge(null, { es: { wifiName: 'x' }, en: { checkOutTime: '10 Uhr' } });
   assertEqual(codes(mixed), ['GI01', 'GI02', 'GI10', 'GI11', 'GI12', 'GI13'], 'errors first, then the warnings');
+});
+
+// ── Rating page (PR E follow-up) ─────────────────────────────────────────────
+
+test('staffNameOf: the staff_name blank, trimmed; null when empty or not text; a translated value in the page language, then English', () => {
+  assertEqual(staffNameOf('Priya', 'de'), 'Priya', 'plain text, any language');
+  assertEqual(staffNameOf('  Priya  ', 'en'), 'Priya', 'trimmed');
+  assertEqual(staffNameOf('', 'en'), null, 'empty');
+  assertEqual(staffNameOf('   ', 'en'), null, 'blank');
+  assertEqual(staffNameOf(undefined, 'en'), null, 'no blank (e.g. the Airbnb review ask has none)');
+  assertEqual(staffNameOf(null, 'en'), null, 'null');
+  assertEqual(staffNameOf(3, 'en'), null, 'a number');
+  assertEqual(staffNameOf(true, 'en'), null, 'a boolean');
+  assertEqual(staffNameOf({ en: 'Priya', de: 'Priya (DE)' }, 'de'), 'Priya (DE)', 'translated: the page language');
+  assertEqual(staffNameOf({ en: 'Priya', de: ' ' }, 'de'), 'Priya', 'translated: English when the language is blank');
+  assertEqual(staffNameOf({ en: 'Priya' }, 'fr'), 'Priya', 'translated: English when the language is missing');
+  assertEqual(staffNameOf({ en: '' }, 'en'), null, 'translated but empty');
 });
 
 // ── Purity ───────────────────────────────────────────────────────────────────

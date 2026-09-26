@@ -10,9 +10,15 @@
  *  - any other link shows the Wi-Fi password only, for 30 days after the send — never a door code;
  *  - info links work until checkout + 7 days (stays) or 30 days after the send; offer links until
  *    the offer's expiry + 7 days ("expired" is shown before that).
+ *
+ * The rating page's data (PR E follow-up, `GET /public/rating/:shortCode`) has no end date: it
+ * carries nothing secret (the guest's language and the staff name the owner typed), and a rating
+ * from the link counts at any time (`/ingest/rating` has no age limit), so it answers as long as
+ * the link does. No 410.
  */
 
 import { DAY_MS, HOUR_MS } from '../runtime/time';
+import type { I18n, SlotValue } from '../schemas';
 
 export const SECRETS_BEFORE_CHECKIN_MS = 12 * HOUR_MS;
 export const SECRETS_AFTER_CHECKOUT_MS = 2 * HOUR_MS;
@@ -23,9 +29,14 @@ export const OFFER_LINK_AFTER_EXPIRY_MS = 7 * DAY_MS;
 
 export type OfferStatus = 'valid' | 'expired' | 'redeemed';
 
+/**
+ * The offer's status on its page. Expiry comes first (PR E follow-up): a guest who came back once
+ * would otherwise see "Welcome back! Enjoy your …" for an offer that has ended, until the link
+ * closes 7 days later. `redeemed` is shown only while the offer still runs.
+ */
 export function offerStatus(now: number, expiresAt: number | null, redeemed: boolean): OfferStatus {
-  if (redeemed) return 'redeemed';
   if (expiresAt !== null && now > expiresAt) return 'expired';
+  if (redeemed) return 'redeemed';
   return 'valid';
 }
 
@@ -80,4 +91,19 @@ export function pageField(gi: { locales?: Record<string, Record<string, unknown>
     if (typeof v === 'string' && v.trim()) return v.trim();
   }
   return null;
+}
+
+/**
+ * The staff name for the rating page ("Say hi to Priya in your review!"): the `staff_name` blank
+ * of the review ask the guest got, trimmed; null when the owner left it empty. The blank is plain
+ * text (`i18n: false`); a translated value is read in the page's language, then English.
+ */
+export function staffNameOf(slot: SlotValue | undefined, lang: string): string | null {
+  let text: unknown = slot;
+  if (slot && typeof slot === 'object') {
+    const byLang = slot as I18n & Record<string, unknown>;
+    const own = byLang[lang];
+    text = typeof own === 'string' && own.trim() ? own : byLang.en;
+  }
+  return typeof text === 'string' && text.trim() ? text.trim() : null;
 }

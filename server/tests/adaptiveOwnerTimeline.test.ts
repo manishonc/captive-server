@@ -14,7 +14,10 @@ import { join } from 'path';
 import {
   TIMELINE_EVENT_TYPES,
   buildTimeline,
+  offerLabelText,
+  offerLabelsFrom,
   type BuildTimelineArgs,
+  type OfferMenuSetup,
   type TimelineConsentInput,
   type TimelineEventInput,
   type TimelineItem,
@@ -585,6 +588,59 @@ test('newest first; at the same instant, the later step comes first', () => {
   assertEqual(items.map((i) => i.kind), ['journey.exited', 'send.dry_run', 'offer.issued', 'journey.entered', 'visit.started', 'consent.granted'], 'order');
   for (let i = 1; i < items.length; i += 1) assert(items[i - 1].at >= items[i].at, 'times never go up');
   assertEqual(items[0].at, new Date(T + 48 * HOUR_MS).toISOString(), 'ISO time');
+});
+
+// ── Offer names in German (PR E follow-up) ───────────────────────────────────
+
+const COFFEE = { en: 'Free coffee', de: 'Gratis-Kaffee' };
+
+test('offerLabelText: German from the menu when it has German; else the stored label; English keeps the stored label', () => {
+  assertEqual(offerLabelText('de', 'Free coffee', COFFEE), 'Gratis-Kaffee', 'DE: the menu’s German');
+  assertEqual(offerLabelText('de', 'Free coffee', { en: 'Free coffee' }), 'Free coffee', 'DE, no German in the menu: the stored label');
+  assertEqual(offerLabelText('de', 'Free coffee', { en: 'Free coffee', de: '  ' }), 'Free coffee', 'DE, blank German: the stored label');
+  assertEqual(offerLabelText('de', 'Free coffee', null), 'Free coffee', 'DE, no menu entry: the stored label');
+  assertEqual(offerLabelText('en', 'Free coffee', { en: 'Coffee on us', de: 'Gratis-Kaffee' }), 'Free coffee', 'EN: the label as it was issued');
+  assertEqual(offerLabelText('en', null, COFFEE), 'Free coffee', 'EN, nothing stored: the menu’s English');
+  assertEqual(offerLabelText('de', null, { en: 'Free coffee' }), 'Free coffee', 'DE, nothing stored, no German: the menu’s English');
+  assertEqual(offerLabelText('en', null, null), null, 'nothing at all');
+});
+
+test('offerLabelsFrom: per venue and offerKey; the active setup wins over others with the same offerKey; bad entries skipped', () => {
+  const setups: OfferMenuSetup[] = [
+    { venueId: 'v_cafe', playbookKey: 'b_local', state: 'setup', offerMenu: [{ offerKey: 'coffee', label: { en: 'Coffee (b)', de: 'Kaffee (b)' } }] },
+    { venueId: 'v_cafe', playbookKey: 'a_stay', state: 'inactive', offerMenu: [{ offerKey: 'coffee', label: { en: 'Coffee (a)', de: 'Kaffee (a)' } }, { offerKey: 'cake', label: { en: 'Cake' } }] },
+    { venueId: 'v_cafe', playbookKey: 'z_growth', state: 'active', offerMenu: [{ offerKey: 'coffee', label: COFFEE }, { offerKey: 'bad', label: 'not i18n' }, { label: { en: 'no key' } }] },
+    { venueId: 'v_ny', playbookKey: 'z_growth', state: 'setup', offerMenu: [{ offerKey: 'coffee', label: { en: 'NY coffee', de: 'NY-Kaffee' } }] },
+    { venueId: 'v_ny', playbookKey: 'guest_info', state: 'active', offerMenu: [] },
+  ];
+  const labels = offerLabelsFrom(setups);
+  assertEqual(labels.v_cafe.coffee, COFFEE, 'the active setup’s label, although it comes last');
+  assertEqual(labels.v_cafe.cake, { en: 'Cake' }, 'an offer only another setup has');
+  assert(!('bad' in labels.v_cafe), 'a label that is not a translation is skipped');
+  assertEqual(Object.keys(labels.v_cafe).sort(), ['cake', 'coffee'], 'nothing without an offerKey');
+  assertEqual(labels.v_ny.coffee, { en: 'NY coffee', de: 'NY-Kaffee' }, 'per venue');
+  const noActive = offerLabelsFrom(setups.filter((x) => x.state !== 'active'));
+  assertEqual(noActive.v_cafe.coffee, { en: 'Coffee (a)', de: 'Kaffee (a)' }, 'no active setup: the others in playbookKey order');
+  assertEqual(offerLabelsFrom([]), {}, 'no setups');
+});
+
+test('offer.issued: German label in the German timeline; English unchanged; another venue’s menu or no offerKey → the stored label', () => {
+  const issued = ev('offer.issued', { offerKey: 'coffee', days: 14, label: 'Free coffee' }, J);
+  const offerLabels = offerLabelsFrom([{ venueId: 'v_cafe', playbookKey: 'restaurant_growth', state: 'active', offerMenu: [{ offerKey: 'coffee', label: COFFEE }] }]);
+  const de = build({ events: [issued], lang: 'de', offerLabels });
+  assertEqual(de[0].sentence, 'Angebot erhalten: „Gratis-Kaffee“, 14 Tage gültig.', 'DE');
+  const en = build({ events: [issued], lang: 'en', offerLabels });
+  assertEqual(en[0].sentence, 'Got an offer: “Free coffee”, valid for 14 days.', 'EN');
+  const elsewhere = offerLabelsFrom([{ venueId: 'v_ny', state: 'active', offerMenu: [{ offerKey: 'coffee', label: COFFEE }] }]);
+  assertEqual(build({ events: [issued], lang: 'de', offerLabels: elsewhere })[0].sentence, 'Angebot erhalten: „Free coffee“, 14 Tage gültig.', 'the menu of another venue is not used');
+  const noKey = ev('offer.issued', { days: 14, label: 'Free coffee' }, J);
+  assertEqual(build({ events: [noKey], lang: 'de', offerLabels })[0].sentence, 'Angebot erhalten: „Free coffee“, 14 Tage gültig.', 'no offerKey');
+  assertEqual(build({ events: [issued], lang: 'de' })[0].sentence, 'Angebot erhalten: „Free coffee“, 14 Tage gültig.', 'no offerLabels: as before');
+  const dry = build({ events: [ev('offer.issued', { offerKey: 'coffee', days: 14, label: 'Free coffee' }, { ...J, mode: 'test' })], lang: 'de', offerLabels });
+  assert(dry[0].sentence.includes('„Gratis-Kaffee“'), `a test run too: ${dry[0].sentence}`);
+  const admin = build({ events: [issued], lang: 'de', offerLabels, audience: 'admin' });
+  assertEqual(admin[0].sentence, 'Angebot erhalten: „Gratis-Kaffee“, 14 Tage gültig.', 'the admin view');
+  assertEqual((admin[0].detail?.data as Record<string, unknown>).label, 'Free coffee', 'the admin detail keeps what was stored');
 });
 
 // ── Purity ───────────────────────────────────────────────────────────────────

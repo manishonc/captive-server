@@ -191,15 +191,24 @@ another account). The **permission** and **audit key** columns are what the cms 
 else the defaults), prices only the guests that choice can reach, and returns `estimate.audience`
 per venue (`{ audience, isDefault, counts }`).
 
+PR E follow-up: in a German timeline (`?lang=de`, this guest route and `GET /admin/guests/:contactId`)
+an issued offer is named with the German label of the venue's offer menu (its setups; the active
+one first, then the others); the event itself stores the English label, which English timelines
+and a menu without German keep using.
+
 ### Guest pages — `/public/…` (server-to-server; the cms page calls it)
 
 | Method & path | Query | Returns |
 |---|---|---|
 | `GET /public/offer/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, offer: { label, expiresAt, expiresOn, status: valid\|expired\|redeemed } }`; 410 after expiry + 7 days |
 | `GET /public/info/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, info: { fields… }, secrets: { wifiPassword, doorCode, keyInstructions, shownFrom, shownUntil }, stay \| null }` — secrets only in the stay window (12 h before check-in to 2 h after checkout; other links: the Wi-Fi password only, 30 days); 410 after checkout + 7 days, or once the stay is cancelled / no longer this guest's |
+| `GET /public/rating/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, staffName: string \| null }` — for the rating page of a journey's review ask (`{{link.rating}}`, PR E follow-up): `lang` = `?lang` when en/de/it/fr, else the guest's language, else `en`; `staffName` = the journey's `staff_name` blank in the config version the guest's journey runs with (trimmed; `null` when empty or the journey has none). **Never a 410**: nothing secret, and a rating from the link counts at any time (`/ingest/rating` has no age limit) |
 
 Only a live journey link of the right kind at `venueId` answers; anything else is the same 404.
 `Cache-Control: no-store`. Opening a page is not a click (the cms forwards clicks to `/ingest/click`).
+
+Offer `status` (PR E follow-up): `expired` once past `expiresAt`, even when the guest came back
+(expiry comes first); else `redeemed` once the guest came back; else `valid`.
 
 ### HeidiFi admin — `/admin/…` (SUPER_ADMIN)
 
@@ -212,6 +221,10 @@ Only a live journey link of the right kind at `venueId` answers; anything else i
 | `POST /admin/guests/search` | `{ email \| phone, actor }` | `{ results: [{ contactId, tenantUserId, account, matchedBy, name, lastSeenAt, venues[], blocks }] }` — refuses (409) when the server's identity key differs from the engine's | `adaptive.guest.search` |
 | `GET /admin/guests/:contactId` | `?lang` | the full record: contact, places, sends (with every rule's check and fact, `statusHistory`), consent ledger, instances, stays, blocks, weekly window, events, timeline | `adaptive.admin.guest_view` (GET, audited) |
 | `POST /admin/decisions/replay` | `{ sendKey \| eventId, lang?, actor }` | `{ replay: { replayable, same, stage, engine { recorded, current, sameCode }, stored, replayed, differences[], sentence } }` — decisions recorded before PR D answer `replayable: false` | `adaptive.decision.replay` |
+
+Account names (`accountNames[…].name` on the launch card, `account.name` in guest search) come from
+the `Users` doc: `displayName`, then `display_name` (cms owner docs, PR E follow-up), `companyName`,
+`name` — the first that isn't empty; `null` when none.
 
 ## Check codes
 
@@ -232,3 +245,25 @@ an admin changed is ever overwritten. To inspect or run it by hand:
 npx tsx src/adaptive/seed/run.ts           # dry run
 npx tsx src/adaptive/seed/run.ts --apply   # create what is missing
 ```
+
+### Wi-Fi card wording — hand edit where the seed already ran (PR E follow-up, E-D10)
+
+The Wi-Fi card (pool `wifi_info`, letter A) no longer says "Menu, opening hours…" (an Airbnb has
+neither); SMS and email now share one neutral line that fits every venue type. New databases get
+the new text from the seed; the seed never overwrites, so wherever it already ran (production, and
+any emulator whose data survived a server start) edit the doc
+**`CaptivePortal_Variants/var_7600ede441779e425513e5da5952cb21`** by hand. In each of the four
+string fields, replace only the words shown; keep everything else, including every `{{…}}` and the
+line breaks of the email bodies:
+
+| Field | Replace | With |
+|---|---|---|
+| `channels.sms.text` | `Menu, opening hours and more:` | `Everything you need to know:` |
+| `channels.email.body` | `Menu, opening hours and everything else:` | `Everything you need to know:` |
+| `locales.de.sms.text` | `Menü, Öffnungszeiten und mehr:` | `Alles Wichtige:` |
+| `locales.de.email.body` | `Menü, Öffnungszeiten und alles Weitere:` | `Alles Wichtige:` |
+
+Don't touch `mergeFieldsUsed` (the same blanks as before) or `contentHash` (stale afterwards, but
+nothing reads it at runtime). The server and worker pick the change up within 30 seconds (the
+catalogue cache). The full new texts are in `server/src/adaptive/seed/definitions/variants.ts`
+(the block at the end of the file).

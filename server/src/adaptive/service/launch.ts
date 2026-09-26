@@ -31,6 +31,7 @@ import { applyChange, nextLiveSince, summarizeChange, confirmMatches, type Launc
 import { venueHasSomethingOn } from '../core/runtime/hold';
 import { now as engineNow, refreshClock } from '../engine/clock';
 import { getEngineStatus } from './engine';
+import { accountNameOf } from '../core/owner/accountName';
 
 const modeSchema = z.enum(['off', 'test', 'live']);
 const tenantKey = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, 'not a valid account id');
@@ -111,8 +112,7 @@ async function accountNames(ids: string[]): Promise<Record<string, { name: strin
   if (!unique.length) return out;
   const snaps = await db.getAll(...unique.map((id) => db.collection(COL.tenantUsers).doc(id)));
   for (const s of snaps) {
-    const name = s.get('displayName') ?? s.get('companyName') ?? s.get('name') ?? null;
-    out[s.id] = { name: typeof name === 'string' ? name : null, email: typeof s.get('email') === 'string' ? s.get('email') : null };
+    out[s.id] = { name: accountNameOf((field) => s.get(field)), email: typeof s.get('email') === 'string' ? s.get('email') : null };
   }
   return out;
 }
