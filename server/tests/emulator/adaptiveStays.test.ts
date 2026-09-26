@@ -33,6 +33,8 @@ import { adaptiveVenueId, venuePlaybookId } from '../../src/adaptive/store/colle
 import { sendKeyFor } from '../../src/adaptive/core/runtime/ids';
 import { rollupVenue } from '../../src/adaptive/rollups/rollup';
 import { ACTOR, D0, R, at, day, eventsOf, freshStay, instancesAt, label, sendLog, sendsFor, staysAt, sync, tasksOfKind, writeCalendar } from './stayFixtures';
+import { writeGuestInfo } from './stayFixtures';
+import { stayFeedId } from '../../src/adaptive/store/collections';
 
 const TOM = { venue: R, firstName: 'Tom', email: 'tom@test.local', consent: true };
 
@@ -525,6 +527,152 @@ async function main() {
     const tips = (await instancesAt()).find((i) => i.journeyKey === 'stay_local_tips')!;
     assertEqual(tips.mode, 'test', 'the day-2 journey starts as a test run');
     assertEqual((await sendsFor(tips.id))[0]?.status, 'dry_run', 'nothing real sent');
+  });
+
+  console.log('\nPR C2: past guests and who is linked');
+
+  await test('the stay playbook turned on for the first time after he checked out: no review ask, no book direct (moment.passed) — also after his dates are re-read, and while paused', async () => {
+    await freshStay([{ checkIn: day(0), checkOut: day(5) }]);
+    const avRef = db.collection(COL.adaptiveVenues).doc(adaptiveVenueId(R.venueId));
+    const installRef = db.collection(COL.venuePlaybooks).doc(venuePlaybookId(R.venueId, 'str_stay'));
+    // Only Guest info on: the stay playbook is set up, not active.
+    await avRef.update({ status: 'off', activeInstallId: null, activePlaybookKey: null });
+    await installRef.update({ state: 'setup' });
+    await tomLinked();
+    await runUntil(at(5, '12:00')); // he left at 10:00
+    await installRef.update({ state: 'active' });
+    await avRef.update({ status: 'on', activeInstallId: installRef.id, activePlaybookKey: 'str_stay', activatedAt: new Date(at(5, '12:00')) });
+    // A later checkout time re-dates the stay: its moments are rescheduled, now carrying the install.
+    await writeGuestInfo(R, { checkOutTime: '11:00' });
+    await setClock(at(5, '12:30'));
+    assertEqual((await sync()).changed, 1, 're-dated (checkout 11:00, still before the turn-on)');
+    await runDue();
+    const review = (await tasksOfKind('stay_trigger')).filter((t) => t.payload.journeyKey === 'stay_review' && t.payload.datesVersion === 2);
+    assertEqual(review.map((t) => t.payload.installId), [installRef.id], 'the rescheduled review task names the install (a guard on an empty installId would let it through)');
+    await runUntil(at(6, '12:00'));
+    await pauseVenue(R.tenant, R.venueId, ACTOR); // book direct's moment then comes while paused: still not "missed"
+    await runUntil(at(9, '12:00'));
+    assertEqual((await sendLog()).filter((l) => !l.startsWith('wifi')), ['checkout_reminder/s @ D+4 17:00'], 'only the reminder, from Guest info');
+    const passed = await eventsOf('moment.passed');
+    assertEqual(passed.map((e) => [e.data.journeyKey, e.data.reason]).sort(), [['stay_book_direct', 'checked_out_before_live'], ['stay_review', 'checked_out_before_live']], 'recorded once per journey');
+    assertEqual((await eventsOf('stay.moment_skipped')).length, 0, 'nothing counted as missed');
+    assert(!(await instancesAt()).some((i) => ['stay_review', 'stay_book_direct'].includes(i.journeyKey)), 'neither journey started');
+  });
+
+  await test('a past guest\'s moment handled more than 12 h late is passed too, not counted as missed', async () => {
+    await freshStay([{ checkIn: day(0), checkOut: day(5) }]);
+    const avRef = db.collection(COL.adaptiveVenues).doc(adaptiveVenueId(R.venueId));
+    const installRef = db.collection(COL.venuePlaybooks).doc(venuePlaybookId(R.venueId, 'str_stay'));
+    await avRef.update({ status: 'off', activeInstallId: null, activePlaybookKey: null });
+    await installRef.update({ state: 'setup' });
+    await tomLinked();
+    await runUntil(at(5, '12:00'));
+    await installRef.update({ state: 'active' });
+    await avRef.update({ status: 'on', activeInstallId: installRef.id, activePlaybookKey: 'str_stay', activatedAt: new Date(at(5, '12:00')) });
+    await setClock(at(6, '04:00')); // the worker was stopped: the review moment (D+5 15:00) runs 13 h late
+    await runDue();
+    assertEqual((await eventsOf('moment.passed')).map((e) => e.data.journeyKey), ['stay_review'], 'passed');
+    assertEqual((await eventsOf('stay.moment_skipped')).length, 0, 'not counted as missed');
+  });
+
+  await test('checkout day: a booking that vanished the evening before is not an overlap with the night that was re-booked (no flag, no owner email)', async () => {
+    await freshStay([{ uid: 'b@x', checkIn: day(-2), checkOut: day(0) }], { start: at(-2, '09:00') });
+    await setClock(at(-1, '21:00'));
+    await writeCalendar('r', [{ uid: 'b2@x', checkIn: day(-1), checkOut: day(0) }]); // B cancelled, its last night re-booked
+    const first = await sync();
+    assertEqual([first.missed, first.created, first.overlapsFlagged], [1, 1, 0], 'B missed once, B2 new, no overlap');
+    await setClock(at(0, '01:17'));
+    const r = await sync();
+    assertEqual([r.unchanged, r.overlapsFlagged], [true, 0], 'checkout day, the same content: still no overlap');
+    assertEqual([r.upcoming, (await db.collection(COL.stayFeeds).doc(stayFeedId(R.venueId)).get()).get('upcomingCount')], [1, 1], 'only B2 is upcoming: B is on its way out');
+    const byUid = Object.fromEntries((await staysAt()).map((s) => [s.externalUid, s]));
+    assertEqual([byUid['b@x'].status, byUid['b2@x'].status], ['confirmed', 'confirmed'], 'neither flagged');
+    assertEqual((await docsWhere(COL.alerts, 'kind', 'stay_overlap')).length, 0, 'no owner email');
+  });
+
+  await test('a booking that vanished the evening before its checkout day is not linked that morning (missed once, off the missing list)', async () => {
+    await freshStay([{ uid: 'b@x', checkIn: day(-2), checkOut: day(0) }], { start: at(-2, '09:00') });
+    await setClock(at(-1, '19:00'));
+    await writeCalendar('r', []);
+    assertEqual((await sync()).missed, 1, 'missed once, the evening before');
+    for (const time of ['01:17', '05:17']) {
+      await setClock(at(0, time));
+      assertEqual((await sync()).unchanged, true, `${time}: the same content again`);
+    }
+    const feed = (await db.collection(COL.stayFeeds).doc(stayFeedId(R.venueId)).get()).data()!;
+    const b = (await staysAt())[0];
+    assertEqual([feed.lastMissingStayIds, b.status, b.missingCount], [[], 'confirmed', 1], 'checkout day: off the missing list, frozen with its miss (the same content does not bring it back)');
+    await setClock(at(0, '08:00'));
+    await connect(TOM);
+    await runDue();
+    assertEqual((await staysAt())[0].contactId, null, 'not linked');
+    assertEqual((await tasksOfKind('stay_trigger')).length, 0, 'no stay moments');
+  });
+
+  await test('before checkout day, the same content repairs a miss a sync counted but never recorded (it died before finishing): the booking links again', async () => {
+    await freshStay([{ uid: 'x@x', checkIn: day(2), checkOut: day(5) }]);
+    const stayRef = db.collection(COL.stays).doc((await staysAt())[0].id);
+    // A sync counted a miss, then died before writing the feed's missing list and content hash.
+    await stayRef.update({ missingCount: 1, lastMissAt: new Date(at(0, '09:00')) });
+    await setClock(at(0, '13:00'));
+    assertEqual((await sync()).unchanged, true, 'the same content (it has the booking)');
+    assertEqual((await staysAt())[0].missingCount, 0, 'seen: its miss is reset');
+    await setClock(at(2, '15:10'));
+    await connect(TOM);
+    await runDue();
+    assert((await staysAt())[0].contactId, 'the guest is linked');
+  });
+
+  await test('turnover day: nobody linked to the outgoing stay → an early next guest (09:00) is not taken for its guest; a guest first seen after checkout gets the next stay', async () => {
+    await freshStay(
+      [
+        { uid: 'prev@x', checkIn: day(-3), checkOut: day(0) },
+        { uid: 'next@x', checkIn: day(0), checkOut: day(4) },
+      ],
+      { start: at(-3, '09:00') },
+    );
+    const byUid = async () => Object.fromEntries((await staysAt()).map((s) => [s.externalUid, s]));
+    await setClock(at(0, '09:00'));
+    await connect({ venue: R, firstName: 'Cara', email: 'cara@test.local', consent: true });
+    await runDue();
+    assertEqual([(await byUid())['prev@x'].contactId, (await byUid())['next@x'].contactId], [null, null], '09:00: linked to neither');
+    await runUntil(at(0, '15:05'));
+    await connect({ venue: R, firstName: 'Cara', email: 'cara@test.local', consent: true });
+    await runDue();
+    assertEqual((await byUid())['next@x'].contactId, null, 'Cara again at 15:05: first seen during the previous stay, still not linked (D-C11)');
+    await runUntil(at(0, '15:10'));
+    const danGuest = await connect({ venue: R, firstName: 'Dan', email: 'dan@test.local', consent: true });
+    await runDue();
+    assertEqual((await byUid())['next@x'].contactId, await contactIdFor(R.tenant, danGuest), 'Dan is linked to the next stay');
+    const nextId = (await byUid())['next@x'].id;
+    assertEqual([...new Set((await tasksOfKind('stay_trigger')).map((t) => t.payload.stayId))], [nextId], 'stay moments only for the next stay');
+  });
+
+  await test('turnover day after a double booking (both flagged, one linked): the link query finds the flagged previous stays — the companion at 11:00 is not linked, a new guest at 15:10 is', async () => {
+    const A = { uid: 'a@x', checkIn: day(-5), checkOut: day(0) };
+    const next = { uid: 'next@x', checkIn: day(0), checkOut: day(4) };
+    await freshStay([A, next], { start: at(-5, '09:00') });
+    const byUid = async () => Object.fromEntries((await staysAt()).map((s) => [s.externalUid, s]));
+    await setClock(at(-5, '15:30'));
+    const annGuest = await connect({ venue: R, firstName: 'Ann', email: 'ann@test.local', consent: true });
+    await runUntil(at(-5, '16:00'));
+    await connect({ venue: R, firstName: 'Ben', email: 'ben@test.local', consent: true });
+    await runDue();
+    const ann = await contactIdFor(R.tenant, annGuest);
+    // Linked while confirmed; then a second booking over the same nights flags both.
+    await writeCalendar('r', [A, { uid: 'b@x', checkIn: day(-2), checkOut: day(0) }, next]);
+    await setClock(at(-4, '09:00'));
+    assertEqual((await sync()).overlapsFlagged, 2, 'A and B flagged');
+    const s = await byUid();
+    assertEqual([s['a@x'].status, s['a@x'].contactId, s['b@x'].status, s['next@x'].status], ['overlap_flagged', ann, 'overlap_flagged', 'confirmed'], 'the double booking');
+    await runUntil(at(0, '11:00'));
+    await connect({ venue: R, firstName: 'Ben', email: 'ben@test.local', consent: true });
+    await runDue();
+    assertEqual((await byUid())['next@x'].contactId, null, 'Ben (seen during A) at 11:00: not linked');
+    await runUntil(at(0, '15:10'));
+    const caraGuest = await connect({ venue: R, firstName: 'Cara', email: 'cara@test.local', consent: true });
+    await runDue();
+    assertEqual((await byUid())['next@x'].contactId, await contactIdFor(R.tenant, caraGuest), 'the new guest is linked');
   });
 
   done();

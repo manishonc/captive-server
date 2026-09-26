@@ -15,7 +15,7 @@
 import { getNodeContract } from '../registry';
 import { pickLang, type JourneyDefinition, type Offer, type SlotValue } from '../schemas';
 import { evaluateCondition, getPath, matchesWhere, type FactGetter } from './conditions';
-import { DAY_MS, atLocalTime, durationMs, offsetMs } from './time';
+import { DAY_MS, atLocalTime, durationMs, localDateKey, offsetMs } from './time';
 import {
   MAX_TRAIL,
   type Effect,
@@ -92,9 +92,9 @@ function enterNode(nodeId: string, state: InstanceState, ctx: InterpreterContext
         if (!ctx.stay) return { fail: 'no_stay' };
         target = stayTarget(c, ctx.stay, ctx.venueTz);
         if (target <= now) return { go: 'past' };
-        // A wait counted from arrival that would end after checkout (the stay was shortened)
-        // is over: a during-the-stay message never goes after the guest has left.
-        if (c.anchor === 'stay.checkInAt' && target >= ctx.stay.checkOutAt) return { go: 'past' };
+        // A wait counted from arrival that would end on checkout day or later (the stay was
+        // shortened) is over: a during-the-stay message never goes on the day the guest leaves.
+        if (arrivalWaitOver(c, ctx.stay, target, ctx.venueTz)) return { go: 'past' };
       } else {
         if (!c.at) return { fail: 'bad_step_config' };
         const today = atLocalTime(new Date(now), ctx.venueTz, c.at, 0).getTime();
@@ -154,7 +154,16 @@ function wakeNode(nodeId: string, state: InstanceState, ctx: InterpreterContext)
   const node = ctx.definition.nodes[nodeId];
   if (!node || state.waiting?.nodeId !== nodeId) return null;
   if (node.type === 'delay' && state.waiting.kind === 'timer') return { go: 'done' };
-  if (node.type === 'wait_until' && state.waiting.kind === 'timer') return { go: 'done' };
+  if (node.type === 'wait_until' && state.waiting.kind === 'timer') {
+    // The stay was shortened and its `stay.changed` hasn't reached this journey yet: a wait
+    // counted from arrival is past when the message would go on checkout day or later — judged
+    // on now (when it would go) and on the fresh Stay's own target, whichever is later.
+    const c = parseConfig<{ anchor?: string; offset?: string; at?: string }>('wait_until', node.config);
+    if (c?.anchor === 'stay.checkInAt' && ctx.stay && arrivalWaitOver(c, ctx.stay, Math.max(ctx.now, stayTarget(c, ctx.stay, ctx.venueTz)), ctx.venueTz)) {
+      return { go: 'past' };
+    }
+    return { go: 'done' };
+  }
   if (node.type === 'wait_for' && state.waiting.kind === 'events') return { go: 'timeout' };
   return null;
 }
@@ -173,6 +182,15 @@ function stayTarget(c: { anchor?: string; offset?: string; at?: string }, stay: 
   const base = c.anchor === 'stay.checkInAt' ? stay.checkInAt : stay.checkOutAt;
   const shifted = base + offsetMs(c.offset);
   return c.at ? atLocalTime(new Date(shifted), tz, c.at, 0).getTime() : shifted;
+}
+
+/**
+ * A wait counted from arrival is over once it would end on checkout's local day (venue zone)
+ * or later — the stay was shortened. Local days, not instants: a checkout at 12:00 still
+ * stops an 11:00 mid-stay message that day.
+ */
+function arrivalWaitOver(c: { anchor?: string }, stay: NonNullable<InterpreterContext['stay']>, target: number, tz: string): boolean {
+  return c.anchor === 'stay.checkInAt' && localDateKey(new Date(target), tz) >= localDateKey(new Date(stay.checkOutAt), tz);
 }
 
 /** Waiting in a `wait_until` anchored on the stay's dates. */
@@ -259,10 +277,11 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
       // or `past` when the new target has gone by.
       if (event.type === 'stay.changed' && isAnchoredTimerWait(state, def)) {
         // The wait was already due and this anchor didn't move (the other date or a time
-        // changed): it simply fires, rather than being re-entered as "past" and skipped.
+        // changed): it simply fires, rather than being re-entered as "past" and skipped —
+        // unless it counts from arrival and would go now, on checkout day or later (past).
         const w = state.waiting!;
         const c = parseConfig<{ anchor?: string; offset?: string; at?: string }>('wait_until', def.nodes[state.cursor.nodeId]?.config);
-        if (c && ctx.stay && w.untilAt !== null && w.untilAt <= now && stayTarget(c, ctx.stay, ctx.venueTz) === w.untilAt) {
+        if (c && ctx.stay && w.untilAt !== null && w.untilAt <= now && stayTarget(c, ctx.stay, ctx.venueTz) === w.untilAt && !arrivalWaitOver(c, ctx.stay, now, ctx.venueTz)) {
           result = { go: 'done' };
           break;
         }

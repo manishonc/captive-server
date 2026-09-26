@@ -58,6 +58,8 @@ export interface PollOptions {
   onProgress?: () => Promise<void>;
   /** Tests only: runs after the sync has read the feed's stays, before it writes anything. */
   onRead?: () => Promise<void>;
+  /** Tests only: runs once the fetch has returned or failed, before its result is recorded. */
+  onFetched?: () => Promise<void>;
 }
 
 export interface PollResult {
@@ -133,8 +135,18 @@ async function renewLease(feedId: string, owner: string): Promise<void> {
     .catch(() => undefined);
 }
 
-/** Writes the feed's outcome — only while this poll still holds it and nobody finished a newer one. */
-async function finishFeed(feedId: string, owner: string, successSeq: number, url: string, update: Record<string, unknown>): Promise<boolean> {
+/**
+ * Writes the feed's outcome — only while this poll still holds it and nobody finished a newer
+ * one. `update` may be computed from the feed as it is in this transaction (an error count must
+ * start from a save made while this poll was fetching, not from what the poll read first).
+ */
+async function finishFeed(
+  feedId: string,
+  owner: string,
+  successSeq: number,
+  url: string,
+  update: Record<string, unknown> | ((fresh: StayFeedDoc) => Record<string, unknown>),
+): Promise<boolean> {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(feedRef(feedId));
     if (!snap.exists) return false; // deleted meanwhile
@@ -145,7 +157,8 @@ async function finishFeed(feedId: string, owner: string, successSeq: number, url
       tx.update(feedRef(feedId), { pollLease: null });
       return false;
     }
-    tx.update(feedRef(feedId), { ...update, pollLease: null, updatedAt: new Date() });
+    const fields = typeof update === 'function' ? update(snap.data() as StayFeedDoc) : update;
+    tx.update(feedRef(feedId), { ...fields, pollLease: null, updatedAt: new Date() });
     return true;
   });
 }
@@ -324,17 +337,24 @@ async function alertOverlaps(c: SyncCtx, stays: LoadedStay[], flagged: Set<strin
 
 /** Records a failed poll on the feed; false when the write was refused (the feed was deleted, re-leased or saved with another link). */
 async function recordError(feedId: string, owner: string, successSeq: number, feed: StayFeedDoc, code: string, c: { now: number; tz: string }, armedAt: number | null): Promise<boolean> {
-  const errors = (Number(feed.consecutiveErrors) || 0) + 1;
-  const failingSince = tsMs(feed.failingSince) ?? c.now;
-  const failing = errors >= FAILING_AFTER_ERRORS;
-  const recorded = await finishFeed(feedId, owner, successSeq, feed.url, {
-    lastPolledAt: new Date(c.now),
-    lastError: code,
-    consecutiveErrors: errors,
-    status: failing ? 'failing' : feed.status === 'failing' ? 'failing' : 'active',
-    failingSince: new Date(failingSince),
-    ...(armedAt !== null ? { nextPollAt: new Date(armedAt) } : {}),
+  // Counted from the feed as it is when written: an owner who saved the same link while this
+  // poll was fetching reset it ("try again"), so this error is the first of a fresh start.
+  let written = { failing: false, failingSince: c.now };
+  const recorded = await finishFeed(feedId, owner, successSeq, feed.url, (fresh) => {
+    const errors = (Number(fresh.consecutiveErrors) || 0) + 1;
+    const failingSince = tsMs(fresh.failingSince) ?? c.now;
+    const failing = errors >= FAILING_AFTER_ERRORS;
+    written = { failing, failingSince };
+    return {
+      lastPolledAt: new Date(c.now),
+      lastError: code,
+      consecutiveErrors: errors,
+      status: failing ? 'failing' : fresh.status === 'failing' ? 'failing' : 'active',
+      failingSince: new Date(failingSince),
+      ...(armedAt !== null ? { nextPollAt: new Date(armedAt) } : {}),
+    };
   });
+  const { failing, failingSince } = written;
   // One owner email a day once the link has failed for more than 24 h (D-C25).
   if (recorded && failing && c.now - failingSince >= FAILING_EMAIL_AFTER_MS) {
     const ctx = await loadVenueContext(feed.venueId);
@@ -395,8 +415,10 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
     fetched = await fetchStayCalendar(feed.url, feed.etag ?? null);
   } catch (err) {
     const code = err instanceof FeedFetchError ? err.code : 'NETWORK';
+    await opts.onFetched?.();
     return failed(await recordError(feedId, opts.owner, successSeq, feed, code, { now, tz }, armedAt), code);
   }
+  await opts.onFetched?.();
   let parse: IcalParse | null = null;
   if (fetched.status === 200) {
     const body = fetched.body ?? Buffer.alloc(0);
@@ -451,6 +473,9 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
   const lifted = tsMs(feed.guardLiftedAt) !== null;
   const sus = lifted ? { suspect: false, warning: null, suspectSince: null, raise: false } : suspectState(absent.length, tsMs(feed.suspectSince), now);
   const absentSet = new Set(absent);
+  // From its checkout day a stay leaves the missing list (frozen), but one with a miss on record
+  // is still absent from this content: only new content that has it again resets the miss.
+  const frozenAbsent = (s: Pick<LoadedStay, 'status' | 'checkOut' | 'missingCount'>) => s.missingCount > 0 && !isCountable(s, today);
   const result: PollResult = { ...empty('synced'), fetchStatus: fetched.status, unchanged, parsed: parse ? parse.stays.length : 0, feedWarning: sus.warning, ...armed };
 
   let work = 0;
@@ -492,6 +517,10 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
     // check-in/out time change still moves them (D-C20).
     for (const s of known) {
       if (s.status === 'cancelled' || s.checkOut < today || absentSet.has(s.id)) continue;
+      // The same content again doesn't bring back a frozen stay that was absent from it. (Before
+      // checkout day the missing list decides: a sync that died after counting a miss but before
+      // recording its list is repaired here, as before.)
+      if (frozenAbsent(s)) continue;
       await upsert(s.id, { uid: s.externalUid, checkIn: s.checkIn, checkOut: s.checkOut });
     }
   }
@@ -508,9 +537,10 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
 
   // ── Overlaps, on the stays as they are now — among the bookings in this content: one that
   // left the calendar (a cancel-and-rebook of the same dates, say) is on its way out, not an
-  // overlap; it keeps the status it had until it is cancelled or comes back.
+  // overlap; it keeps the status it had until it is cancelled or comes back — also on its
+  // checkout day, when it has left the missing list with a miss on record.
   const after = c.lost ? [] : await loadFeedStays(feedId);
-  const present = after.filter((s) => !absentSet.has(s.id));
+  const present = after.filter((s) => !absentSet.has(s.id) && !frozenAbsent(s));
   const map = overlapMap(present, today);
   const flagged = new Set<string>();
   for (const s of present) {
@@ -532,7 +562,7 @@ export async function pollFeed(feedId: string, env: { now: number; settings: Eng
 
   const final = flagged.size ? await loadFeedStays(feedId) : after;
   // A booking missing from this (trusted) content is on its way out: not upcoming.
-  result.upcoming = final.filter((s) => s.status === 'confirmed' && s.checkOutAt > now && (sus.suspect || !absentSet.has(s.id))).length;
+  result.upcoming = final.filter((s) => s.status === 'confirmed' && s.checkOutAt > now && (sus.suspect || (!absentSet.has(s.id) && !frozenAbsent(s)))).length;
   const committed = await finishFeed(feedId, opts.owner, successSeq, feed.url, {
     lastPolledAt: new Date(now),
     lastSuccessAt: new Date(now),
