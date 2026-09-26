@@ -93,8 +93,17 @@ export function planMoment(momentAt: number, now: number): MomentPlan {
   return { kind: 'too_late' };
 }
 
-export function stayTriggerKey(stayId: string, journeyKey: string, datesVersion: number, momentAt: number): string {
-  return `stay_trigger:${stayId}:${journeyKey}:${datesVersion}:${momentAt}`;
+export function stayTriggerKey(stayId: string, journeyKey: string, datesVersion: number, momentAt: number, linkSeq = 0): string {
+  return `stay_trigger:${stayId}:${journeyKey}:${datesVersion}:${momentAt}${linkSeqSuffix(linkSeq)}`;
+}
+
+/**
+ * The link generation in a stay's per-link ids (PR D): 0 (the first link) adds nothing, so
+ * ids written before PR D stay valid; after an unlink, the next guest's link mark, moment
+ * tasks and moment events get new ids instead of colliding with the first guest's.
+ */
+export function linkSeqSuffix(linkSeq: number | null | undefined): string {
+  return linkSeq && linkSeq > 0 ? `:l${linkSeq}` : '';
 }
 
 // ── The poll grid ────────────────────────────────────────────────────────────

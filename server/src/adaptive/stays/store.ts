@@ -25,6 +25,14 @@ export interface LoadedStay extends StaySnap {
   feedId: string;
   externalUid: string;
   linkedGuestId: string | null;
+  /** The link generation (0 = the first link). */
+  linkSeq: number;
+  /** Contacts the owner unlinked from this stay. */
+  unlinkedContactIds: string[];
+  /** Who made the current link. */
+  linkedBy: 'guest' | 'owner' | null;
+  /** An owner's re-link is still being resumed by the worker (this link generation). */
+  relinkPending: boolean;
 }
 
 export function toStay(id: string, d: Partial<StayDoc>): LoadedStay {
@@ -47,6 +55,10 @@ export function toStay(id: string, d: Partial<StayDoc>): LoadedStay {
     linkedAt: tsMs(d.linkedAt),
     linkMode: d.linkMode === 'live' || d.linkMode === 'test' ? d.linkMode : null,
     linkedGuestId: typeof d.linkedGuestId === 'string' ? d.linkedGuestId : null,
+    linkSeq: Number(d.linkSeq) || 0,
+    unlinkedContactIds: Array.isArray(d.unlinkedContactIds) ? d.unlinkedContactIds.map(String) : [],
+    linkedBy: d.linkedBy === 'owner' || d.linkedBy === 'guest' ? d.linkedBy : null,
+    relinkPending: typeof d.relinkPendingSeq === 'number' && d.relinkPendingSeq === (Number(d.linkSeq) || 0),
     overlapWith: Array.isArray(d.overlapWith) ? d.overlapWith.map(String) : [],
     lastSeenInFeedAt: tsMs(d.lastSeenInFeedAt),
   };
@@ -77,6 +89,10 @@ export const contactStaysQuery = (venueId: string, contactId: string) =>
 /** The running journeys of one stay — equality only (merged single-field indexes; `context` isn't exempted). */
 export const stayInstancesQuery = (stayId: string) =>
   db.collection(COL.journeyInstances).where('context.stayId', '==', stayId).where('status', '==', 'active');
+
+/** One person's journeys of one stay, any status (PR D: resuming after a re-link) — equality only. */
+export const stayContactInstancesQuery = (stayId: string, contactId: string) =>
+  db.collection(COL.journeyInstances).where('context.stayId', '==', stayId).where('contactId', '==', contactId);
 
 /** Feeds the watchdog looks after — single field. */
 export const watchedFeedsQuery = () => db.collection(COL.stayFeeds).where('status', 'in', ['active', 'failing']);

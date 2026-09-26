@@ -12,10 +12,20 @@ import { z } from 'zod';
 import { db } from '../../firebase';
 import { COL, CONFIG_DOC_ID } from './collections';
 import { DEFAULT_SMS_COUNTRIES } from '../core/runtime/phoneCountry';
+import { tsMs } from './time';
+import { venueMode, sendingHeld as heldRule, needsStartSending as needsRule, type HoldVenue } from '../core/runtime/hold';
+import type { AdaptiveVenueDoc } from './types';
 
 export type LaunchMode = 'off' | 'test' | 'live';
 
 const modeSchema = z.enum(['off', 'test', 'live']);
+
+/** A time that may be a Timestamp, a Date or ms; anything unreadable is null (read as "unknown" → held). */
+const timeSchema = z.unknown().transform((v) => tsMs(v));
+/** When each account moved into live (PR D Start sending): the default's date, and per-account dates. */
+const liveSinceSchema = z
+  .object({ default: timeSchema.catch(null), accounts: z.record(z.string(), timeSchema).catch({}) })
+  .catch({ default: null, accounts: {} });
 
 const settingsSchema = z.object({
   launch: z
@@ -26,8 +36,9 @@ const settingsSchema = z.object({
       accounts: z.record(z.string(), modeSchema.catch('off')).catch({}),
       changedAt: z.unknown().optional(),
       changedBy: z.string().nullable().optional(),
+      liveSince: liveSinceSchema.optional(),
     })
-    .catch({ default: 'off', accounts: {} }),
+    .catch({ default: 'off', accounts: {}, liveSince: { default: null, accounts: {} } }),
   safety: z
     .object({
       maxSendsPerVenuePerDay: z.number().int().min(1).catch(500),
@@ -42,7 +53,13 @@ const settingsSchema = z.object({
 });
 
 export interface EngineSettings {
-  launch: { default: LaunchMode; accounts: Record<string, LaunchMode>; changedBy: string | null };
+  launch: {
+    default: LaunchMode;
+    accounts: Record<string, LaunchMode>;
+    changedBy: string | null;
+    /** When the default / each account moved into live (epoch ms; null = unknown). */
+    liveSince?: { default: number | null; accounts: Record<string, number | null> };
+  };
   safety: { maxSendsPerVenuePerDay: number; maxSendsPlatformPerDay: number; maxNewContactsPerApPerHour: number; staleAfterHours: number };
   sms: { allowedCountries: string[] };
   alerts: { email: string | null };
@@ -50,7 +67,7 @@ export interface EngineSettings {
 }
 
 export const SAFE_SETTINGS: EngineSettings = {
-  launch: { default: 'off', accounts: {}, changedBy: null },
+  launch: { default: 'off', accounts: {}, changedBy: null, liveSince: { default: null, accounts: {} } },
   safety: { maxSendsPerVenuePerDay: 500, maxSendsPlatformPerDay: 5000, maxNewContactsPerApPerHour: 60, staleAfterHours: 6 },
   sms: { allowedCountries: DEFAULT_SMS_COUNTRIES },
   alerts: { email: null },
@@ -67,7 +84,12 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     killSwitch: data.killSwitch ?? {},
   });
   return {
-    launch: { default: p.launch.default, accounts: p.launch.accounts, changedBy: p.launch.changedBy ?? null },
+    launch: {
+      default: p.launch.default,
+      accounts: p.launch.accounts,
+      changedBy: p.launch.changedBy ?? null,
+      liveSince: p.launch.liveSince ?? { default: null, accounts: {} },
+    },
     safety: p.safety,
     sms: p.sms,
     alerts: { email: p.alerts.email ?? null },
@@ -114,4 +136,51 @@ export function modeFor(settings: EngineSettings, tenantUserId: string | null | 
 /** Can anything run at all? (false = every account is off). */
 export function anyAccountOn(settings: EngineSettings): boolean {
   return settings.launch.default !== 'off' || Object.values(settings.launch.accounts).some((m) => m !== 'off');
+}
+
+/** When this account moved into live: its own date if it has one, else the default's (null = unknown). */
+export function accountLiveSince(settings: EngineSettings, tenantUserId: string): number | null {
+  const ls = settings.launch.liveSince ?? { default: null, accounts: {} };
+  if (Object.prototype.hasOwnProperty.call(ls.accounts, tenantUserId)) return ls.accounts[tenantUserId] ?? null;
+  return ls.default ?? null;
+}
+
+function holdVenue(av: Partial<AdaptiveVenueDoc>): HoldVenue {
+  return {
+    status: av.status ?? null,
+    utility: { enabled: av.utility?.enabled === true, enabledAt: tsMs(av.utility?.enabledAt) },
+    firstOnAt: tsMs(av.firstOnAt),
+    activatedAt: tsMs(av.activatedAt),
+    sendingConfirmedAt: tsMs(av.sendingConfirmedAt),
+  };
+}
+
+/**
+ * The mode NEW guests at this venue get for an event at `atMs` (engine clock): the
+ * account's mode, or `off` while the venue waits for the owner's Start sending (PR D).
+ * Running journeys keep the mode they started with.
+ */
+export function venueModeFor(settings: EngineSettings, av: Partial<AdaptiveVenueDoc>, atMs: number): LaunchMode {
+  const tenant = String(av.tenantUserId ?? '');
+  return venueMode(modeFor(settings, tenant), accountLiveSince(settings, tenant), holdVenue(av), atMs);
+}
+
+/** Is this venue waiting for Start sending for an event at `atMs`? */
+export function venueHeld(settings: EngineSettings, av: Partial<AdaptiveVenueDoc>, atMs: number): boolean {
+  const tenant = String(av.tenantUserId ?? '');
+  return heldRule(modeFor(settings, tenant), accountLiveSince(settings, tenant), holdVenue(av), atMs);
+}
+
+/**
+ * When this venue started sending after waiting for its owner's Start sending (PR D): the click's
+ * time, else null (it never needed one, or it still waits — then it is held anyway).
+ */
+export function startedSendingAt(settings: EngineSettings, av: Partial<AdaptiveVenueDoc>): number | null {
+  return venueNeedsStartSending(settings, av) ? holdVenue(av).sendingConfirmedAt ?? null : null;
+}
+
+/** Does this venue need the owner's Start sending at all (its account is live, it was on before)? */
+export function venueNeedsStartSending(settings: EngineSettings, av: Partial<AdaptiveVenueDoc>): boolean {
+  const tenant = String(av.tenantUserId ?? '');
+  return needsRule(modeFor(settings, tenant), accountLiveSince(settings, tenant), holdVenue(av));
 }

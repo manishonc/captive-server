@@ -114,6 +114,9 @@ export async function setLaunch(accounts: Record<string, LaunchMode>, opts: { de
   const update: Record<string, unknown> = { 'launch.default': opts.default ?? 'off' };
   for (const [t, m] of Object.entries(accounts)) update[`launch.accounts.${t}`] = m;
   if (opts.paused !== undefined) update['killSwitch.sendingPaused'] = opts.paused;
+  // PR D: "live since" at the epoch, so venues these tests turn on before going live are never
+  // held for Start sending (the Start-sending tests set their own dates).
+  update['launch.liveSince'] = { default: new Date(0), accounts: {} };
   await db.collection(COL.config).doc(CONFIG_DOC_ID).update(update);
   clearCaches();
 }

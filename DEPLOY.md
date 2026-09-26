@@ -206,6 +206,10 @@ internet — the only process that does. The fetcher refuses anything that isn't
 link-local, cloud-metadata and Docker-network addresses included), so no inbound or firewall change is
 needed.
 
+Since PR D the `server` app also reads a calendar link once when an owner presses **Check link**
+(`POST /internal/adaptive/tenants/:t/venues/:v/stay-feed/check`): the same safe fetcher, at most 20 checks an
+hour per account, nothing stored.
+
 ### Files
 - `docker-compose.adaptive-worker.yml` — same `server/` Dockerfile and image, command
   `node dist/adaptive/worker/main.js`
@@ -235,6 +239,10 @@ Copies of the `server` app's existing values; no new variables:
 - **Stopping it is safe.** Tasks wait in Firestore, and journeys continue when it starts again.
 - **Calendar polling** stops with it and resumes on start (a watchdog restarts any feed whose poll was missed).
 - **Limits.** Memory is capped at 384 MB. SIGTERM finishes the tasks in hand (30 s grace).
+- **PR D:** create its five new composite indexes (docs/adaptive-engine.md, Deploy step 1) before deploying
+  it — the worker probes the owner screens' queries too. Going live on the admin launch card is refused
+  until a worker runs the same code with the same `GUEST_OTP_PEPPER`, so deploy `server` and the worker
+  first. Then redeploy the separate `mcp` app (its Adaptive read tools call the new server routes).
 
 ---
 

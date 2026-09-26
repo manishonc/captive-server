@@ -24,7 +24,7 @@ import { instanceRef, loadInstance, stateUpdate, type LoadedInstance } from './i
 import { runSend } from './sendPath';
 import { decideConfigSwap } from '../core/runtime/configSwap';
 import { MINUTE_MS } from '../core/runtime/time';
-import { loadStay } from '../stays/store';
+import { loadStay, stayRef } from '../stays/store';
 import { stayFacts } from '../stays/plan';
 
 export type AdvanceInput =
@@ -76,7 +76,14 @@ export async function advance(
   const events: EventInput[] = [];
   const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode: inst.meta.mode };
 
-  if (stayId && !stay) {
+  // The owner unlinked this person from the stay (PR D): the booking isn't theirs any more.
+  const stayUnlinked = Boolean(stayId && stay && stay.contactId !== inst.meta.contactId);
+  if (stayUnlinked) {
+    changed = true;
+    // The wait is kept: if the owner links this person back, the journey resumes from it (stays/link.ts).
+    state = { ...state, status: 'cancelled', exitReason: 'stay_unlinked' };
+    events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'cancelled', reason: 'stay_unlinked' } });
+  } else if (stayId && !stay) {
     // The Stay is gone (deleted with the tenant, or past its TTL): it counts as cancelled
     // and the journey ends — its dates can't be read any more. A Stay that is still there
     // but cancelled runs on to its next send, where gate rule 1 skips it as
@@ -160,6 +167,8 @@ export async function advance(
               slot: outcome.slot,
               lastDeferReason: outcome.reason,
               ...(outcome.creditsWaitStartedAt !== undefined ? { creditsWaitStartedAt: outcome.creditsWaitStartedAt } : {}),
+              ...(outcome.creditsShort ? { creditsShort: true } : {}),
+              ...(outcome.creditsShort && outcome.creditsShortFor ? { creditsShortFor: outcome.creditsShortFor } : {}),
               ...(outcome.dispatchAttempts !== undefined ? { dispatchAttempts: outcome.dispatchAttempts } : {}),
             },
           };
@@ -173,9 +182,12 @@ export async function advance(
           break;
         }
         if (outcome.stayCancelled) {
-          // The gate found the booking cancelled (e.g. between this run's read and the claim): end, don't move on.
-          state = { ...state, status: 'cancelled', exitReason: 'stay_cancelled', waiting: null };
-          events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'cancelled', reason: 'stay_cancelled' } });
+          // The gate found the booking cancelled — or no longer this guest's (PR D unlink) — e.g.
+          // between this run's read and the claim: end, don't move on.
+          const reason = outcome.stayEndReason ?? 'stay_cancelled';
+          // An unlink keeps the wait (a re-link resumes from it); a cancelled booking doesn't.
+          state = { ...state, status: 'cancelled', exitReason: reason, waiting: reason === 'stay_unlinked' ? state.waiting : null };
+          events.push({ ...common, type: 'journey.exited', occurredAt: now, data: { status: 'cancelled', reason } });
           break;
         }
         pending = { kind: 'send_result', nodeId: sendNode, outcome: outcome.outcome, touch: outcome.touch, ladderPos: outcome.ladderPos };
@@ -209,6 +221,12 @@ export async function advance(
   const ok = await db.runTransaction(async (tx) => {
     const snap = await tx.get(instanceRef(inst.id));
     if (!snap.exists || Number(snap.get('rev')) !== expectedRev) return false;
+    // Ending as unlinked (PR D): only while the Stay still isn't this guest's — an owner's quick
+    // re-link since this run read it wins (the retry reads the Stay again and runs on).
+    if (state.exitReason === 'stay_unlinked' && stayId) {
+      const staySnap = await tx.get(stayRef(stayId));
+      if (staySnap.exists && staySnap.get('contactId') === inst.meta.contactId) return false;
+    }
     const next = { ...state, rev: expectedRev + 1 };
     const ended = ENDED_STATUSES.has(next.status);
     const update = stateUpdate(next, now, ended ? retentionFrom(now) : null);

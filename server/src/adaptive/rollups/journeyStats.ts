@@ -54,6 +54,8 @@ const STAY_COUNTERS: Record<string, string> = {
   'stay.linked': 'linked',
   'stay.overlap_flagged': 'overlapFlagged',
   'stay.moment_skipped': 'momentsSkipped',
+  // PR D: the owner took a wrongly linked person off a stay.
+  'stay.unlinked': 'unlinked',
 };
 
 const MESSAGE_STATUS: Record<string, string> = {

@@ -47,6 +47,11 @@ const GUEST_INFO_FIELDS = [
   'menuUrl',
   'localTips',
   'directBookingUrl',
+  // PR D: the rest of the Guest info form (the info page shows them; they count as content).
+  'trashRules',
+  'parking',
+  'emergencyNumbers',
+  'extraNotes',
 ];
 
 function slotText(value: SlotValue, lang: Lang, offers: Offer[]): string {
@@ -74,14 +79,13 @@ export function renderValues(i: RenderInputs): RenderValues {
 
   for (const [key, value] of Object.entries(i.slots)) values[`slot.${key}`] = slotText(value, i.lang, i.offers);
 
-  const info = i.guestInfo?.locales?.[i.lang] ?? i.guestInfo?.locales?.en ?? null;
-  if (info) {
-    for (const f of GUEST_INFO_FIELDS) {
-      const v = info[f];
-      if (typeof v === 'string' && v.trim()) {
-        values[`guestinfo.${f}`] = v.trim();
-        values[`guestinfo.secret.${f}`] = v.trim();
-      }
+  // Each field in the guest's language, else English (PR D): a German block that lacks the
+  // Wi-Fi name still gets the English one, instead of blocking the whole card.
+  for (const f of GUEST_INFO_FIELDS) {
+    const v = guestInfoField(i.guestInfo, i.lang, f);
+    if (v) {
+      values[`guestinfo.${f}`] = v;
+      values[`guestinfo.secret.${f}`] = v;
     }
   }
   if (i.stay) {
@@ -182,6 +186,20 @@ export function renderMessage(content: any, channel: Channel, values: RenderValu
     return { subject, text: body, missing: [...missing], fieldsUsed: [...fields] };
   }
   return { text: '', missing: ['whatsapp'], fieldsUsed: [] };
+}
+
+/**
+ * Which links a send may carry — shared by the engine and the owner's test send (PR D), so a test
+ * shows what a guest would get. The booking link: the guest's language, else English (validate it
+ * with `validBookingUrl`). The info page (D-C21): only when Guest info has something on it, and
+ * Local tips only when there are tips. The offer: only when the journey holds one.
+ */
+export function linkGates(guestInfo: Record<string, any> | null, lang: Lang, pool: string, hasOffer: boolean) {
+  return {
+    bookingRaw: guestInfoField(guestInfo, lang, 'directBookingUrl'),
+    hub: guestInfoHasContent(guestInfo) && (pool !== 'local_tips' || guestInfoField(guestInfo, lang, 'localTips') !== null),
+    offer: hasOffer,
+  };
 }
 
 /** Why a missing value blocks a send, in the gate's words. */

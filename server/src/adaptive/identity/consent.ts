@@ -35,6 +35,16 @@ export interface ConsentChange {
   source: ConsentSource;
   revokedVia?: RevokedVia | null;
   sourceRef?: Record<string, unknown>;
+  /**
+   * A START for a scope the owner has stopped (PR D): the guest's yes is recorded in the ledger,
+   * but the scope stays stopped until the owner resumes — then that yes comes back.
+   */
+  heldByOwnerStop?: boolean;
+}
+
+/** How firmly a revoke holds: the guest's own channel (STOP, unsubscribe) > the owner > anything else. */
+function revokeRank(via: RevokedVia | null | undefined): number {
+  return via === 'channel' ? 2 : via === 'owner' ? 1 : 0;
 }
 
 /**
@@ -59,7 +69,8 @@ export function writeConsentChanges(
     seen.add(key);
     const current = contact.marketingConsent?.[scope]?.[c.channel];
     const target = c.action === 'grant' ? 'granted' : 'revoked';
-    if (current?.state === target) continue;
+    // Already so — unless a firmer revoke arrives (the guest's own unsubscribe over an owner's stop, PR D).
+    if (current?.state === target && !(c.action === 'revoke' && revokeRank(c.revokedVia) > revokeRank(current.revokedVia))) continue;
     const ref = db.collection(COL.consentEvents).doc();
     tx.set(ref, {
       tenantUserId: contact.tenantUserId,
@@ -77,13 +88,18 @@ export function writeConsentChanges(
       recordedAt: new Date(),
       schemaVersion: SCHEMA_VERSION,
     });
-    const entry: ConsentEntry = {
-      state: target,
-      at: new Date(occurredAt),
-      eventId: ref.id,
-      revokedVia: c.action === 'revoke' ? c.revokedVia ?? null : null,
-      source: c.source,
-    };
+    const entry: ConsentEntry = c.heldByOwnerStop
+      ? // The guest's yes, held by the owner's stop: Resume gives it back.
+        { state: 'revoked', at: new Date(occurredAt), eventId: ref.id, revokedVia: 'owner', source: 'owner', ownerStopped: true, ownerPrior: 'granted' }
+      : {
+          state: target,
+          at: new Date(occurredAt),
+          eventId: ref.id,
+          revokedVia: c.action === 'revoke' ? c.revokedVia ?? null : null,
+          source: c.source,
+          // An owner's stop stays on the scope when the guest's own revoke replaces it (PR D).
+          ...(c.action === 'revoke' && current?.ownerStopped ? { ownerStopped: true } : {}),
+        };
     pairs.push([new FieldPath('marketingConsent', scope, c.channel), entry]);
     written.push(c);
   }
@@ -102,10 +118,36 @@ export function grantedScopes(contact: ContactDoc, channel: Channel): string[] {
     .map(([scope]) => scope.replace(/^venue:/, ''));
 }
 
+/**
+ * Where a guest's own STOP must be recorded: the scopes granted now, and those the owner stopped
+ * after the guest had said yes (PR D). There the STOP replaces the owner's revoke (keeping its
+ * `ownerStopped` mark), so the owner's Resume can never give back a yes the guest took away.
+ * Not a scope the guest never said yes to: a later START would turn it into a yes they never gave.
+ */
+export function stopScopes(contact: ContactDoc, channel: Channel): string[] {
+  return Object.entries(contact.marketingConsent ?? {})
+    .filter(([, byCh]) => {
+      const e = byCh?.[channel];
+      return e?.state === 'granted' || (e?.state === 'revoked' && e.revokedVia === 'owner' && e.ownerPrior === 'granted');
+    })
+    .map(([scope]) => scope.replace(/^venue:/, ''));
+}
+
 /** Venue scopes where `channel` was revoked by one of `sources` (START undoes exactly what STOP took). */
 export function revokedScopesBy(contact: ContactDoc, channel: Channel, sources: string[]): string[] {
   return Object.entries(contact.marketingConsent ?? {})
-    .filter(([, byCh]) => byCh?.[channel]?.state === 'revoked' && sources.includes(String(byCh?.[channel]?.source ?? '')))
+    // Not a scope the owner stopped (PR D): START gives back the guest's yes only where the owner didn't say no.
+    .filter(([, byCh]) => byCh?.[channel]?.state === 'revoked' && !byCh?.[channel]?.ownerStopped && sources.includes(String(byCh?.[channel]?.source ?? '')))
+    .map(([scope]) => scope.replace(/^venue:/, ''));
+}
+
+/** Scopes a STOP revoked that the owner has stopped since (PR D): a START there is held until the owner resumes. */
+export function heldStartScopes(contact: ContactDoc, channel: Channel, sources: string[]): string[] {
+  return Object.entries(contact.marketingConsent ?? {})
+    .filter(([, byCh]) => {
+      const e = byCh?.[channel];
+      return e?.state === 'revoked' && e.ownerStopped === true && e.revokedVia === 'channel' && sources.includes(String(e.source ?? ''));
+    })
     .map(([scope]) => scope.replace(/^venue:/, ''));
 }
 
@@ -132,4 +174,102 @@ export function liftSuppression(tx: Transaction, pointId: string, point: Contact
   const { [channel]: _removed, ...rest } = point.suppression;
   tx.update(db.collection(COL.contactPoints).doc(pointId), { suppression: rest, updatedAt: new Date() });
   return true;
+}
+
+// ── The owner's "Stop marketing to this guest" (PR D, D-D6) ─────────────────
+
+const OWNER_CHANNELS: Channel[] = ['email', 'sms', 'whatsapp'];
+
+/**
+ * Stops or resumes marketing to one guest at the given venues (one venue, or every venue of
+ * the owner), every channel. ONE projection update and a ledger doc per real change.
+ *
+ *  - Stop: a revoke with `source: 'owner'`, `revokedVia: 'owner'` — also for channels the guest
+ *    never said yes to (so a later new phone doesn't open SMS) — remembering whether it was
+ *    granted before (`ownerPrior`). A scope the guest revoked themselves (STOP, unsubscribe)
+ *    keeps that revoke and is only marked `ownerStopped`, so START doesn't undo the owner's no.
+ *  - Resume: reverses only the owner's own stop. A channel the guest had said yes to is granted
+ *    again (`source: 'owner'`); one they hadn't goes back to "no answer" (a later splash yes can
+ *    grant it); a guest's own revoke stays and loses only its `ownerStopped` mark.
+ * Returns how many scope×channel entries changed.
+ */
+export function writeOwnerMarketing(
+  tx: Transaction,
+  contactId: string,
+  contact: ContactDoc,
+  args: { action: 'stop' | 'resume'; venueIds: string[]; at: number; by: string; scope?: 'venue' | 'all' },
+): number {
+  const pairs: Array<[FieldPath, unknown]> = [];
+  const ledger = (venueId: string, scope: string, channel: Channel, action: 'grant' | 'revoke', sourceRef: Record<string, unknown>) => {
+    const ref = db.collection(COL.consentEvents).doc();
+    tx.set(ref, {
+      tenantUserId: contact.tenantUserId,
+      contactId,
+      networkId: contact.networkId,
+      venueId,
+      scope,
+      channel,
+      purpose: 'marketing',
+      action,
+      source: 'owner',
+      sourceRef,
+      locale: (contact.lang ?? 'en') as Lang,
+      occurredAt: new Date(args.at),
+      recordedAt: new Date(),
+      schemaVersion: SCHEMA_VERSION,
+    });
+    return ref.id;
+  };
+  for (const venueId of [...new Set(args.venueIds)]) {
+    const scope = venueScope(venueId);
+    for (const channel of OWNER_CHANNELS) {
+      const cur = contact.marketingConsent?.[scope]?.[channel];
+      const path = new FieldPath('marketingConsent', scope, channel);
+      if (args.action === 'stop') {
+        if (cur?.ownerStopped) continue;
+        if (cur?.state === 'revoked' && cur.revokedVia === 'channel') {
+          // The guest's own no stays; the owner's stop is recorded beside it.
+          ledger(venueId, scope, channel, 'revoke', { by: args.by, kind: 'owner_stop_mark', over: cur.eventId });
+          pairs.push([path, { ...cur, ownerStopped: true }]);
+          continue;
+        }
+        const eventId = ledger(venueId, scope, channel, 'revoke', { by: args.by, kind: 'owner_stop' });
+        const entry: ConsentEntry = {
+          state: 'revoked',
+          at: new Date(args.at),
+          eventId,
+          revokedVia: 'owner',
+          source: 'owner',
+          ownerStopped: true,
+          ownerPrior: cur?.state === 'granted' ? 'granted' : 'none',
+        };
+        pairs.push([path, entry]);
+      } else {
+        if (!cur?.ownerStopped) continue;
+        if (cur.revokedVia === 'owner' && cur.ownerPrior === 'granted') {
+          const eventId = ledger(venueId, scope, channel, 'grant', { by: args.by, kind: 'owner_resume', resumes: cur.eventId });
+          pairs.push([path, { state: 'granted', at: new Date(args.at), eventId, revokedVia: null, source: 'owner' } satisfies ConsentEntry]);
+        } else if (cur.revokedVia === 'owner') {
+          // No yes to give back: "no answer" again (not sticky), so a later splash yes can grant it.
+          // Recorded as a (still) revoked state, never a grant the guest didn't give.
+          const eventId = ledger(venueId, scope, channel, 'revoke', { by: args.by, kind: 'owner_lift', resumes: cur.eventId });
+          pairs.push([path, { state: 'revoked', at: new Date(args.at), eventId, revokedVia: null, source: 'owner_resume' } satisfies ConsentEntry]);
+        } else {
+          // The guest's own no stays; only the owner's mark goes.
+          ledger(venueId, scope, channel, 'revoke', { by: args.by, kind: 'owner_lift_guest_no', resumes: cur.eventId });
+          pairs.push([path, { ...cur, ownerStopped: false }]);
+        }
+      }
+    }
+  }
+  const changed = pairs.length;
+  // "All venues": also the venues the owner opens later (identity/resolve.ts reads this).
+  if (args.scope === 'all' && args.action === 'stop' && !contact.ownerStoppedAll) pairs.push([new FieldPath('ownerStoppedAll'), { at: new Date(args.at), by: args.by }]);
+  if (args.scope === 'all' && args.action === 'resume' && contact.ownerStoppedAll) pairs.push([new FieldPath('ownerStoppedAll'), null]);
+  if (pairs.length) {
+    pairs.push([new FieldPath('updatedAt'), new Date()]);
+    const [first, ...rest] = pairs;
+    tx.update(db.collection(COL.contacts).doc(contactId), first[0], first[1], ...rest.flat());
+  }
+  return changed;
 }

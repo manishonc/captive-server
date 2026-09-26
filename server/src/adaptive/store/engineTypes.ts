@@ -6,6 +6,7 @@
 import type { Channel, Lang } from '../core/constants';
 import type { StoredTime } from './types';
 import type { DecisionRecord } from '../core/runtime/decision';
+import type { ReplaySnapshot } from '../core/runtime/replay';
 
 export type ConsentState = 'granted' | 'revoked';
 export type RevokedVia = 'channel' | 'page' | 'owner' | 'splash';
@@ -17,6 +18,13 @@ export interface ConsentEntry {
   revokedVia?: RevokedVia | null;
   /** What caused the change (sms_keyword, unsubscribe_page, brevo_spam…): START re-grants only what STOP took. */
   source?: string | null;
+  /**
+   * The owner's "Stop marketing to this guest" covers this scope (PR D). It stays until the
+   * owner resumes: a splash tick can't undo it, and START doesn't re-grant it.
+   */
+  ownerStopped?: boolean | null;
+  /** On an owner revoke: was it granted before? Resume restores only a yes the guest gave. */
+  ownerPrior?: 'granted' | 'none' | null;
 }
 
 /** `{ 'venue:abc': { email?: …, sms?: …, whatsapp?: … } }` */
@@ -94,6 +102,8 @@ export interface ContactDoc {
     lastClickAt: StoredTime;
     lastClickChannel: Channel | null;
   };
+  /** The owner stopped marketing to this guest at all their venues (PR D): venues opened later are covered too. */
+  ownerStoppedAll?: { at: StoredTime; by: string } | null;
   replyNoticeSentAt: StoredTime;
   createdAt: StoredTime;
   updatedAt: StoredTime;
@@ -141,6 +151,8 @@ export interface VisitDoc {
   visitNumber: number;
   isFirstVisit: boolean;
   isRevisit: boolean;
+  /** The mode the visit started in (PR D): a visit from a test run never starts a live journey at its end. */
+  startMode?: 'test' | 'live' | null;
   expireAt: StoredTime;
   schemaVersion: number;
 }
@@ -178,6 +190,8 @@ export interface JourneySendDoc {
   engagement: { deliveredAt: StoredTime; openedAt: StoredTime; firstClickAt: StoredTime; clicks: number; repliedAt: StoredTime };
   attribution: { convertedAt: StoredTime; conversionEventId: string } | null;
   decision: DecisionRecord;
+  /** What the rules read, so Replay can re-run the decision (v2 decisions; null when it couldn't be built). */
+  replay?: ReplaySnapshot | null;
   dispatchLease: { owner: string; until: StoredTime } | null;
   createdAt: StoredTime;
   sentAt: StoredTime;
@@ -283,6 +297,19 @@ export interface StayDoc {
   missingCount: number;
   lastMissAt: StoredTime;
   overlapWith: string[];
+  /** +1 on every unlink (PR D): the next guest's link gets new moment ids (stays/times.ts `linkSeqSuffix`). */
+  linkSeq?: number;
+  /** People the owner unlinked from this stay: never linked to it again automatically (at most 10). */
+  unlinkedContactIds?: string[];
+  /**
+   * An owner's re-link at this link generation whose worker follow-up (stays/link.ts
+   * handleStayRelinked) hasn't finished: no other path schedules this stay's moments meanwhile.
+   */
+  relinkPendingSeq?: number | null;
+  unlinkedAt?: StoredTime;
+  unlinkedBy?: string | null;
+  /** Who made the current link: the first guest to connect, or the owner picking one by hand. */
+  linkedBy?: 'guest' | 'owner' | null;
   cancelledAt?: StoredTime;
   cancelReason?: 'missing' | 'feed_deleted' | null;
   expireAt: StoredTime;

@@ -23,12 +23,13 @@ import { sendKeyFor } from '../core/runtime/ids';
 import { checkChannel, pickChannel, pickTime, pickVariant, type ChannelCheck, type ChannelFacts, type ChannelRule } from '../core/runtime/pickers';
 import { checkSystem, runGate, type GateInput, type GateResult } from '../core/runtime/gate';
 import { buildDecision, type DecisionRecord } from '../core/runtime/decision';
+import { SYSTEM_PRECHECK_CHANNEL, buildReplaySnapshot, noChannelFor, systemGate, type ReplayArgs, type ReplaySnapshot } from '../core/runtime/replay';
 import { DAY_MS, HOUR_MS, MINUTE_MS, atLocalTime, durationMs } from '../core/runtime/time';
 import { phoneCountry } from '../core/runtime/phoneCountry';
 import type { LastTouch } from '../core/runtime/types';
 import { ENGINE_VERSION, SCHEMA_VERSION } from '../core/constants';
 import { sha256Hex } from '../core/checksum';
-import { consentFor } from '../identity/resolve';
+import { consentFor, consentState } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
 import type { EngineSettings } from '../store/engineSettings';
 import { retentionFrom, tsMs } from '../store/time';
@@ -43,7 +44,7 @@ import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBooking
 import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
 import { dayKey, raiseAlert } from './alerts';
 import { journeyOnState, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
-import { DRY_RUN_LINKS, guestInfoField, guestInfoHasContent, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from './renderSend';
+import { DRY_RUN_LINKS, linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from './renderSend';
 import { resolveStayTimes } from '../stays/times';
 import type { LoadedStay } from '../stays/store';
 import { renderText } from '../core/render';
@@ -74,6 +75,8 @@ export type SendOutcome =
       suppress: boolean;
       /** The booking was cancelled: the journey ends as `cancelled` (D-C19), it doesn't move on. */
       stayCancelled?: boolean;
+      /** Why the stay journey ends: `stay_cancelled`, or `stay_unlinked` (PR D). */
+      stayEndReason?: 'stay_cancelled' | 'stay_unlinked';
       events: EventInput[];
     }
   | {
@@ -83,6 +86,9 @@ export type SendOutcome =
       slot: string;
       reason: string;
       creditsWaitStartedAt?: number;
+      /** The credits rule deferred at this look (whichever rule won the gate). */
+      creditsShort?: boolean;
+      creditsShortFor?: { channel: string; price: number };
       /** A provider "try again later": how many so far. */
       dispatchAttempts?: number;
       /** Set when this step already bumped the instance (a dispatch that has to wait). */
@@ -228,7 +234,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     return {
       channel,
       hasAddress: email ? Boolean(contact.email) : Boolean(contact.phoneE164),
-      consent: consent[channel]?.state ?? 'none',
+      consent: consentState(consent[channel]),
       suppressed: cp?.suppression?.[channel]?.reason ?? null,
       audienceOk: audience === 'all' || Boolean(verified),
       hasWording: variants.some((v) => Boolean(variantContent(v, channel, lang))),
@@ -277,14 +283,17 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     channelReady: true,
     // Rule 1: the stay isn't cancelled (a stay journey whose Stay is gone counts as cancelled).
     stayCancelled: Boolean(inst.meta.context.stayId) && (!a.stay || a.stay.status === 'cancelled'),
+    // …and it is still this guest's (the owner can unlink a wrongly linked person, PR D).
+    stayUnlinked: Boolean(inst.meta.context.stayId) && Boolean(a.stay) && a.stay?.contactId !== inst.meta.contactId,
   };
 
   const versions = { template: inst.meta.templateVersion, config: inst.meta.configVersion, playbook: inst.meta.playbookKey, engine: ENGINE_VERSION };
   const slotRecord = { picked: slot, rule: slotRule, plannedAt: intendedAt };
-  const pre = checkSystem({ now, mode, purpose: cfg.purpose, channel: 'email', intendedAt, system } as GateInput);
+  const pre = checkSystem({ now, mode, purpose: cfg.purpose, channel: SYSTEM_PRECHECK_CHANNEL, intendedAt, system } as GateInput);
   if (pre.verdict !== 'allow') {
-    const gate = { verdict: pre.verdict, rule: 'system' as const, reason: pre.reason ?? null, until: pre.until ?? null, checks: [pre] };
+    const gate = systemGate(pre);
     const decision = buildDecision({ now, mode, poolKey: cfg.pool, purpose: cfg.purpose, gate, channelChecks: [], channel: { picked: null, rule: 'not reached' }, variant: { picked: null, method: 'none' }, slot: slotRecord, credits: null, versions });
+    const replay = replaySnapshot({ stage: 'system', system });
     if (pre.verdict === 'defer' && pre.until !== undefined) {
       const firstOfReason = inst.state.waiting?.lastDeferReason !== pre.reason;
       if (firstOfReason) void alertFor(pre.reason ?? null, a, tz);
@@ -295,17 +304,21 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         slot,
         reason: pre.reason ?? 'defer',
         creditsWaitStartedAt: inst.state.waiting?.creditsWaitStartedAt,
+        // The system check stops before a channel is picked: a shortage from the last look stands
+        // unless the wallet (read above) can pay that message now.
+        ...(stillCreditsShort(inst.state.waiting, nodeId, wallet) ? { creditsShort: true, creditsShortFor: inst.state.waiting!.creditsShortFor } : {}),
         ...(inst.state.waiting?.nodeId === nodeId && inst.state.waiting?.dispatchAttempts !== undefined ? { dispatchAttempts: inst.state.waiting.dispatchAttempts } : {}),
-        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until } }] : [],
+        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until, replay } }] : [],
       };
     }
-    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off', pre.reason === 'stay_cancelled');
+    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off', stayEnd(pre.reason), replay);
   }
 
   // ── 4. Channel ──
   const ladder = a.definition.channelLadder;
   const allChannels = Array.from(new Set<Channel>([...ladder, 'email', 'sms', 'whatsapp']));
-  const checks: ChannelCheck[] = allChannels.map((c) => checkChannel(cfg.purpose, channelFacts(c)));
+  const facts = allChannels.map((c) => channelFacts(c));
+  const checks: ChannelCheck[] = facts.map((f) => checkChannel(cfg.purpose, f));
   // A channel skipped because HeidiFi's setup is missing (worker env): one alert a day, platform-wide.
   for (const c of checks) {
     if (!c.ok && (c.reason === 'channel_not_ready' || c.reason === 'email_unsubscribe_not_configured') && ladder.includes(c.channel)) void alertSkippedChannel(c.channel, c.reason, a);
@@ -334,17 +347,29 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
 
   if (!pick.channel) {
     // Say why in the owner's words when the only obstacle was their own audience choice.
-    // Among the channels this guest could be reached on at all (has an address, not switched off).
-    const reachable = checks.filter((c) => !c.ok && ladder.includes(c.channel) && c.reason !== 'no_address' && c.reason !== 'whatsapp_off');
-    const onlyAudience = reachable.length > 0 && reachable.every((c) => c.reason === 'audience');
+    const noChannel = noChannelFor(checks, ladder);
     const decision = buildDecision({
       ...baseDecision,
       gate: null,
       variant: { picked: null, method: 'none' },
       credits: null,
-      ...(onlyAudience ? { noChannel: { rule: 'channel_rules' as const, reason: 'audience', fact: 'the owner chose to message verified guests only' } } : {}),
+      ...(noChannel ? { noChannel } : {}),
     });
-    return skipWith(decision, a, sendKey);
+    const replay = replaySnapshot({
+      stage: 'channel',
+      system,
+      channel: {
+        facts,
+        rule: cfg.channel,
+        ladder,
+        ladderPos: inst.state.counters.ladderPos,
+        lastTouchChannel: inst.state.lastTouch?.channel ?? null,
+        preferredChannel: contact.engagement?.preferredChannel ?? null,
+        consecutiveNoClickOnPreferred: contact.engagement?.consecutiveNoClickOnPreferred ?? 0,
+        lastClickChannel: lastClickChannel(contact),
+      },
+    });
+    return skipWith(decision, a, sendKey, undefined, false, null, replay);
   }
   const channel = pick.channel;
 
@@ -357,17 +382,17 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const vc = variantContent(variant, channel, lang)!;
   // Links: same-length stand-ins for pricing and the gate (real ones are minted only
   // once the gate says yes), readable ones for the stored preview.
-  const bookingUrl = validBookingUrl(guestInfo?.locales?.[lang]?.directBookingUrl ?? guestInfo?.locales?.en?.directBookingUrl);
+  const gates = linkGates(guestInfo, lang, cfg.pool, typeof inst.state.vars.offerKey === 'string');
+  const bookingUrl = validBookingUrl(gates.bookingRaw);
   const guestId = inst.meta.context.guestId ?? contact.guestIds?.[contact.guestIds.length - 1] ?? null;
   const priceLinks: Partial<Record<LinkKind, string>> = pricingLinks(['offer', 'rating', 'hub', 'booking']);
   const previewLinks: Partial<Record<LinkKind, string>> = { ...DRY_RUN_LINKS };
   // D-C21: the info page link only goes out when Guest info has something on it — and
   // Local tips only when there are tips — else the send is skipped as guest_info_missing.
-  const hubReady = guestInfoHasContent(guestInfo) && (cfg.pool !== 'local_tips' || guestInfoField(guestInfo, lang, 'localTips') !== null);
   for (const links of [priceLinks, previewLinks]) {
     if (!bookingUrl) delete links.booking;
-    if (typeof inst.state.vars.offerKey !== 'string') delete links.offer;
-    if (!hubReady) delete links.hub;
+    if (!gates.offer) delete links.offer;
+    if (!gates.hub) delete links.hub;
   }
   const unsubscribeUrl = channel === 'email' && cfg.purpose === 'marketing' && mode === 'live' ? unsubscribeUrlFor(guestId, inst.meta.venueId, sendKey) : '';
   if (unsubscribeUrl) priceLinks.unsubscribe = unsubscribeUrl;
@@ -418,7 +443,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     jitterKey: sendKey,
     system: { ...system, channelReady: Boolean(channelAdapters[channel]?.ready()) },
     address: { blocked: null, lowRatingAt: tsMs(cv.lowRatingAt) },
-    consent: { state: consent[channel]?.state ?? 'none' },
+    consent: { state: consentState(consent[channel]) },
     channelRules: {
       audienceOk: true,
       audienceFact:
@@ -441,6 +466,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     credits: { price, spendable: live ? spendable : null, waitStartedAt: inst.state.waiting?.creditsWaitStartedAt ?? null, queueHours: rules.creditQueueHours },
   };
   const gate = runGate(gateInput);
+  const replay = replaySnapshot({ stage: 'gate', input: gateInput });
   const decisionFor = (g: GateResult) =>
     buildDecision({
       ...baseDecision,
@@ -453,10 +479,10 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, channel, variantId: variant.id, slot };
 
   // ── 5. Outcome ──
-  if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz });
+  if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz, replay });
 
   if (gate.verdict === 'allow' && mode === 'test') {
-    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, price, ladderPos: pick.ladderPos, contact, common });
+    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, replay, price, ladderPos: pick.ladderPos, contact, common });
   }
 
   if (gate.verdict === 'allow') {
@@ -468,6 +494,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       decision,
       decisionFor,
       gateInput,
+      replay,
       variantId: variant.id,
       locale: vc.locale,
       content: vc.content,
@@ -491,7 +518,27 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   }
 
   if (gate.verdict === 'block') void alertFor(gate.reason, a, tz);
-  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off', gate.reason === 'stay_cancelled');
+  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off', stayEnd(gate.reason), replay);
+}
+
+/** A credit shortage from the last look at this step that the wallet still can't cover (unknown → it stands). */
+function stillCreditsShort(w: SendArgs['inst']['state']['waiting'], nodeId: string, wallet: { suspended?: boolean; channelBalances: Parameters<typeof spendableForChannel>[0] } | null): boolean {
+  if (!w || w.nodeId !== nodeId || !w.creditsShort) return false;
+  if (!wallet || wallet.suspended || !w.creditsShortFor) return true;
+  return spendableForChannel(wallet.channelBalances, w.creditsShortFor.channel as Parameters<typeof spendableForChannel>[1]) < w.creditsShortFor.price;
+}
+
+/** The credit-shortage marks for a deferral (see `deferred`). */
+function creditsShortAfter(gate: GateResult, decision: DecisionRecord, prev: SendArgs['inst']['state']['waiting'], nodeId: string): { creditsShort?: true; creditsShortFor?: { channel: string; price: number } } {
+  // Not only a defer: a credit wait past its limit (a skip, when quiet hours won) can still be saved by a top-up.
+  if (!gate.checks.some((c) => c.rule === 'credits' && c.verdict !== 'allow')) return {};
+  if (typeof decision.credits?.balance !== 'number') {
+    return prev?.nodeId === nodeId && prev.creditsShort ? { creditsShort: true, ...(prev.creditsShortFor ? { creditsShortFor: prev.creditsShortFor } : {}) } : {};
+  }
+  return {
+    creditsShort: true,
+    ...(decision.channel.picked && typeof decision.credits.price === 'number' ? { creditsShortFor: { channel: decision.channel.picked, price: decision.credits.price } } : {}),
+  };
 }
 
 /** A held-back send: when to look again, and the "why" once per reason. */
@@ -499,7 +546,7 @@ function deferred(
   gate: GateResult,
   decision: DecisionRecord,
   a: SendArgs,
-  x: { intendedAt: number; slot: string; sendKey: string; common: Record<string, unknown>; tz: string; revAfter?: number | null; dispatchAttempts?: number },
+  x: { intendedAt: number; slot: string; sendKey: string; common: Record<string, unknown>; tz: string; replay: ReplaySnapshot | null; revAfter?: number | null; dispatchAttempts?: number },
 ): SendOutcome {
   const { inst } = a;
   const keepsIntended = gate.reason === 'paused' || gate.reason === 'lapse_unknown';
@@ -517,12 +564,15 @@ function deferred(
     reason: gate.reason ?? 'defer',
     // The 72 h credit wait keeps counting through quiet hours and pauses.
     creditsWaitStartedAt: gate.reason === 'credits' ? inst.state.waiting?.creditsWaitStartedAt ?? a.now : inst.state.waiting?.creditsWaitStartedAt,
+    // Every rule is checked, so a credit shortage is known even when quiet hours won — measured
+    // against a balance that was read; a failed read keeps what the last look at this step knew.
+    ...creditsShortAfter(gate, decision, inst.state.waiting, a.nodeId),
     ...(x.revAfter !== undefined ? { revAfter: x.revAfter } : {}),
     // "Try later" attempts survive a quiet-hours or credits hold of the same step.
     ...((x.dispatchAttempts ?? (inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts : undefined)) !== undefined
       ? { dispatchAttempts: x.dispatchAttempts ?? inst.state.waiting!.dispatchAttempts }
       : {}),
-    events: firstOfReason ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until } } as EventInput] : [],
+    events: firstOfReason ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until, replay: x.replay } } as EventInput] : [],
   };
 }
 
@@ -582,6 +632,8 @@ interface LiveArgs {
   decision: DecisionRecord;
   decisionFor: (g: GateResult) => DecisionRecord;
   gateInput: GateInput;
+  /** The first look's replay snapshot (it goes with `decision`). */
+  replay: ReplaySnapshot | null;
   variantId: string;
   locale: Lang;
   content: any;
@@ -610,7 +662,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   const marketing = d.cfg.purpose === 'marketing';
   const block = (reason: string): SendOutcome => {
     void alertFor(reason, a, d.tz);
-    return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common);
+    return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common, false, null, d.replay);
   };
   if (d.channel === 'whatsapp') return block('channel_not_ready');
   const channel = d.channel;
@@ -620,7 +672,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   const attempts = inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts ?? 0 : 0;
   if (attempts >= MAX_DISPATCH_ATTEMPTS) return block('provider_unavailable');
   const address = channel === 'email' ? d.contact.email : d.contact.phoneE164;
-  if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common);
+  if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common, false, null, d.replay);
   if (channel === 'email' && marketing && !d.unsubscribeUrl) return block('email_unsubscribe_not_configured');
 
   // Real links, only now that the gate said yes.
@@ -696,6 +748,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     engagement: { deliveredAt: null, openedAt: null, firstClickAt: null, clicks: 0, repliedAt: null },
     attribution: null,
     decision: d.decision,
+    replay: d.replay,
     dispatchLease: dispatchLease(a.workerId),
     createdAt: new Date(a.now),
     sentAt: null,
@@ -735,8 +788,10 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     // Something changed since the first look (paused, a STOP, the weekly limit…).
     const g = claim.gate;
     const decision = d.decisionFor(g);
-    if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz });
-    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off', g.reason === 'stay_cancelled');
+    // The snapshot of what the re-check read, not the first look (else Replay would answer "allow").
+    const replay = replaySnapshot({ stage: 'gate', input: claim.input });
+    if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz, replay });
+    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off', stayEnd(g.reason), replay);
   }
 
   // ── Phase 2 + 3: the provider, then the record ──
@@ -771,20 +826,44 @@ function skipOutcome(reason: string, at: number = Date.now()): SendOutcome {
   return { kind: 'done', outcome: 'skipped', touch: null, revAfter: null, suppress: false, events: [{ type: 'send.skipped', occurredAt: at, data: { reason } }] };
 }
 
-function skipWith(decision: DecisionRecord, a: SendArgs, sendKey: string, common?: Record<string, unknown>, suppress = false, stayCancelled = false): SendOutcome {
+/** The gate's stay reasons end the journey (`cancelled`); anything else doesn't. */
+function stayEnd(reason: string | null | undefined): 'stay_cancelled' | 'stay_unlinked' | null {
+  return reason === 'stay_cancelled' || reason === 'stay_unlinked' ? reason : null;
+}
+
+/** The replay snapshot, or null: building it must never stop a send (core/runtime/replay.ts). */
+function replaySnapshot(args: ReplayArgs): ReplaySnapshot | null {
+  try {
+    return buildReplaySnapshot(args);
+  } catch (err) {
+    console.warn('[ADAPTIVE] replay snapshot not built:', (err as Error)?.message ?? err);
+    return null;
+  }
+}
+
+function skipWith(
+  decision: DecisionRecord,
+  a: SendArgs,
+  sendKey: string,
+  common?: Record<string, unknown>,
+  suppress = false,
+  stayEndReason: 'stay_cancelled' | 'stay_unlinked' | null = null,
+  replay: ReplaySnapshot | null = null,
+): SendOutcome {
   return {
     kind: 'done',
     outcome: 'skipped',
     touch: null,
     revAfter: null,
     suppress,
-    stayCancelled,
+    stayCancelled: stayEndReason !== null,
+    ...(stayEndReason ? { stayEndReason } : {}),
     events: [
       {
         ...(common ?? { tenantUserId: a.inst.meta.tenantUserId, venueId: a.inst.meta.venueId, contactId: a.inst.meta.contactId, instanceId: a.inst.id, journeyKey: a.inst.meta.journeyKey, mode: a.inst.meta.mode, nodeId: a.nodeId, sendKey }),
         type: decision.result === 'block' ? 'send.blocked' : 'send.skipped',
         occurredAt: a.now,
-        data: { decision },
+        data: { decision, replay },
       } as EventInput,
     ],
   };
@@ -801,6 +880,7 @@ async function dryRun(p: {
   cfg: SendConfig;
   rendered: { subject?: string; text: string };
   decision: DecisionRecord;
+  replay: ReplaySnapshot | null;
   price: number;
   ladderPos: number;
   contact: ContactDoc;
@@ -841,6 +921,7 @@ async function dryRun(p: {
     engagement: { deliveredAt: null, openedAt: null, firstClickAt: null, clicks: 0, repliedAt: null },
     attribution: null,
     decision: p.decision,
+    replay: p.replay,
     dispatchLease: null,
     createdAt: new Date(now),
     sentAt: null,
@@ -857,7 +938,7 @@ async function dryRun(p: {
     if (sendSnap.exists) return false;
     tx.create(db.collection(COL.journeySends).doc(sendKey), doc);
     tx.update(ref, { rev: readRev + 1, updatedAt: new Date(now) });
-    tx.set(eventRef(), eventDoc({ ...(p.common as any), type: 'send.dry_run', occurredAt: now, data: { decision: p.decision } }));
+    tx.set(eventRef(), eventDoc({ ...(p.common as any), type: 'send.dry_run', occurredAt: now, data: { decision: p.decision, replay: p.replay } }));
     return true;
   });
   if (!ok) return { kind: 'conflict' };

@@ -141,6 +141,15 @@ export interface AdaptiveVenueDoc {
   pausedAt?: StoredTime;
   /** Per install id: when it stopped running here (playbook switched away, Guest info off). Cleared when it runs again. */
   switchedOffAt?: Record<string, StoredTime>;
+  /** When anything was first switched on here — never moves (PR D Start sending; real time). */
+  firstOnAt?: StoredTime;
+  /** The owner's one click on Start sending (PR D; engine clock) and who clicked. */
+  sendingConfirmedAt?: StoredTime;
+  sendingConfirmedBy?: string | null;
+  /** Who gets messages (plan §4.2): SMS only to verified numbers by default, email to everyone who said yes. */
+  audience?: { sms: 'verified' | 'all'; email: 'verified' | 'all' };
+  audienceUpdatedAt?: StoredTime;
+  audienceUpdatedBy?: string | null;
 }
 
 export interface VenueJourneyConfigDoc {

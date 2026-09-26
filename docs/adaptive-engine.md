@@ -40,8 +40,9 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
   has let the guest online.
 - The worker never imports `server.ts`, so the Campaign Manager scheduler and the AP monitor don't
   run twice.
-- The worker is the only process that reads owners' calendar links (outbound https). The one
-  exception planned is PR D's "Check link", which reads the link once in the API process.
+- The worker is the only process that reads owners' calendar links on its schedule (outbound https).
+  The one exception is the owner's "Check link" (PR D, `POST …/stay-feed/check`), which reads the
+  link once in the API process, with the same safe fetcher (20 checks an hour per account).
 
 ## Sending (live)
 
@@ -81,6 +82,7 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
 | Brevo spam / unsubscribed, the `/u` page | email consent revoked for that venue (spam also blocks the address) |
 | CMS click (PR E) | the journey's "wait for click", the guest's favourite channel |
 | CMS rating (PR E) | ≤ 2★: no more marketing at that venue; ≤ 3★: the owner gets an email (with the private feedback, which is not kept in the log) |
+| The owner's "Stop marketing to this guest" (PR D) | consent revoked by the owner (`revokedVia: owner`) on every channel at one venue or all their venues; a splash tick can't undo it and START doesn't re-grant it; the owner's Resume gives back only what the guest had said yes to. "All venues" also covers venues the guest visits later (`ownerStoppedAll`). A guest's own STOP over an owner's stop replaces it (Resume can't undo the guest's no); a START texted or a splash yes given while the owner's stop stands is kept (`ownerPrior: granted`) and comes back with the owner's Resume — at every venue, also one opened after "all venues" |
 
 Each hook runs after today's processing and never changes today's reply. Brevo events without an
 Adaptive sendKey cost nothing; Twilio statuses are only looked up while an account is not off or sending
@@ -89,7 +91,7 @@ is not paused.
 ## Alerts
 
 Written once to `CaptivePortal_AdaptiveAlerts` (one per venue, reason and day) and emailed:
-- to HeidiFi at `AdaptiveConfig/global.alerts.email` (set it by hand until the admin card, PR D) when
+- to HeidiFi at `AdaptiveConfig/global.alerts.email` (set on the admin launch card, `PUT /admin/launch`) when
   sends are blocked by a setup problem, a daily ceiling is reached, the sign-up breaker trips, or provider
   credentials are refused;
 - to the owner (`Users/{tenant}.email`) for a rating of 3★ or less.
@@ -106,13 +108,14 @@ running at the same time can't let more through (#97).
 
 One doc per venue, journey and day: `{venueId}_{journeyKey}_{yyyymmdd}`, the day being when the event
 happened in the venue's time zone. `{venueId}__venue_{yyyymmdd}` (journey key `_venue`) holds the venue's
-totals over all journeys, plus its visits. No personal data; kept forever. The results route (PR D)
-reads them by id.
+totals over all journeys, plus its visits. No personal data; kept forever. The results route
+(`GET /tenants/:t/results`, PR D) reads them by id: "came back" = conversions of journeys whose goal is
+a return visit, estimated revenue = that × `AdaptiveVenues.avgSpendPerVisit`, test runs apart.
 
 | Field | Counts (from `CaptivePortal_JourneyEvents`) |
 |---|---|
 | `entered`, `converted` | guests who started / reached the goal |
-| `ended.{status}`, `exited.{reason}` | how journeys ended (`completed`, `exhausted`, `converted`, `suppressed`, `failed`, and `cancelled` for a stay journey whose booking was cancelled — reason `stay_cancelled`) and why |
+| `ended.{status}`, `exited.{reason}` | how journeys ended (`completed`, `exhausted`, `converted`, `suppressed`, `failed`, and `cancelled` for a stay journey whose booking was cancelled — reason `stay_cancelled` — or whose guest the owner unlinked — reason `stay_unlinked`, PR D) and why; a guest the sign-up breaker or a late connect kept out gets `journey.not_started` in the log (for the timeline), not counted |
 | `sends.{channel}.{sent,delivered,opened,clicked,bounced,failed,unknown}` | live messages (a message clicked twice counts once) |
 | `bySlot.{slot}` / `byVariant.{variantId}` → `{sent, clicked}` | per time slot and wording |
 | `credits.{channel}` | credits charged for marketing messages (equals the ledger) |
@@ -120,7 +123,7 @@ reads them by id.
 | `skipped.{reason}` | sends skipped or blocked, by the "why" reason |
 | `dryRun.{…}` | everything of test-run guests, same shape — a test run never shows in `sends` or `credits` |
 | `visits.{total, first, revisits, captures}` (`_venue` only) | visits, first visits, revisits, Wi-Fi sign-ins |
-| `stays.{created, changed, cancelled, linked, overlapFlagged, momentsSkipped}` (`_venue` only) | Airbnb bookings synced, moved, cancelled, linked to a guest, overlapping, and stay moments skipped (too late or switched off) — counted whatever the mode, never under `dryRun` |
+| `stays.{created, changed, cancelled, linked, unlinked, overlapFlagged, momentsSkipped}` (`_venue` only) | Airbnb bookings synced, moved, cancelled, linked to a guest, unlinked by the owner, overlapping, and stay moments skipped (too late or switched off) — counted whatever the mode, never under `dryRun` |
 | `rollupWatermark`, `updatedAt`, `schemaVersion` | how far the numbers go |
 
 - **How:** after the worker runs a task for a venue, it arms `rollup:{venueId}:{15-min bucket}`, due 2 min
@@ -247,7 +250,7 @@ link, so a guest linked after the venue went live still gets the moment that bro
   (`checkOutAt <= liveSince`: the activation, or Guest info switched on) gets none of its moments — e.g. the
   stay playbook turned on for the first time after they left: no review ask, no book-direct offer. Checked
   first, from the install that has the journey (on, paused or switched off) when the moment comes — never
-  from the task's `installId` (a date change re-stamps it). Recorded once per stay and journey as
+  from the task's `installId` (a date change re-stamps it). Recorded once per stay, journey and link as
   `moment.passed` (`reason: 'checked_out_before_live'`), which is not a `stay.*` event and isn't counted
   in the numbers: such a moment is never "missed", also when it comes paused, switched off or late. `liveSince` moves on every activate, so a guest who
   left before an owner turned the running playbook on again loses the post-stay messages still to come
@@ -266,12 +269,13 @@ link, so a guest linked after the venue went live still gets the moment that bro
   guide finishes without checkout instructions and the reminder stays quiet.
 
 **While a stay journey runs** it reads its Stay fresh at every step. `stay.changed` moves a wait anchored
-on the stay (a target already past takes `past`; a wait already due whose anchor didn't move just fires).
-A wait counted from arrival that would end on checkout's local day or later — the stay was shortened — is
-`past`: when it is entered, when its `stay.changed` finds it already due, and when its timer wakes before
-that event arrived — judged on the day it would go and on the fresh Stay's own target (so Stay guide's
-mid-stay message never goes on the day the guest leaves; a journey's own start moment, like Local tips on
-day 2 of a 1-night stay, isn't a wait and isn't covered);
+on the stay (a target already past takes `past`; a wait already due whose anchor didn't move just fires,
+except a wait an owner's re-link resumed, which is left to its own re-armed timer so the stale rule
+judges it). A wait counted from arrival that would end on checkout's local day or later — the stay was
+shortened — is `past`: when it is entered, when its `stay.changed` finds it already due, and when its timer
+wakes before that event arrived — judged on the day it would go and on the fresh Stay's own target (so Stay
+guide's mid-stay message never goes on the day the guest leaves; a journey's own start moment, like Local
+tips on day 2 of a 1-night stay, isn't a wait and isn't covered);
 `stay.cancelled` — or a Stay that is gone — ends the journey as `cancelled` / `stay_cancelled`. A send due
 on a Stay that is cancelled but whose event hasn't arrived yet goes to gate rule 1, which skips it
 (`send.skipped`, "the booking was cancelled", test runs too) and ends the journey the same way; the live
@@ -289,8 +293,25 @@ linked and no new moment starts.
 API, a worker in another container and the skill share it. Anywhere else a `sandbox:` link is refused like
 any non-https link.
 
-The owner routes (save, check link, sync now, status, delete) come with PR D; PR C has the service they
-mount (`service/stays.ts`).
+The owner routes (PR D) mount this service: save, Check link, Sync now, status, delete, and two more:
+**unlink** a wrongly linked person (a cleaner who connected first) — their stay messages stop, they are
+never linked to that stay again automatically, and the next guest who connects in the window is linked
+and gets the remaining messages — and **link by hand** a guest seen at the venue. Each unlink bumps the
+Stay's `linkSeq`, which goes into the next link's moment task keys and event ids (`stays/times.ts`
+`linkSeqSuffix`), so the new guest's moments never collide with the first guest's. An unlinked person's
+stay journeys end as `cancelled` / `stay_unlinked` with their wait kept (the cancel isn't committed if
+the owner has linked them back meanwhile). Linking that same person back by hand writes `stay.relinked`
+in the link's transaction; the worker (`handleStayRelinked`) then, only while the Stay is still theirs
+at that link generation: makes the journeys the unlink ended active again (`journey.resumed`; not a
+journey another run took meanwhile), lets each running one hear the re-link (a wait anchored on the
+stay is entered again when the dates moved while unlinked), re-arms a kept wait at its own time (a step
+long past runs at once and the gate's stale rule decides; a journey unlinked before its first step
+starts), and only then schedules the moments of journeys that never started. Until it has finished
+(`Stays.relinkPendingSeq` = the link generation; always cleared at its end, also when the booking was
+cancelled meanwhile) a connect doesn't schedule that stay's moments and a date change is delivered to
+the running journeys but retried for its moments. An auto-link never picks someone the owner
+unlinked from that stay. An owner's lift of a stop the guest had no yes behind reads as "no answer"
+again everywhere (the gate too), so a later splash tick grants it.
 
 **Known limits** (found in PR C's reviews, parked on purpose):
 - **The checkout overlap rule is not airtight.** The Checkout reminder stays quiet when Stay guide still
@@ -331,8 +352,38 @@ mount (`service/stays.ts`).
 - Missing or malformed values read as the safe setting: off and paused.
 - A change reaches the worker within about 10 s and the login hook within 60 s (both cache it).
   A guest who connects in that window starts with the mode the worker last read.
-- Until the admin card ships (PR D), change these in the Firebase console. Locally, use
-  `POST /internal/adaptive/dev/launch`.
+- Change them on the admin launch card (`GET/PUT /internal/adaptive/admin/launch`, PR D), **never in
+  the Firebase console**: the card writes `launch.liveSince` (Start sending depends on it), a
+  `history/{n}` copy and keeps `killSwitch.reason` (PR 1's rules parser falls back to the paused seed
+  without it). A live account without `liveSince` holds every venue until its owner clicks Start sending.
+  Locally, `POST /internal/adaptive/dev/launch` uses the same function.
+- Changes that loosen sending (going live, releasing the pause, higher limits, more SMS countries) need
+  a typed phrase on the card; pausing, off and test runs are one click, so the brake never fails.
+  Going live is refused while no worker runs the same code with the same identity key.
+
+## Start sending (PR D)
+
+Owners who turned a venue on before HeidiFi set their account live saw "nothing is sent until HeidiFi
+launches sending". When the account goes live, such a venue **waits for one click on Start sending**
+(`POST /tenants/:t/venues/:v/start-sending`, an ADMIN of the account):
+- While it waits, the venue acts like launch `off` for new guests — marketing and Guest info alike: the
+  login hook writes nothing, the worker records nobody, no journey starts, no stay is linked, no stay
+  moment starts. Calendar feeds keep syncing. The owner overview says `needsStartSending: true`.
+- "Turned on before" = the venue's never-moving `AdaptiveVenues.firstOnAt` (real time) is earlier than
+  the account's `launch.liveSince` (stamped by the admin card each time the account moves into live).
+  Either missing → held (fail closed). A venue turned on after its account's current go-live date doesn't
+  wait — but a new go-live after a rollback holds again every venue that was never confirmed, including
+  ones turned on during the earlier live period (see Rollback).
+- After the click only guests from then on start (judged at the connect, the visit's start or the stay
+  moment): nobody is backfilled — a guest who checked out before the click gets no stay journey from
+  it, as with a playbook turned on after they left (`moment.passed`, reason
+  `checked_out_before_start_sending`). The click only works while the account is live, and stays valid
+  through a rollback; a venue turned on during an off gap waits for its own click.
+- A visit keeps the mode it started in (`Visits.startMode`): a visit that began in a test run ends as a
+  test run even when the account went live meanwhile, so a guest from before launch never gets a live
+  review ask.
+- `sendingLive` in the owner overview now means "this account is live"; `sendingPaused` says whether
+  HeidiFi paused sending.
 
 ## Deploy (captive-server first)
 
@@ -355,11 +406,21 @@ mount (`service/stays.ts`).
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyInstances --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=journeyKey,order=ascending --field-config=field-path=status,order=ascending
    # PR C: the stays a connecting guest could be linked to
    gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_Stays --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=status,order=ascending --field-config=field-path=checkOutAt,order=ascending
+   # PR D: the owner's guests list, a guest's timeline and consent ledger, the messages list / credit waits, the dead-task list
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_ContactVenues --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=lastVisitAt,order=descending
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyEvents --query-scope=COLLECTION --field-config=field-path=contactId,order=ascending --field-config=field-path=occurredAt,order=descending
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_ConsentEvents --query-scope=COLLECTION --field-config=field-path=contactId,order=ascending --field-config=field-path=occurredAt,order=descending
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyEvents --query-scope=COLLECTION --field-config=field-path=venueId,order=ascending --field-config=field-path=type,order=ascending --field-config=field-path=occurredAt,order=descending
+   gcloud firestore indexes composite create --project=$P --collection-group=CaptivePortal_JourneyTasks --query-scope=COLLECTION --field-config=field-path=status,order=ascending --field-config=field-path=doneAt,order=descending
    ```
+
+   **Create PR D's five before deploying PR D:** the worker probes every query at start (the owner
+   screens' ones too) and stays idle while one is missing.
 
    The other stay lookups (`Stays` by `feedId`, by `venueId` + `contactId`; `StayFeeds` by `status`;
    `JourneyInstances` by `context.stayId` + `status`) are equality-only and use the automatic single-field
-   indexes — don't exempt those fields. The worker probes them all.
+   indexes — don't exempt those fields. The worker probes them all. So are PR D's lookups by `contactId`
+   (JourneyInstances, JourneySends, Stays, ContactVenues) and `VenuePlaybooks` by `venueId`.
 
    TTL policies:
 
@@ -374,6 +435,10 @@ mount (`service/stays.ts`).
    The JourneyStats count maps (`sends`, `skipped`, `exited`, `ended`, `bySlot`, `byVariant`, `credits`,
    `utility`, `dryRun`, `visits`, `stays`) are only read by doc id, so their indexes can be switched off the same way.
    PR C also exempts `CaptivePortal_StayFeeds` `url` (the calendar link, a secret) and `lastError`, never queried.
+   PR D exempts `CaptivePortal_JourneySends` `replay` (the decision's replay inputs, never queried; without
+   the exemption every subfield of every send is indexed). The TTL entries for `CaptivePortal_AdaptiveAlerts`
+   and `signups` are now in the JSON too — for `signups`, check first that no other collection named
+   `signups` in the project uses `expireAt`.
    Wait until every index shows **Enabled**.
 
 2. **Check** that `GUEST_OTP_PEPPER` is set on the `server` app. The identity key is derived from
@@ -416,7 +481,11 @@ matches the worker's is pinned in `engine_status.identity.keyFingerprint`.
 
 ### Dead tasks and guest details
 
-Tasks that fail 8 times become `dead` and are kept 30 days for the admin view. A guest's raw contact
+Tasks that fail 8 times become `dead` and are kept 30 days for the admin view (`GET /admin/engine`
+`deadTasks`; `POST /admin/tasks/:id/retry` puts one back once, keeping its due time — refused for a
+STOP / START / reply / old-style unsubscribe whose guest details are gone, and for logins older than 72 h).
+The list names what each dead signal was (`what`), and puts a dead STOP or old-style unsubscribe first
+with `urgent: true` (`urgentDeadTasks` counts them): the guest's "no" was never applied, and it can't be. A guest's raw contact
 details on a connect task are removed as soon as the task is done or dead; a connect task nobody ever
 handles expires after 30 days.
 
@@ -430,6 +499,13 @@ handles expires after 30 days.
    keep syncing so they hear about changes — use step 1 to hold them.
 3. Stop the `adaptive-worker` app in Coolify. Tasks wait in Firestore; calendar polling stops.
 4. Revert the PR. The login hook does nothing while every account is off.
+
+Going live again after a rollback moves the account's `liveSince` (PR D): venues confirmed before stay
+confirmed. **Every venue never confirmed waits for one Start sending click** — a venue turned on during
+the off gap, and also one turned on during the earlier live period that never needed a click (the owner
+overview shows `needsStartSending`, the launch card counts them per account). Tell those owners. While a
+venue waits, new guests there aren't recorded, and running live journeys there don't see revisits or
+offer redemptions.
 
 ## Local test stack
 
@@ -450,7 +526,7 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 | `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` | Rolls the daily numbers up now (no 2-min lag) and returns the JourneyStats docs |
 | `PUT /internal/adaptive/dev/calendar/:name` `{ "venueId"?, "stays": [{ "checkIn": "today", "checkOut": "5n" }] }` or `{ "ics" }` | Writes the sandbox calendar a `sandbox:calendar/<name>` feed reads (Airbnb-shaped; `today`, `+Nd`, `YYYY-MM-DD`; checkout also `Nn` nights) |
 | `GET /internal/adaptive/dev/calendar/:name` | That calendar as `text/calendar` |
-| `POST /internal/adaptive/dev/stay-feed` `{ "venueId", "url" }` | Saves the venue's calendar link (the service PR D's route will mount) |
+| `POST /internal/adaptive/dev/stay-feed` `{ "venueId", "url" }` | Saves the venue's calendar link (the same service as the owner's `PUT …/stay-feed`) |
 | `POST /internal/adaptive/dev/stay-sync` `{ "venueId" }` | Polls the feed now, in the API process under the worker's feed lease; starts its 4 h chain if it isn't running (no `nextPollAt`, or one more than 1 h past); returns what changed and the stays |
 | `POST /internal/adaptive/dev/stay-check` `{ "venueId", "url" }` | "Check link": fetch + parse, store nothing → `{ ok, upcoming, nextCheckIn }` or `{ ok: false, errorCode }` |
 

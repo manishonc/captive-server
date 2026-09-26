@@ -76,6 +76,8 @@ export interface GateInput {
     channelReady: boolean;
     /** A stay journey whose booking was cancelled (or is gone): skipped, no freeze grace, test runs too. */
     stayCancelled?: boolean;
+    /** A stay journey whose booking the owner unlinked from this guest (PR D): skipped the same way. */
+    stayUnlinked?: boolean;
   };
   address: { blocked: string | null; lowRatingAt: number | null };
   consent: { state: 'granted' | 'revoked' | 'none' };
@@ -125,6 +127,7 @@ function ruleSystem(i: GateInput): RuleCheck {
   const late = i.now - i.intendedAt;
   if (!s.tenantActive) return { rule: 'system', verdict: 'skip', fact: 'account is being deleted', reason: 'tenant_inactive' };
   if (s.stayCancelled) return { rule: 'system', verdict: 'skip', fact: 'the booking was cancelled', reason: 'stay_cancelled' };
+  if (s.stayUnlinked) return { rule: 'system', verdict: 'skip', fact: 'the booking was unlinked from this guest', reason: 'stay_unlinked' };
   if (!s.venueOn || !s.journeyOn) {
     const withinFreeze = s.offSinceAt !== null && i.intendedAt <= s.offSinceAt + (s.freezeWindowMs ?? FREEZE_WINDOW_MS);
     if (!withinFreeze) {

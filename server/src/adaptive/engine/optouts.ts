@@ -15,7 +15,7 @@ import { COL } from '../store/collections';
 import type { ContactDoc, ContactPointDoc } from '../store/engineTypes';
 import { SCHEMA_VERSION } from '../core/constants';
 import { tsMs } from '../store/time';
-import { revokedScopesBy, grantedScopes, writeConsentChanges, writeSuppression, type ConsentChange, type ConsentSource } from '../identity/consent';
+import { heldStartScopes, revokedScopesBy, stopScopes, writeConsentChanges, writeSuppression, type ConsentChange, type ConsentSource } from '../identity/consent';
 
 const STOP_SOURCES = ['sms_keyword', 'provider_stop', 'import_legacy'];
 
@@ -72,7 +72,8 @@ export async function applyPhoneStop(pointId: string, source: 'sms_keyword' | 'p
     }
     let revoked = 0;
     for (const c of contacts) {
-      const changes: ConsentChange[] = grantedScopes(c.doc, 'sms').map((venueId) => ({
+      // Also where the owner stopped marketing after a yes (PR D): the guest's own STOP must stand.
+      const changes: ConsentChange[] = stopScopes(c.doc, 'sms').map((venueId) => ({
         venueId,
         channel: 'sms',
         action: 'revoke',
@@ -121,13 +122,24 @@ export async function applyPhoneStart(pointId: string, at: number, ref: Record<s
     tx.update(cpRef, { ...(lift ? { suppression: rest } : {}), 'smsKeywordAt.start': new Date(at), updatedAt: new Date() });
     let granted = 0;
     for (const c of contacts) {
-      const changes: ConsentChange[] = revokedScopesBy(c.doc, 'sms', STOP_SOURCES).map((venueId) => ({
-        venueId,
-        channel: 'sms',
-        action: 'grant',
-        source: 'sms_keyword',
-        sourceRef: ref,
-      }));
+      const changes: ConsentChange[] = [
+        ...revokedScopesBy(c.doc, 'sms', STOP_SOURCES).map((venueId) => ({
+          venueId,
+          channel: 'sms' as const,
+          action: 'grant' as const,
+          source: 'sms_keyword' as const,
+          sourceRef: ref,
+        })),
+        // Where the owner stopped marketing since the STOP (PR D): the START is kept for the owner's Resume.
+        ...heldStartScopes(c.doc, 'sms', STOP_SOURCES).map((venueId) => ({
+          venueId,
+          channel: 'sms' as const,
+          action: 'grant' as const,
+          source: 'sms_keyword' as const,
+          sourceRef: { ...ref, heldByOwnerStop: true },
+          heldByOwnerStop: true,
+        })),
+      ];
       granted += writeConsentChanges(tx, c.id, c.doc, changes, at).length;
     }
     return granted;

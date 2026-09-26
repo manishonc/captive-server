@@ -61,6 +61,13 @@ export interface WaitState {
   slot?: string;
   lastDeferReason?: string;
   creditsWaitStartedAt?: number;
+  /**
+   * The send can't be paid right now (PR D, the results card): set from the credits rule's own
+   * check at every look, so quiet hours or a pause winning the gate don't hide it.
+   */
+  creditsShort?: boolean;
+  /** What the shortage was measured for, so a later look that reads the wallet can drop it after a top-up. */
+  creditsShortFor?: { channel: string; price: number };
   /** Provider "try again later" answers so far for this send (capped). */
   dispatchAttempts?: number;
 }

@@ -26,7 +26,7 @@ import { DAY_MS, MINUTE_MS } from '../core/runtime/time';
 import { eventIdFor } from '../core/runtime/ids';
 import { parseEngineSettings } from '../store/engineSettings';
 import { CONFIG_DOC_ID } from '../store/collections';
-import { consentFor } from '../identity/resolve';
+import { consentFor, consentState } from '../identity/resolve';
 import { tsMs } from '../store/time';
 import { debitOne, onCreditsSpent } from '../../services/credits';
 import { firestoreScheduler, LEASE_MS } from '../queue/firestoreQueue';
@@ -69,7 +69,8 @@ export interface LiveSend {
   pendingEvents: EventInput[];
 }
 
-export type Phase1Result = { kind: 'ok'; revAfter: number } | { kind: 'conflict' } | { kind: 'gate'; gate: GateResult };
+/** `gate`: the re-check said no; `input` is what it really checked (the decision's replay snapshot is built from it). */
+export type Phase1Result = { kind: 'ok'; revAfter: number } | { kind: 'conflict' } | { kind: 'gate'; gate: GateResult; input: GateInput };
 
 /** Phase 1: re-check and claim the send. */
 export async function claimSend(p: LiveSend): Promise<Phase1Result> {
@@ -101,13 +102,19 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
     const touches = (np?.recentMarketingTouches ?? []).filter((t) => t.sendKey !== sendKey && (tsMs(t.at) ?? 0) >= p.now - TOUCH_WINDOW_MS);
     const gi: GateInput = {
       ...p.gateInput,
-      system: { ...p.gateInput.system, paused: settings.paused, stayCancelled: stayId ? !staySnap?.exists || staySnap.get('status') === 'cancelled' : false },
+      system: {
+        ...p.gateInput.system,
+        paused: settings.paused,
+        stayCancelled: stayId ? !staySnap?.exists || staySnap.get('status') === 'cancelled' : false,
+        // Unlinked from this guest since the first look (PR D): the same skip.
+        stayUnlinked: stayId ? Boolean(staySnap?.exists) && staySnap?.get('contactId') !== inst.meta.contactId : false,
+      },
       address: { blocked: point?.suppression?.[p.channel]?.reason ?? null, lowRatingAt: tsMs(cv.lowRatingAt) },
-      consent: { state: consentFor(contact, inst.meta.venueId)[p.channel]?.state ?? 'none' },
+      consent: { state: consentState(consentFor(contact, inst.meta.venueId)[p.channel]) },
       weekly: { ...p.gateInput.weekly, count: touches.filter((t) => (tsMs(t.at) ?? 0) >= weekAgo).length },
     };
     const gate = runGate(gi);
-    if (gate.verdict !== 'allow') return { kind: 'gate', gate } as const;
+    if (gate.verdict !== 'allow') return { kind: 'gate', gate, input: gi } as const;
 
     tx.create(sendRef(sendKey), p.doc);
     if (marketing) {

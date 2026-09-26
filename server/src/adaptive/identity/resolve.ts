@@ -103,7 +103,17 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
     // ── consent sync (pure decisions on what we read) ──
     const now = new Date(input.occurredAt);
     const current: Partial<Record<Channel, ConsentEntry>> = { ...(contact?.marketingConsent?.[scope] ?? {}) };
-    const events: Array<{ channel: Channel; action: 'grant' | 'revoke'; source: string; revokedVia?: 'channel' }> = [];
+    const events: Array<{
+      channel: Channel;
+      action: 'grant' | 'revoke';
+      source: string;
+      revokedVia?: 'channel' | 'owner';
+      ownerPrior?: 'granted' | 'none';
+      ownerStopped?: boolean;
+      kind?: string;
+      /** A splash yes while the owner's stop stands (PR D): recorded, kept for the owner's Resume. */
+      heldByOwnerStop?: boolean;
+    }> = [];
 
     const channelsWithAddress: Channel[] = [
       ...(input.email ? (['email'] as Channel[]) : []),
@@ -117,16 +127,50 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
     for (const ch of channelsWithAddress) {
       // Only a yes (now or earlier) is taken back; with no yes there is nothing to revoke
       // (and a later START must not turn this into a yes the guest never gave).
-      const hadYes = input.consentGiven || current[ch]?.state === 'granted';
-      if (legacyRevoke[ch] && hadYes && current[ch]?.state !== 'revoked') {
-        events.push({ channel: ch, action: 'revoke', source: 'import_legacy', revokedVia: 'channel' });
+      const e = current[ch];
+      // A yes the owner's "Stop marketing" is holding (PR D): the guest's own old opt-out still
+      // replaces it (keeping the owner's mark), so the owner's Resume can't give that yes back.
+      const yesUnderOwnerStop = e?.state === 'revoked' && e.revokedVia === 'owner' && e.ownerPrior === 'granted';
+      // Nothing of the guest's own here yet: no entry, an owner's stop with no yes behind it, or the
+      // owner's lift of one ("no answer" again).
+      const noGuestAnswer = consentState(e) === 'none' || (e?.state === 'revoked' && e.revokedVia === 'owner' && e.ownerPrior !== 'granted');
+      const hadYes = input.consentGiven || e?.state === 'granted' || yesUnderOwnerStop;
+      if (legacyRevoke[ch] && hadYes && (e?.state !== 'revoked' || yesUnderOwnerStop || noGuestAnswer)) {
+        // The owner's mark stays — also at a venue first seen after "stop all" (no entry yet), so a later
+        // START is held there too instead of undoing the owner's stop.
+        const ownerMark = e?.ownerStopped === true || (!e && Boolean(contact?.ownerStoppedAll));
+        events.push({ channel: ch, action: 'revoke', source: 'import_legacy', revokedVia: 'channel', ...(ownerMark ? { ownerStopped: true } : {}) });
+      }
+    }
+    // The owner stopped marketing to this guest at ALL their venues (PR D): a venue with no answer
+    // yet (e.g. opened since) gets the owner's stop instead of the splash's yes — remembering the
+    // yes, so the owner's Resume gives exactly it back.
+    if (contact?.ownerStoppedAll) {
+      for (const ch of ['email', 'sms', 'whatsapp'] as Channel[]) {
+        if (current[ch] || events.some((ev) => ev.channel === ch)) continue;
+        events.push({ channel: ch, action: 'revoke', source: 'owner', revokedVia: 'owner', ownerPrior: 'none', ownerStopped: true, kind: 'owner_stop_all' });
+        // The guest's tick is theirs: in the ledger as their yes, held by the owner's stop (as at any venue).
+        if (input.consentGiven && channelsWithAddress.includes(ch) && !legacyRevoke[ch]) {
+          events.push({ channel: ch, action: 'grant', source: 'splash', heldByOwnerStop: true });
+        }
       }
     }
     if (input.consentGiven) {
       for (const ch of channelsWithAddress) {
+        // The owner stopped this scope while the guest had no yes: the tick is kept (a 'grant' in the
+        // ledger, ownerPrior 'granted') and the stop stands — the owner's Resume gives it back. The same
+        // rule as a START during the stop, at every venue.
+        const cur = current[ch];
+        if (cur?.state === 'revoked' && cur.revokedVia === 'owner' && cur.ownerPrior !== 'granted' && !legacyRevoke[ch] && !events.some((ev) => ev.channel === ch)) {
+          events.push({ channel: ch, action: 'grant', source: 'splash', heldByOwnerStop: true });
+          continue;
+        }
         const willBeRevokedViaChannel =
-          legacyRevoke[ch] || (current[ch]?.state === 'revoked' && current[ch]?.revokedVia === 'channel');
+          legacyRevoke[ch] ||
+          // The guest's own STOP / unsubscribe, or the owner's "Stop marketing" (PR D): a splash tick can't undo either.
+          (current[ch]?.state === 'revoked' && (current[ch]?.revokedVia === 'channel' || current[ch]?.revokedVia === 'owner' || current[ch]?.ownerStopped === true));
         if (current[ch]?.state === 'granted' || willBeRevokedViaChannel) continue;
+        if (events.some((ev) => ev.channel === ch)) continue; // the owner's stop above took it
         events.push({ channel: ch, action: 'grant', source: 'splash' });
       }
     }
@@ -147,22 +191,33 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
         purpose: 'marketing',
         action: e.action,
         source: e.source,
-        sourceRef: { guestId: input.guestId, eventId: input.sourceEventId, consentTextHash: input.consentTextHash ?? null },
+        sourceRef: {
+          guestId: input.guestId,
+          eventId: input.sourceEventId,
+          consentTextHash: input.consentTextHash ?? null,
+          ...(e.kind ? { kind: e.kind } : {}),
+          ...(e.heldByOwnerStop ? { heldByOwnerStop: true } : {}),
+        },
         locale: input.lang,
         occurredAt: now,
         recordedAt: new Date(),
         schemaVersion: SCHEMA_VERSION,
       });
-      const entry: ConsentEntry = {
-        state: e.action === 'grant' ? 'granted' : 'revoked',
-        at: now,
-        eventId: ref.id,
-        revokedVia: e.action === 'revoke' ? e.revokedVia ?? null : null,
-        source: e.source,
-      };
+      const entry: ConsentEntry = e.heldByOwnerStop
+        ? // Still the owner's stop; it now remembers the guest's yes.
+          { state: 'revoked', at: now, eventId: ref.id, revokedVia: 'owner', source: 'owner', ownerStopped: true, ownerPrior: 'granted' }
+        : {
+            state: e.action === 'grant' ? 'granted' : 'revoked',
+            at: now,
+            eventId: ref.id,
+            revokedVia: e.action === 'revoke' ? e.revokedVia ?? null : null,
+            source: e.source,
+            ...(e.ownerStopped ? { ownerStopped: true } : {}),
+            ...(e.ownerPrior ? { ownerPrior: e.ownerPrior } : {}),
+          };
       current[e.channel] = entry;
       projectionUpdates[e.channel] = entry;
-      if (e.action === 'grant') granted.push(e.channel);
+      if (e.action === 'grant' && !e.heldByOwnerStop) granted.push(e.channel);
     }
 
     const contactRef = db.collection(COL.contacts).doc(contactId);
@@ -293,4 +348,14 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
 /** The consent projection for one venue (`marketingConsent['venue:{id}']`). */
 export function consentFor(contact: Pick<ContactDoc, 'marketingConsent'>, venueId: string): Partial<Record<Channel, ConsentEntry>> {
   return contact.marketingConsent?.[venueScope(venueId)] ?? {};
+}
+
+/**
+ * The state the gate reads: the owner's lift of a stop with no yes behind it (`source:
+ * 'owner_resume'`, PR D) is "no answer" again, as the owner's chips show it — not a guest's no.
+ */
+export function consentState(e: ConsentEntry | undefined): 'granted' | 'revoked' | 'none' {
+  if (!e) return 'none';
+  if (e.state === 'revoked' && !e.revokedVia && e.source === 'owner_resume') return 'none';
+  return e.state === 'granted' ? 'granted' : 'revoked';
 }

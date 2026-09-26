@@ -20,6 +20,7 @@ import type { OverlapFlags } from './tenantData';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { now as engineNow, refreshClock, sandboxEnabled } from '../engine/clock';
 import { applyInFlightTask } from '../engine/applyInFlight';
+import { backfillFirstOnAt, stampFirstOnAt } from './venueStamps';
 
 export const GUEST_INFO_KEY = 'guest_info';
 
@@ -89,6 +90,8 @@ export interface VenueChange {
   /** Owner pause/resume of the active playbook. */
   status?: 'paused' | 'on';
   guestInfo?: GuestInfoWrite;
+  /** The owner's "who gets messages" choice, saved with this change (PR D). */
+  audience?: { sms: 'verified' | 'all'; email: 'verified' | 'all' };
 }
 
 export interface VenueChangeResult {
@@ -175,6 +178,7 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
       const avRef = adaptiveVenueRef(c.venueId);
       const avSnap = read(avRef);
       const av: AdaptiveVenueDoc = avSnap.exists ? (avSnap.data() as AdaptiveVenueDoc) : newAdaptiveVenue(c, now);
+      if (avSnap.exists) backfillFirstOnAt(av);
       const result: VenueChangeResult = { venueId: c.venueId, status: av.status, activePlaybookKey: av.activePlaybookKey };
 
       if (c.timezone !== undefined) av.timezone = c.timezone;
@@ -323,6 +327,12 @@ export async function applyVenueChanges(changes: VenueChange[], actor: Actor, no
         result.guestInfo = { enabled: c.guestInfo.enabled };
       }
 
+      if (c.audience) {
+        av.audience = c.audience;
+        av.audienceUpdatedAt = now;
+        av.audienceUpdatedBy = actor.uid;
+      }
+      stampFirstOnAt(av, now);
       av.updatedAt = now;
       tx.set(avRef, stripUndefined(av));
       result.status = av.status;

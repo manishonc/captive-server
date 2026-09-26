@@ -9,8 +9,10 @@ import type { Channel, Lang } from '../constants';
 import type { GateResult, RuleName, Verdict } from './gate';
 import type { ChannelCheck } from './pickers';
 import type { RunMode } from './types';
+import { ENGINE_RUNTIME_VERSION } from './version';
 
-export const DECISION_VERSION = 1;
+/** 2: `versions.runtime`, and the send / event keeps a replay snapshot next to it (core/runtime/replay.ts). */
+export const DECISION_VERSION = 2;
 
 export interface DecisionRecord {
   v: number;
@@ -28,7 +30,8 @@ export interface DecisionRecord {
   variant: { picked: string | null; method: string };
   slot: { picked: string; rule: string; plannedAt: number };
   credits: { price: number; balance: number | null } | null;
-  versions: { template: number; config: number; playbook: string | null; engine: string };
+  /** `runtime`: the ENGINE_RUNTIME_VERSION of the code that decided (v2+; Replay tells a code change from a bug). */
+  versions: { template: number; config: number; playbook: string | null; engine: string; runtime?: string };
 }
 
 export function buildDecision(args: {
@@ -64,7 +67,7 @@ export function buildDecision(args: {
       variant: args.variant,
       slot: args.slot,
       credits: args.credits,
-      versions: args.versions,
+      versions: { ...args.versions, runtime: ENGINE_RUNTIME_VERSION },
     };
   }
   return {
@@ -82,7 +85,7 @@ export function buildDecision(args: {
     variant: args.variant,
     slot: args.slot,
     credits: args.credits,
-    versions: args.versions,
+    versions: { ...args.versions, runtime: ENGINE_RUNTIME_VERSION },
   };
 }
 
@@ -102,6 +105,7 @@ const REASON_WORDS: Record<string, Record<'en' | 'de', string>> = {
   tenant_inactive: { en: 'the account is being closed', de: 'das Konto geschlossen wird' },
   switched_off: { en: 'this journey or venue was switched off', de: 'diese Journey oder dieser Standort ausgeschaltet wurde' },
   stay_cancelled: { en: 'the booking was cancelled', de: 'die Buchung storniert wurde' },
+  stay_unlinked: { en: 'the booking was unlinked from this guest', de: 'die Buchung von diesem Gast getrennt wurde' },
   stale: { en: 'it was too late to still send it', de: 'es zu spät war, sie noch zu senden' },
   channel_not_ready: { en: 'this channel is not set up yet', de: 'dieser Kanal noch nicht eingerichtet ist' },
   venue_ceiling: { en: 'the daily limit for this venue was reached', de: 'das Tageslimit für diesen Standort erreicht war' },
@@ -156,8 +160,19 @@ function reasonText(record: DecisionRecord, l: 'en' | 'de'): string {
     const m = /for (\d+) h/.exec(fact);
     if (m) return l === 'de' ? `${m[1]} Stunden lang nicht genug Credits vorhanden waren` : `there were not enough credits for ${m[1]} hours`;
   }
+  if (reason === 'no_consent' && (fact === 'marketing to this guest was stopped' || fact.startsWith('said no to'))) {
+    // The guest had said yes; then they or the owner stopped it (PR D). The ledger line next to it says who.
+    return l === 'de'
+      ? 'Werbung an diesen Gast gestoppt wurde (von dir, oder der Gast hat sich abgemeldet oder STOP geantwortet)'
+      : 'marketing to this guest was stopped (by you, or the guest unsubscribed or replied STOP)';
+  }
   const key = reason.startsWith('missing_value:') ? 'missing_value' : reason;
   return REASON_WORDS[key]?.[l] ?? UNKNOWN_REASON[l];
+}
+
+/** "1 credit", "60 credits" (German: "1 Credit", "60 Credits"). */
+export function creditsWord(n: number, l: 'en' | 'de'): string {
+  return `${n} ${l === 'de' ? (n === 1 ? 'Credit' : 'Credits') : n === 1 ? 'credit' : 'credits'}`;
 }
 
 /** One sentence for the owner's guest timeline. */
@@ -170,12 +185,12 @@ export function explainDecision(record: DecisionRecord, lang: Lang, tz: string):
   if (record.result === 'allow') {
     if (record.mode === 'test') {
       return l === 'de'
-        ? `Testlauf: hätte per ${channel} gesendet${credits ? ` (${credits} Credits)` : ''} — nichts wurde gesendet.`
-        : `Test run: would have sent by ${channel}${credits ? ` (${credits} credits)` : ''} — nothing was sent.`;
+        ? `Testlauf: hätte per ${channel} gesendet${credits ? ` (${creditsWord(credits, l)})` : ''} — nichts wurde gesendet.`
+        : `Test run: would have sent by ${channel}${credits ? ` (${creditsWord(credits, l)})` : ''} — nothing was sent.`;
     }
     return l === 'de'
-      ? `Per ${channel} gesendet${credits ? ` (${credits} Credits)` : ' (gratis)'}.`
-      : `Sent by ${channel}${credits ? ` (${credits} credits)` : ' (free)'}.`;
+      ? `Per ${channel} gesendet${credits ? ` (${creditsWord(credits, l)})` : ' (gratis)'}.`
+      : `Sent by ${channel}${credits ? ` (${creditsWord(credits, l)})` : ' (free)'}.`;
   }
   if (record.result === 'defer' && record.until !== null) {
     return l === 'de'

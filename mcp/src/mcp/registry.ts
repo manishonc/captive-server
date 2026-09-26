@@ -14,6 +14,7 @@ import { registerBrandingTools } from './tools/branding';
 import { registerAudienceTools } from './tools/audience';
 import { registerUsageTools } from './tools/usage';
 import { registerPlaybookTools } from './tools/playbooks';
+import { registerAdaptiveResultTools } from './tools/adaptiveResults';
 
 /**
  * Build a fresh McpServer with all tools registered.
@@ -56,6 +57,9 @@ import { registerPlaybookTools } from './tools/playbooks';
  *   adaptive:      list_playbooks, get_playbook, list_playbook_setups — read-only
  *                  Adaptive Campaigns playbooks and each venue's setup (proxies
  *                  captive-server /internal/adaptive/*, which owns the rules)
+ *                  + get_adaptive_results, list_adaptive_messages, explain_adaptive_guest
+ *                  (PR D: the running-card numbers, recent sends/skips with a reason,
+ *                   one guest's story in plain sentences — masked, no message bodies)
  *   languages:     no dedicated tool — a venue's guest languages and the
  *                  per-language splash copy live in the `languages` block of the
  *                  splash config, so they go through the same preview/apply pair.
@@ -85,6 +89,7 @@ export function buildMcpServer(): McpServer {
   registerAudienceTools(server);
   registerUsageTools(server);
   registerPlaybookTools(server);
+  registerAdaptiveResultTools(server);
 
   return server;
 }
