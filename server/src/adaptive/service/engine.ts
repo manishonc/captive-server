@@ -33,6 +33,7 @@ import { buildSandboxCalendar, putSandboxCalendar, sandboxCalendarRef } from '..
 import { failingFeedsQuery } from '../stays/store';
 import { pollFeed } from '../stays/sync';
 import { checkStayFeed, getStayFeed, saveStayFeed } from './stays';
+import { healthLists } from './adminTools';
 
 async function countWhere(status: string): Promise<number> {
   const snap = await db.collection(COL.journeyTasks).where('status', '==', status).count().get();
@@ -40,7 +41,7 @@ async function countWhere(status: string): Promise<number> {
 }
 
 export async function getEngineStatus() {
-  const [statusSnap, settings, queued, leased, dead, oldest, feedsTotal, feedsFailing] = await Promise.all([
+  const [statusSnap, settings, queued, leased, dead, oldest, feedsTotal, feedsFailing, lists] = await Promise.all([
     db.collection(COL.config).doc(ENGINE_STATUS_DOC_ID).get(),
     readEngineSettings(),
     countWhere('queued'),
@@ -59,6 +60,8 @@ export async function getEngineStatus() {
     // Airbnb calendar feeds: how many, and how many keep failing (plan Appendix A `engine_status.feeds`).
     db.collection(COL.stayFeeds).count().get().then((s) => s.data().count),
     failingFeedsQuery().count().get().then((s) => s.data().count),
+    // The admin "Launch & health" card (PR D): the newest dead tasks and the failing feeds.
+    healthLists(),
   ]);
   const apiFingerprint = keyFingerprint();
   const workers = Object.entries((statusSnap.get('workers') ?? {}) as Record<string, Record<string, unknown>>).map(([id, w]) => {
@@ -89,6 +92,7 @@ export async function getEngineStatus() {
     },
     feeds: { total: feedsTotal, failing: feedsFailing },
     indexCheck: toJson(statusSnap.get('indexCheck') ?? null),
+    ...lists,
   };
 }
 
@@ -115,13 +119,15 @@ export async function devClock(body: { advance?: string; reset?: boolean; at?: s
 
 export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<string, LaunchMode>; paused?: boolean }) {
   requireSandbox();
-  const update: Record<string, unknown> = {};
-  if (body.default) update['launch.default'] = body.default;
-  for (const [tenant, mode] of Object.entries(body.accounts ?? {})) update[`launch.accounts.${tenant}`] = mode;
-  if (typeof body.paused === 'boolean') update['killSwitch.sendingPaused'] = body.paused;
-  if (Object.keys(update).length) {
-    update['launch.changedBy'] = 'sandbox';
-    await db.collection(COL.config).doc(CONFIG_DOC_ID).update(update);
+  // The admin card's own function (PR D), so "live since" and the history are written the same
+  // way locally — without the typed phrase and the worker check.
+  const change: Record<string, unknown> = {};
+  if (body.default) change.default = body.default;
+  if (body.accounts && Object.keys(body.accounts).length) change.accounts = body.accounts;
+  if (typeof body.paused === 'boolean') change.paused = body.paused;
+  if (Object.keys(change).length) {
+    const { applyLaunchChange } = await import('./launch');
+    await applyLaunchChange({ change }, { actor: { uid: 'sandbox', kind: 'seed' }, sandbox: true });
   }
   clearEngineSettingsCache();
   const settings = await readEngineSettings();
@@ -381,3 +387,17 @@ export async function devStaySync(body: unknown) {
   return { now: new Date(now()).toISOString(), result, ...view };
 }
 
+/**
+ * Sandbox only (PR D hand test of the admin retry): makes a task `dead` as eight failures
+ * would — no lease, `doneAt` now, the guest's details removed.
+ */
+export async function devFailTask(body: { taskId?: unknown }) {
+  requireSandbox();
+  const taskId = typeof body.taskId === 'string' && /^jt_[0-9a-f]{32}$/.test(body.taskId) ? body.taskId : null;
+  if (!taskId) throw new ApiError('bad_request', 'taskId must be a jt_… id');
+  const ref = db.collection(COL.journeyTasks).doc(taskId);
+  if (!(await ref.get()).exists) throw new ApiError('not_found', 'No such task');
+  const { FieldValue } = await import('firebase-admin/firestore');
+  await ref.update({ status: 'dead', lastError: 'failed by /dev/fail-task', leaseOwner: null, leaseUntil: null, doneAt: new Date(), attempts: 8, 'payload.guest': FieldValue.delete() });
+  return { taskId, status: 'dead' };
+}

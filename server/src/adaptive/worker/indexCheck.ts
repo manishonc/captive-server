@@ -10,7 +10,21 @@ import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { venueEventsQuery } from '../rollups/rollup';
 import { activeInstancesQuery } from '../engine/applyInFlight';
-import { contactStaysQuery, failingFeedsQuery, linkCandidatesQuery, stayInstancesQuery, staysOfFeedQuery, watchedFeedsQuery } from '../stays/store';
+import { contactStaysQuery, failingFeedsQuery, linkCandidatesQuery, stayContactInstancesQuery, stayInstancesQuery, staysOfFeedQuery, watchedFeedsQuery } from '../stays/store';
+import { FieldPath } from 'firebase-admin/firestore';
+import {
+  contactAllStaysQuery,
+  contactConsentQuery,
+  contactEventsQuery,
+  contactInstancesQuery,
+  contactSendsQuery,
+  contactVenuesQuery,
+  deadTasksQuery,
+  venueEventsOfTypesQuery,
+  accountCreditWaitQuery,
+  venueGuestsQuery,
+  venueSetupsQuery,
+} from '../store/ownerQueries';
 
 interface Probe {
   name: string;
@@ -56,6 +70,25 @@ const PROBES: Probe[] = [
   { name: 'JourneyInstances(context.stayId, status)', run: () => stayInstancesQuery('_probe').limit(1).get() },
   { name: 'StayFeeds(status in)', run: () => watchedFeedsQuery().limit(1).get() },
   { name: 'StayFeeds(status) count', run: () => failingFeedsQuery().count().get() },
+  // The owner / admin / MCP routes (PR D). The API runs these, not the worker — probed here so a
+  // missing index shows on the admin card before an owner screen fails (create them before the deploy).
+  { name: 'ContactVenues(venueId, lastVisitAt desc)', run: () => venueGuestsQuery('_probe').limit(1).get() },
+  { name: 'JourneyEvents(contactId, occurredAt desc)', run: () => contactEventsQuery('_probe').limit(1).get() },
+  { name: 'ConsentEvents(contactId, occurredAt desc)', run: () => contactConsentQuery('_probe').limit(1).get() },
+  {
+    name: 'JourneyEvents(venueId, type, occurredAt desc)',
+    run: () => venueEventsOfTypesQuery('_probe', ['send.deferred', 'send.skipped'], past()).orderBy(FieldPath.documentId(), 'desc').limit(1).get(),
+  },
+  { name: 'JourneyTasks(status, doneAt desc)', run: () => deadTasksQuery().limit(1).get() },
+  // …and their equality-only lookups (merged single-field indexes; must not be exempted).
+  { name: 'JourneyInstances(contactId)', run: () => contactInstancesQuery('_probe').limit(1).get() },
+  { name: 'JourneySends(contactId)', run: () => contactSendsQuery('_probe').limit(1).get() },
+  { name: 'Stays(contactId)', run: () => contactAllStaysQuery('_probe').limit(1).get() },
+  { name: 'ContactVenues(contactId)', run: () => contactVenuesQuery('_probe').limit(1).get() },
+  { name: 'VenuePlaybooks(venueId)', run: () => venueSetupsQuery('_probe').limit(1).get() },
+  { name: 'JourneyInstances(tenantUserId, status, waiting.creditsShort)', run: () => accountCreditWaitQuery('_probe').limit(1).get() },
+  // An owner's link by hand gives back that guest's journeys of the stay (PR D).
+  { name: 'JourneyInstances(context.stayId, contactId)', run: () => stayContactInstancesQuery('_probe', '_probe').limit(1).get() },
 ];
 
 export interface IndexCheckResult {

@@ -73,3 +73,6 @@ export function phoneCountry(e164: string | null | undefined): CountryInfo | nul
 
 /** Default SMS allow-list (PRD rule 4); the platform can change it in AdaptiveConfig. */
 export const DEFAULT_SMS_COUNTRIES = ['CH', 'LI', 'DE', 'AT', 'FR', 'IT'];
+
+/** Every country the phone table knows — the only ones the admin card may allow for SMS (PR D). */
+export const KNOWN_PHONE_COUNTRIES: string[] = [...new Set(PREFIXES.map(([, info]) => info.country))].sort();

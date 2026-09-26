@@ -15,6 +15,7 @@
  *   POST /dev/stay-feed       sandbox only — { venueId, url } → save the venue's calendar link
  *   POST /dev/stay-sync       sandbox only — { venueId } → poll the feed now (same lease as the worker)
  *   POST /dev/stay-check      sandbox only — { venueId, url } → "Check link" (fetch + parse, store nothing)
+ *   POST /dev/fail-task       sandbox only — { taskId } → make a task dead (to try the admin retry)
  *   POST /ingest/click        the CMS: a counted click on a journey short link { shortCode }
  *   POST /ingest/rating       the CMS: a rating from a journey link { shortCode, stars, feedback? }
  *
@@ -70,6 +71,7 @@ router.get('/dev/calendar/:name', async (req: Request, res: Response) => {
 router.post('/dev/stay-feed', handle(async (req) => engine.devStayFeed(req.body ?? {})));
 router.post('/dev/stay-sync', handle(async (req) => engine.devStaySync(req.body ?? {})));
 router.post('/dev/stay-check', handle(async (req) => engine.devStayCheck(req.body ?? {})));
+router.post('/dev/fail-task', handle(async (req) => engine.devFailTask(req.body ?? {})));
 
 const clickSchema = z.object({ shortCode: z.string().min(1).max(64) });
 const ratingSchema = z.object({ shortCode: z.string().min(1).max(64), stars: z.number().int().min(1).max(5), feedback: z.string().max(1000).optional().nullable() });

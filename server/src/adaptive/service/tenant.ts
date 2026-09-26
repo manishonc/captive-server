@@ -58,6 +58,8 @@ import {
 } from './catalogue';
 import { getCreditConfig } from '../../services/credits';
 import { isLapsedForSending } from '../../services/entitlements';
+import { applyAudienceToStats } from './audience';
+import { launchAwareOverview } from './startSending';
 
 function asVenueType(t: string | null): VenueType {
   return (VENUE_TYPES as readonly string[]).includes(t ?? '') ? (t as VenueType) : 'other';
@@ -172,6 +174,8 @@ export async function getOverview(tenantUserId: string) {
     accountOn: adaptive.some((a) => a.status === 'on' || a.status === 'paused'),
     sendingLive: !cat.config.killSwitch.sendingPaused,
     venues: out,
+    // PR D: sendingLive follows the account's launch mode (+ sendingPaused, needsStartSending per venue).
+    ...(await launchAwareOverview(tenantUserId, adaptive, out)),
   };
 }
 
@@ -216,6 +220,8 @@ export async function estimate(tenantUserId: string, body: unknown): Promise<Est
     recentCaptureStats(tenantUserId, [...venues.keys()]),
     getCreditConfig(),
   ]);
+  // Who gets messages (PR D): price only the guests each venue's choice lets us reach, with the verified counts.
+  const audienceByVenue = await applyAudienceToStats([...venues.keys()], stats, input.audience);
   const playbook = setupPlaybook(header, version);
   const templates = setupTemplates(cat, playbook.content);
   const { journeys } = resolveSetupJourneys(input.journeys, playbook, templates);
@@ -243,6 +249,7 @@ export async function estimate(tenantUserId: string, body: unknown): Promise<Est
     },
     { returnRate: hints.returnRate, avgSpendMinor: hints.avgSpend.amountMinor },
   );
+  Object.assign(result, { audience: audienceByVenue });
   return { ...result, basis: 'Guests who said yes to messages in the last 30 days', returnRate: hints.returnRate, avgSpendMinor: hints.avgSpend.amountMinor };
 }
 
@@ -406,6 +413,15 @@ export async function saveSetups(tenantUserId: string, body: unknown, actor: Act
     } catch (err) {
       console.error('[ADAPTIVE] estimate at turn-on failed (continuing):', err);
     }
+    // The audience chosen in this same save is priced in the stored turn-on estimate (PR D).
+    if (input.audience) {
+      try {
+        const withChoice = await estimate(tenantUserId, { playbookKey: input.playbookKey, playbookVersion: resolved.version.version, venueIds, journeys: input.journeys, audience: input.audience });
+        estimateByVenue = new Map(withChoice.perVenue.map((p) => [p.venueId, { creditsPerMonth: p.credits, revenuePerMonthMinor: p.revenueMinor, currency: withChoice.currency }]));
+      } catch (err) {
+        console.error('[ADAPTIVE] estimate with the audience choice failed (continuing):', err);
+      }
+    }
   }
 
   const gi = input.guestInfo === undefined ? undefined : await guestInfoWrite(resolved.cat, input.guestInfo);
@@ -425,6 +441,7 @@ export async function saveSetups(tenantUserId: string, body: unknown, actor: Act
       setup: { playbookKey: input.playbookKey, playbookVersion: resolved.version.version, journeys: journeysOf.get(id) ?? resolved.journeys, offerMenu },
       activateKey: input.activate ? input.playbookKey : undefined,
       guestInfo: gi,
+      audience: input.audience?.[id],
     };
   });
 

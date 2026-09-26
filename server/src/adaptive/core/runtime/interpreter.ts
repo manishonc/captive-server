@@ -275,13 +275,24 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
       // New stay dates move a wait anchored on them (plan §3.3 item 3): the step is entered
       // again with the new dates — a new target and token (the old timer then does nothing),
       // or `past` when the new target has gone by.
-      if (event.type === 'stay.changed' && isAnchoredTimerWait(state, def)) {
+      // `stay.relinked` (PR D): the owner linked this guest back to the stay — the dates may have
+      // changed while they were unlinked.
+      if ((event.type === 'stay.changed' || event.type === 'stay.relinked') && isAnchoredTimerWait(state, def)) {
+        const w = state.waiting!;
+        const c = parseConfig<{ anchor?: string; offset?: string; at?: string }>('wait_until', def.nodes[state.cursor.nodeId]?.config);
+        const target = c && ctx.stay ? stayTarget(c, ctx.stay, ctx.venueTz) : null;
+        // "The same" also means it still fits the stay: a wait counted from arrival that now ends on
+        // checkout day or later (the stay was shortened) is re-entered, which takes `past` (as enterNode does).
+        const fits = !(c && ctx.stay && target !== null && arrivalWaitOver(c, ctx.stay, target, ctx.venueTz));
+        const anchorSame = target !== null && w.untilAt !== null && target === w.untilAt && fits;
+        // A re-link that didn't move this anchor: the kept wait runs at its own time (stays/link.ts
+        // re-arms it there, so the stale rule sees how late it is; its wake applies the checkout-day
+        // rule). The same for any change reaching a wait a re-link resumed (its token says so).
+        if (anchorSame && (event.type === 'stay.relinked' || /:relink\d+$/.test(w.token))) break;
         // The wait was already due and this anchor didn't move (the other date or a time
         // changed): it simply fires, rather than being re-entered as "past" and skipped —
         // unless it counts from arrival and would go now, on checkout day or later (past).
-        const w = state.waiting!;
-        const c = parseConfig<{ anchor?: string; offset?: string; at?: string }>('wait_until', def.nodes[state.cursor.nodeId]?.config);
-        if (c && ctx.stay && w.untilAt !== null && w.untilAt <= now && stayTarget(c, ctx.stay, ctx.venueTz) === w.untilAt && !arrivalWaitOver(c, ctx.stay, now, ctx.venueTz)) {
+        if (anchorSame && w.untilAt! <= now && !(c && ctx.stay && arrivalWaitOver(c, ctx.stay, now, ctx.venueTz))) {
           result = { go: 'done' };
           break;
         }

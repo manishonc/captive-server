@@ -22,7 +22,7 @@ import { resolveContact } from '../identity/resolve';
 import { recordConnect, revisitGapHours } from '../identity/visits';
 import { identityReady } from '../identity/key';
 import { firestoreScheduler } from '../queue/firestoreQueue';
-import { modeFor, type EngineSettings } from '../store/engineSettings';
+import { accountLiveSince, venueModeFor, type EngineSettings } from '../store/engineSettings';
 import { tsMs } from '../store/time';
 import { appendEvent, loadEvent } from './events';
 import { enabledJourneys, loadContact, loadVenueContext, type VenueContext } from './context';
@@ -30,7 +30,7 @@ import { enrolForEvent, type VisitFacts } from './enrol';
 import { deliverEvent } from './advance';
 import { fromDoc } from './instanceStore';
 import { dayKey, raiseAlert } from './alerts';
-import { handleStayEvent, linkStayOnConnect } from '../stays/link';
+import { handleStayEvent, handleStayRelinked, handleStayUnlinked, linkStayOnConnect } from '../stays/link';
 
 export interface RouteEnv {
   now: number;
@@ -55,6 +55,9 @@ export async function routeEvent(payload: { eventId: string; guest?: GuestPayloa
   if (event.type === 'wifi.connected') return handleConnect(event, payload.guest ?? {}, env);
   // A booking's dates changed or it was cancelled (stays/sync.ts): to that stay's journeys.
   if (event.type === 'stay.changed' || event.type === 'stay.cancelled') return handleStayEvent(event, env, mustDeliver);
+  // The owner unlinked a person from a stay (PR D): their stay journeys end.
+  if (event.type === 'stay.unlinked') return handleStayUnlinked(event, env, mustDeliver);
+  if (event.type === 'stay.relinked') return handleStayRelinked(event, env, mustDeliver);
   // Events tied to one journey (message.*, ratings): the task retries if the journey is busy.
   if (event.instanceId) mustDeliver(await deliverEvent(event.instanceId, event, env));
 }
@@ -160,7 +163,10 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
 
   const ctx = await loadVenueContext(venueId);
   if (!ctx || (!ctx.marketing && !ctx.utility)) return;
-  const mode = modeFor(env.settings, ctx.tenantUserId);
+  // Launch off — or the venue still waits for the owner's Start sending (PR D): nothing new
+  // starts, and nothing is recorded (judged at the time of the connect: nobody from before
+  // the click is backfilled).
+  const mode = venueModeFor(env.settings, ctx.adaptive, event.occurredAt);
   if (mode === 'off') return;
 
   const guestSnap = await db.collection(COL.guests).doc(guestId).get();
@@ -206,6 +212,7 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     connectEventId: event.id,
     occurredAt: event.occurredAt,
     gapHours: await revisitGapHours(),
+    mode,
   });
 
   const contact = await loadContact(resolved.contactId);
@@ -240,6 +247,22 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     if (tripped) console.warn('[ADAPTIVE] sign-up breaker tripped — no journeys started:', apId);
     else if (fresh) await enrolForEvent({ ctx, who: { contactId: resolved.contactId, networkId: resolved.networkId, contact }, event: started, mode, visit: visitFacts, now: env.now });
     else console.warn('[ADAPTIVE] connect handled late — no journeys started:', event.id);
+    // Why nothing started, for the guest's timeline and "explain this guest" (PR D). Not counted in the numbers.
+    if (tripped || !fresh) {
+      await appendEvent(
+        {
+          type: 'journey.not_started',
+          occurredAt: event.occurredAt,
+          tenantUserId: ctx.tenantUserId,
+          venueId,
+          contactId: resolved.contactId,
+          guestId,
+          mode,
+          data: { reason: tripped ? 'signup_breaker' : 'late_connect', visitId: visit.visitId },
+        },
+        eventIdFor('engine', `visit:${visit.visitId}:not_started`),
+      );
+    }
   }
 
   // Airbnb stays: every fresh connect (not only a new visit) can link the guest to the
@@ -363,8 +386,21 @@ export async function handleVisitEnd(
 
   const ctx = await loadVenueContext(payload.venueId);
   if (!ctx) return;
-  const mode: RunMode | 'off' = modeFor(env.settings, ctx.tenantUserId);
+  // Judged at the visit's start (PR D): a visit from before the owner's Start sending never
+  // starts a journey after it (and no visit exists at a venue while it waits)…
+  const startedAt = tsMs(visit.startedAt) ?? payload.lastSeenAt;
+  let mode: RunMode | 'off' = venueModeFor(env.settings, ctx.adaptive, startedAt);
   if (mode === 'off') return;
+  // …and a visit that started in a test run stays one: its end never starts a live, charged
+  // journey after the account went live (a guest keeps the mode they started with).
+  if (mode === 'live') {
+    if (visit.startMode === 'test') mode = 'test';
+    else if (!visit.startMode) {
+      // Visits stored before PR D: started before the account went live → a test run.
+      const ls = accountLiveSince(env.settings, ctx.tenantUserId);
+      if (ls !== null && startedAt < ls) mode = 'test';
+    }
+  }
   const contact = await loadContact(payload.contactId);
   if (!contact) return;
 

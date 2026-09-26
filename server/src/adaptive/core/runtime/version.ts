@@ -3,4 +3,4 @@
  * the admin card, so a deploy that updated only one of the two shows up at once.
  * Bump it with every change to the engine's tasks, events or stored shapes.
  */
-export const ENGINE_RUNTIME_VERSION = '2026-09-25.c';
+export const ENGINE_RUNTIME_VERSION = '2026-09-26.a';

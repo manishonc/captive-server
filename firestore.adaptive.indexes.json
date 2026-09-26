@@ -77,6 +77,47 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "checkOutAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_ContactVenues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "lastVisitAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "contactId", "order": "ASCENDING" },
+        { "fieldPath": "occurredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_ConsentEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "contactId", "order": "ASCENDING" },
+        { "fieldPath": "occurredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "type", "order": "ASCENDING" },
+        { "fieldPath": "occurredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "CaptivePortal_JourneyTasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "doneAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -112,6 +153,9 @@
     { "collectionGroup": "CaptivePortal_JourneyStats", "fieldPath": "stays", "indexes": [] },
     { "collectionGroup": "CaptivePortal_Stays", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
     { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "url", "indexes": [] },
-    { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "lastError", "indexes": [] }
+    { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "lastError", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "replay", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_AdaptiveAlerts", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "signups", "fieldPath": "expireAt", "ttl": true, "indexes": [] }
   ]
 }

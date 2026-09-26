@@ -49,6 +49,8 @@ export interface ConnectInput {
   connectEventId: string;
   occurredAt: number;
   gapHours: number;
+  /** The mode new guests get at this connect (PR D): stored on a new visit. */
+  mode?: 'test' | 'live' | null;
 }
 
 export interface VisitOutcome {
@@ -138,6 +140,7 @@ export async function recordConnect(input: ConnectInput): Promise<VisitOutcome> 
       visitNumber: visitCount,
       isFirstVisit: visitCount === 1,
       isRevisit: visitCount > 1,
+      ...(input.mode ? { startMode: input.mode } : {}),
       expireAt: retentionFrom(input.occurredAt),
       schemaVersion: SCHEMA_VERSION,
     };

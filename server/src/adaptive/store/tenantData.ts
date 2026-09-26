@@ -8,6 +8,8 @@ import { db } from '../../firebase';
 import { Timestamp } from 'firebase-admin/firestore';
 import { COL } from './collections';
 import type { Channel } from '../core/constants';
+import { classKeyWithCountry } from '../core/owner/audience';
+import { phoneCountry } from '../core/runtime/phoneCountry';
 
 export interface TenantVenue {
   venueId: string;
@@ -91,6 +93,8 @@ export interface CaptureStats {
   optedIn30d: number;
   withPhone: number;
   emailOnly: number;
+  /** Opted-in guests by contact details and verification (PR D, core/owner/audience.ts `classKey`). */
+  classes?: Record<string, number>;
 }
 
 function captureTime(data: Record<string, unknown>): number | null {
@@ -148,6 +152,14 @@ export async function recentCaptureStats(
       const email = typeof g.email === 'string' && g.email.trim() !== '';
       if (phone) s.withPhone += 1;
       else if (email) s.emailOnly += 1;
+      // Who gets messages (PR D): the same guests, by their verified flags (services/verificationGate.ts).
+      // With the number's country: the engine texts only the countries in its SMS list.
+      const e164 = typeof g.phoneE164 === 'string' ? g.phoneE164 : phone && g.phone.trim().startsWith('+') ? g.phone.trim() : null;
+      const cls = classKeyWithCountry(
+        { hasPhone: phone, phoneVerified: g.phoneVerified === true, hasEmail: email, emailVerified: g.emailVerified === true },
+        phoneCountry(e164)?.country ?? null,
+      );
+      s.classes = { ...(s.classes ?? {}), [cls]: (s.classes?.[cls] ?? 0) + 1 };
     }
   }
   return stats;

@@ -424,6 +424,8 @@ export const setupInputSchema = z.object({
   activate: z.boolean().default(false),
   /** "Apply to guests already in these journeys?" — they move to the new values at their next step. */
   applyToInFlight: z.boolean().optional(),
+  /** "Who gets messages" per venue (PR D), saved with the setup: SMS/email to verified guests only, or to everyone who said yes. */
+  audience: z.record(z.string(), z.object({ sms: z.enum(['verified', 'all']), email: z.enum(['verified', 'all']) })).optional(),
 });
 export type SetupInput = z.infer<typeof setupInputSchema>;
 
@@ -432,6 +434,8 @@ export const estimateInputSchema = z.object({
   playbookVersion: z.number().int().min(1).optional(),
   venueIds: z.array(z.string().min(1).max(128)).min(1).max(50),
   journeys: z.record(keySchema, setupJourneyInputSchema),
+  /** The "who gets messages" choice being picked (PR D); else the venue's saved one, else the defaults. */
+  audience: z.record(z.string(), z.object({ sms: z.enum(['verified', 'all']), email: z.enum(['verified', 'all']) })).optional(),
 });
 
 export const previewInputSchema = z.object({

@@ -27,6 +27,10 @@ Errors block the action; warnings and info never do.
 Nothing here sends a message. There is no engine yet, and
 `CaptivePortal_AdaptiveConfig/global.killSwitch.sendingPaused` is seeded `true`.
 
+> **Since PR A–D** the engine exists and sends (docs/adaptive-engine.md): the playbook routes
+> above still send nothing themselves; the owner, public and admin routes of PR D are listed in
+> "PR D routes" below.
+
 ## Admin (platform) — `/internal/adaptive/admin`
 
 | Method & path | Body | Returns |
@@ -79,6 +83,8 @@ Nothing here sends a message. There is no engine yet, and
 | `POST /venues/:venueId/pause` | `{ actor }` | pause the running playbook |
 | `POST /venues/:venueId/resume` | `{ actor }` | resume |
 | `POST /venues/:venueId/guest-info` | `{ enabled, actor }` | Guest info switch |
+| `GET` / `PUT /venues/:venueId/guest-info` | PUT: `{ locales, baseVersion, actor }` | Guest info **content** (PR D; the `POST` above stays the switch) — see "PR D routes" |
+| … | | every other PR D owner route: see "PR D routes" below |
 
 ```ts
 SetupInput = {
@@ -90,6 +96,7 @@ SetupInput = {
   guestInfo?: boolean,                       // Guest info switch for these venues
   activate?: boolean,                        // Turn on (needs adaptive.activate in the CMS)
   applyToInFlight?: boolean,                 // "Apply to guests already in these journeys?" (default false)
+  audience?: { [venueId]: { sms: 'verified' | 'all', email: 'verified' | 'all' } },   // PR D: "who gets messages", saved with the setup
 }
 ```
 
@@ -123,6 +130,12 @@ settings are kept, so switching back is one call.
 | `POST /dev/stay-check` | `{ venueId, url }` | Local sandbox only: "Check link", fetch + parse, nothing stored → `{ ok: true, upcoming, nextCheckIn? }` or `{ ok: false, errorCode, error }` (`unsupported_source` for Booking.com and feeds without "Reserved" events) |
 
 `GET /admin/engine` also returns `feeds: { total, failing }` (Airbnb calendar feeds).
+`GET /admin/engine` (PR D) also returns `deadTasks` (the 50 newest, a dead STOP or old-style unsubscribe
+first: kind, what, urgent, guestDetails, venue, account, attempts, dueAt, diedAt, createdAt, last error
+with addresses scrubbed — never the payload; `urgentDeadTasks` counts the urgent ones) and `failingFeeds` (venue, account, error code +
+words, since — never the link).
+
+`POST /dev/fail-task` `{ taskId }` — local sandbox only (PR D): makes a task `dead`, to try the admin retry.
 
 **Calendar links (PR C service, routes in PR D).** `server/src/adaptive/service/stays.ts` has
 `saveStayFeed`, `checkStayFeed`, `syncStayFeedNow`, `deleteStayFeed` and `getStayFeed` for PR D's
@@ -134,6 +147,71 @@ isn't valid"`, `"The link must start with https:// (or webcal://)."`) that never
 link is only ever returned masked
 (`https://www.airbnb.com/….ics`: the host and whether it is an `.ics` file, nothing of the path or
 query), and errors are codes (`lastError`) with the owner's words beside them (`lastErrorWords`).
+
+## PR D routes — owner, guest pages, HeidiFi admin
+
+All under `/internal/adaptive`, behind `x-internal-secret` like everything here. Same answer shape
+(`{ ok: true, … }` / `{ ok: false, error, code, issues? }`); PR D adds three statuses outside PR 1's
+codes: **429** `rate_limited` (Check link / Sync now / the test-send cap), **410** `gone` (an expired
+offer or info link), **503** `unavailable` (e.g. no identity key for a lookup), plus **400**
+`confirmation_required` on the admin launch (with `confirmPhrase`) and **503** `engine_status_unknown`
+there (the worker's readiness couldn't be read for a go-live — reload and try again). Writes need `actor`; owner writes
+accept `actor.kind` `tenant_user` or `super_admin` (never `mcp` / `seed` → 403), admin writes
+`super_admin` only. Every venue, stay and guest is checked against the tenant (403 / 404, never naming
+another account). The **permission** and **audit key** columns are what the cms allow-list
+(`_lib/adaptive-routes.ts`, PR E) should use; `adaptive.guestinfo.write` is new (MANAGER+).
+
+### Owner — `/tenants/:tenantUserId/…`
+
+| Method & path | Body / query | Returns | Permission (cms) | Audit key |
+|---|---|---|---|---|
+| `GET /venues/:v/stay-feed` | — | `{ feed \| null, stays: [{ stayId, checkIn, checkOut, nights, status, linked, linkedContactId, linkedGuest {name, email, phone} (masked), linkedBy, linkMode }] }` — the link only masked | adaptive.read | — |
+| `PUT /venues/:v/stay-feed` | `{ url, actor }` | `{ feed, stays, syncQueued }` — Airbnb venues only (400); a bad link → 400 with the owner's sentence, never the link | adaptive.configure | `adaptive.venue.stay_feed_save` |
+| `DELETE /venues/:v/stay-feed` | `{ actor }` | `{ deleted, cancelled }` — unlinked future stays cancel; linked ones keep running | adaptive.configure | `adaptive.venue.stay_feed_delete` |
+| `POST /venues/:v/stay-feed/check` | `{ url, actor }` | `{ check: { ok: true, upcoming, nextCheckIn?, source } \| { ok: false, errorCode, error } }` — fetch + parse now, nothing stored; 20 an hour per account (429) | adaptive.configure | `adaptive.venue.stay_feed_check` |
+| `POST /venues/:v/stay-feed/sync` | `{ actor }` | `{ queued, reason? }` — a poll within seconds (not while launch is off); 30 an hour (429) | adaptive.configure | `adaptive.venue.stay_feed_sync` |
+| `POST /venues/:v/stays/:stayId/unlink` | `{ expectContactId, actor }` | `{ unlinked, feed, stays }` — that person's stay messages stop and they are never linked to this stay again automatically; the next guest who connects in the window is; 409 when someone else is linked now | adaptive.configure | `adaptive.venue.stay_unlink` |
+| `POST /venues/:v/stays/:stayId/link` | `{ contactId, expectContactId?, actor }` | `{ linked, resuming, feed, stays }` — link a guest seen at this venue by hand (replacing someone needs `expectContactId`); they get the stay's remaining messages. Linking back someone unlinked earlier (`resuming: true`): the worker picks their stay journeys up where they stopped, within seconds; 409 while the venue doesn't start new guests, for a cancelled/finished stay or a guest linked elsewhere here | adaptive.configure | `adaptive.venue.stay_link` |
+| `GET /venues/:v/guest-info` | — | `{ guestInfo: { locales, version, updatedAt, updatedBy } \| null, enabled, resolvedTimes: { checkIn, checkOut }, warnings[] }` — includes the Wi-Fi password and door code (the owner typed them; **no MCP tool reads this route**) | adaptive.read | — |
+| `PUT /venues/:v/guest-info` | `{ locales: { en?, de?, it?, fr?: fields \| null }, baseVersion, actor }` | as GET + `resynced` — a language sent is replaced, `null` removes it, one left out is kept; `baseVersion` = the `version` loaded (0 when none; 409 if it moved); 422 with `issues` for a bad time (`HH:MM`, 06:00–22:00) or link | **adaptive.guestinfo.write** | `adaptive.venue.guest_info_content` |
+| `GET /venues/:v/audience` | — | `{ audience: { sms, email }, isDefault, updatedAt, counts: { basis, sms: { verified, unverified }, email: { verified, unverified }, smsOtherCountries } }` — opted-in guests of the last 30 days; a number in a country SMS doesn't go to (the admin's SMS countries) counts by email only (`smsOtherCountries`), in the estimate too | adaptive.read | — |
+| `PUT /venues/:v/audience` | `{ sms: 'verified'\|'all', email: 'verified'\|'all', actor }` | as GET — applies from the next send (also to running guests); 409 before the venue's first setup (save it with `PUT /setups` `audience` then) | adaptive.configure | `adaptive.venue.audience` |
+| `POST /venues/:v/test-send` | `{ journeyKey, nodeId?, channel: 'sms'\|'email', lang?, recipientId, actor }` | `{ sent, channel, journeyKey, nodeId, variant, purpose, wordingLang, to (masked), problem?, preview: { subject?, text } (secrets masked) }` — one step with the venue's real values for sample guest Anna, to a **saved** test recipient (`CaptivePortal_TestRecipients/{tenant}`); no record, no link, no credits; shares the daily test cap (429; fails closed); refused while launch is off. Links follow the engine's rules (no info-page link without Guest info, no booking link without one); a message a guest wouldn't get → 422 with `missing` and `reason` (`guest_info_missing`, `booking_link_missing`). A saved number needs its country code (`+41…` or `0041…`). Rendered like the engine: in the wording's own language (`wordingLang`; English values and STOP line when the asked language has no wording) | adaptive.configure | `adaptive.venue.test_send` |
+| `GET /results` | `?venueId&from&to&journeys=1` | `{ range, rangesDiffer?, venues: [{ venueId, name, timezone, range, card, testRun, waitingForCredits: { waiting, lowBalance, messagesWaiting, messagesWaitingTruncated?, messagesWaitingUnknown?, startedWaitingLast72h, startedWaitingLast72hTruncated? }, journeys? }] }` — `card`: `guestsStarted, cameBack, messages, creditsUsed, estimatedRevenue (cameBack × the venue's average spend; null without one), visits, stays { syncedInRange, changed, cancelled, linked, upcoming }, skipped`; venue-local dates (a real date, else 400), ≤ 92 days (default 30), each venue's own `range`; the top-level `range` only when all venues share it (else `null` + `rangesDiffer`); every Adaptive venue when `venueId` is left out. `waiting` = messages that can't be paid right now (`messagesWaiting`: those whose last look found them short, measured again against the wallet now — also through quiet hours) or — while the account is live and a marketing playbook is on at the venue — a wallet that can't pay one SMS segment or one email (`lowBalance`). Measured with one budget for the account (each channel's own credits first, then the shared pool; cheapest first); more than 1000 flagged → `messagesWaitingTruncated` and `waiting`; the read failed → `messagesWaitingUnknown` and `waiting`. A venue whose setup belongs to another account (moved) isn't listed. `startedWaitingLast72h` counts messages, not deferrals | adaptive.read | — |
+| `GET /venues/:v/guests` | `?cursor&limit (≤100)&lang` | `{ guests: [{ contactId, name, email, phone (masked), lang, firstVisitAt, lastVisitAt, visitCount, consent { email, sms, whatsapp: { state: yes\|no\|none, ownerStopped } }, lowRating, journeys[] }], nextCursor }` — a cursor not from us → 400 | adaptive.read | — |
+| `GET /venues/:v/guests/:contactId` | `?lang=en\|de` | `{ contactId, guest (masked), venue { visits, consent }, journeys[], stays[], creditsUsed, timeline: [{ at, kind, venueId, venueName, journeyKey, sentence, mode, channel, credits }], truncated }` — plain sentences for all this owner's venues; nothing of other owners | adaptive.read | — |
+| `POST /venues/:v/guests/:contactId/marketing` | `{ action: 'stop'\|'resume', scope: 'venue'\|'all', actor }` | `{ changed, consent, note }` — stop = consent revoked by the owner on every channel at this venue or all venues (a splash tick can't undo it; START doesn't either); resume gives back only what the guest had said yes to. `scope: 'all'` also covers venues the guest visits later. A START texted or a splash yes given while the owner's stop stands is kept for the owner's resume. Adaptive only | adaptive.configure | `adaptive.guest.marketing` |
+| `GET /venues/:v/messages` | `?kind=sends\|skips&days (≤92)&cursor&limit&lang` | `{ messages: [{ at, type, mode, journeyKey, journeyName, channel, status, credits, to (masked), contactId, guest (masked), line }], nextCursor }` — no message bodies; a cursor not from us → 400 | adaptive.read | — |
+| `POST /guests/find` | `{ guestId \| contactId \| email \| phone }` | `{ contactId, guest (masked), venues: [{ venueId, lastVisitAt }] }` — a read (POST so addresses stay out of URLs); 404 when not this account's; refuses (409) when the server's identity key differs from the engine's. For the MCP | (MCP) | — |
+| `POST /venues/:v/start-sending` | `{ actor }` | `{ venueId, sendingConfirmedAt, sendingConfirmedBy, alreadyConfirmed, needsStartSending: false }` — only while the account is live (409 before); once | **adaptive.activate** | `adaptive.venue.start_sending` |
+
+`GET /overview` also returns (PR D) `sendingLive` = this account's launch mode is `live`, `sendingPaused`,
+`launchMode`, and per venue `adaptive.needsStartSending` + `adaptive.sendingConfirmedAt`. The estimate
+(`POST /setups/estimate`) also takes `audience?: { [venueId]: { sms, email } }` (else the saved choice,
+else the defaults), prices only the guests that choice can reach, and returns `estimate.audience`
+per venue (`{ audience, isDefault, counts }`).
+
+### Guest pages — `/public/…` (server-to-server; the cms page calls it)
+
+| Method & path | Query | Returns |
+|---|---|---|
+| `GET /public/offer/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, offer: { label, expiresAt, expiresOn, status: valid\|expired\|redeemed } }`; 410 after expiry + 7 days |
+| `GET /public/info/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, info: { fields… }, secrets: { wifiPassword, doorCode, keyInstructions, shownFrom, shownUntil }, stay \| null }` — secrets only in the stay window (12 h before check-in to 2 h after checkout; other links: the Wi-Fi password only, 30 days); 410 after checkout + 7 days, or once the stay is cancelled / no longer this guest's |
+
+Only a live journey link of the right kind at `venueId` answers; anything else is the same 404.
+`Cache-Control: no-store`. Opening a page is not a click (the cms forwards clicks to `/ingest/click`).
+
+### HeidiFi admin — `/admin/…` (SUPER_ADMIN)
+
+| Method & path | Body | Returns | Audit key |
+|---|---|---|---|
+| `GET /admin/launch` | — | `{ version, launch { default, accounts, liveSince, changedAt, changedBy, note }, paused, pauseReason, safety, sms { allowedCountries, knownCountries }, alerts { email }, accountNames (overrides and accounts with venues waiting), waitingForStartSending { tenant: n }, warnings[], history[] }` | — |
+| `POST /admin/launch/check` | `{ change, actor }` | `{ summary: { lines, loosening[], confirmPhrase, empty }, blockers[] }` — nothing written; 503 `engine_status_unknown` when a go-live's worker check couldn't be read | `adaptive.admin.launch_check` |
+| `PUT /admin/launch` | `{ change: { default?, accounts?: { tenant: mode \| null }, paused?, safety?, smsCountries?, alertsEmail? }, baseVersion?, confirm?, note?, pauseReason?, actor }` | `{ changed, summary }` + GET's answer. Changes that loosen sending (going live, releasing the pause, higher limits, more SMS countries) need `baseVersion` and the typed `confirm` phrase; the brake (pause, off, test, lower) needs neither, and a change of the alert email needs `baseVersion` only. 503 `engine_status_unknown` when a go-live's worker check couldn't be read. Going live is refused (409 `engine_not_ready`) unless a worker runs this code with the same identity key. Writes `history/{version}` and `launch.liveSince` | `adaptive.admin.launch` |
+| `POST /admin/tasks/:taskId/retry` | `{ actor }` | `{ taskId, kind, retried, warning? }` — a dead task only (409 otherwise); keeps its due time; refuses signals whose guest details were removed and logins older than 72 h; the warning for a rating only when it was never applied and its private feedback is lost | `adaptive.task.retry` |
+| `POST /admin/guests/search` | `{ email \| phone, actor }` | `{ results: [{ contactId, tenantUserId, account, matchedBy, name, lastSeenAt, venues[], blocks }] }` — refuses (409) when the server's identity key differs from the engine's | `adaptive.guest.search` |
+| `GET /admin/guests/:contactId` | `?lang` | the full record: contact, places, sends (with every rule's check and fact, `statusHistory`), consent ledger, instances, stays, blocks, weekly window, events, timeline | `adaptive.admin.guest_view` (GET, audited) |
+| `POST /admin/decisions/replay` | `{ sendKey \| eventId, lang?, actor }` | `{ replay: { replayable, same, stage, engine { recorded, current, sameCode }, stored, replayed, differences[], sentence } }` — decisions recorded before PR D answer `replayable: false` | `adaptive.decision.replay` |
 
 ## Check codes
 

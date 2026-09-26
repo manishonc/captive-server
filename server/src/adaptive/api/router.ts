@@ -21,6 +21,9 @@ import { actorSchema, setAvailabilityInputSchema, setListedInputSchema, venueAct
 import * as admin from '../service/admin';
 import * as tenant from '../service/tenant';
 import engineRoutes from './engineRoutes';
+import ownerRoutes from './ownerRoutes';
+import publicRoutes from './publicRoutes';
+import adminRoutes from './adminRoutes';
 
 const router = Router();
 
@@ -147,6 +150,10 @@ router.post(
 // ── Engine (status; sandbox-only dev helpers) ────────────────────────────────
 
 router.use(engineRoutes);
+// PR D: owner, guest-page and HeidiFi admin routes (each file keeps its own list; none has a catch-all).
+router.use(ownerRoutes);
+router.use(publicRoutes);
+router.use(adminRoutes);
 
 // Anything else under /internal/adaptive is a JSON 404, not Express's HTML page.
 router.use((_req: Request, res: Response) => {

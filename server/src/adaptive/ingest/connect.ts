@@ -20,7 +20,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL, adaptiveVenueId } from '../store/collections';
 import type { AdaptiveVenueDoc } from '../store/types';
-import { anyAccountOn, cachedEngineSettings, modeFor } from '../store/engineSettings';
+import { anyAccountOn, cachedEngineSettings, modeFor, venueModeFor } from '../store/engineSettings';
 import { eventIdFor, minuteBucket, taskIdFor, shardOf } from '../core/runtime/ids';
 import { now, refreshClock } from '../engine/clock';
 import { retentionFrom } from '../store/time';
@@ -80,6 +80,9 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
 
   await refreshClock();
   const occurredAt = now();
+  // A venue still waiting for the owner's Start sending (PR D) writes nothing — no event,
+  // and no task carrying the guest's details. The worker checks again (authoritative).
+  if (venueModeFor(settings, venue, occurredAt) === 'off') return;
   const eventId = eventIdFor('portal', `${input.wifiGuestId}:${input.accessPointId ?? '-'}:${minuteBucket(occurredAt)}`);
   const taskId = taskIdFor(`event:${eventId}`);
 
@@ -146,4 +149,9 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
 /** For tests. */
 export function __clearConnectCaches(): void {
   venueCache.clear();
+}
+
+/** Start sending (PR D): drop this API process's cached copy of the venue, so the click counts at once. */
+export function forgetConnectVenue(venueId: string): void {
+  venueCache.delete(venueId);
 }

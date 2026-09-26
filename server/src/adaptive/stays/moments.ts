@@ -32,14 +32,14 @@ import { tsMs } from '../store/time';
 import type { RunMode } from '../core/runtime/types';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { loadCatalogue, templateVersion } from '../service/catalogue';
-import { modeFor, type EngineSettings } from '../store/engineSettings';
+import { readEngineSettings, startedSendingAt, venueModeFor, type EngineSettings } from '../store/engineSettings';
 import { appendEvent } from '../engine/events';
 import { enabledJourneys, journeyOnState, loadContact, loadVenueContext, type VenueContext } from '../engine/context';
 import { enrolForEvent } from '../engine/enrol';
 import { instanceRef, loadInstance } from '../engine/instanceStore';
 import { loadStay, type LoadedStay } from './store';
 import { checkedOutBeforeLive, guideStillSends, stayFacts } from './plan';
-import { MOMENT_GRACE_MS, momentFor, planMoment, stayTriggerKey } from './times';
+import { MOMENT_GRACE_MS, linkSeqSuffix, momentFor, planMoment, stayTriggerKey } from './times';
 
 export interface StayTriggerPayload {
   stayId: string;
@@ -48,6 +48,8 @@ export interface StayTriggerPayload {
   momentAt: number;
   datesVersion: number;
   contactId: string;
+  /** The link generation the moment was scheduled for (absent = 0, the first link). */
+  linkSeq?: number;
 }
 
 const STAY_GUIDE = 'stay_guide';
@@ -69,11 +71,18 @@ async function recordSkipped(stay: LoadedStay, journeyKey: string, momentAt: num
       contactId: stay.contactId,
       data: { stayId: stay.id, journeyKey, momentAt, reason },
     },
-    eventIdFor('engine', `stay:${stay.id}:${journeyKey}:skipped`),
+    eventIdFor('engine', `stay:${stay.id}:${journeyKey}:skipped${linkSeqSuffix(stay.linkSeq)}`),
   );
 }
 
-async function recordPassed(stay: LoadedStay, journeyKey: string, momentAt: number, liveSince: number, now: number): Promise<void> {
+async function recordPassed(
+  stay: LoadedStay,
+  journeyKey: string,
+  momentAt: number,
+  liveSince: number,
+  now: number,
+  reason: 'checked_out_before_live' | 'checked_out_before_start_sending' = 'checked_out_before_live',
+): Promise<void> {
   // Uncounted (the rollups ignore the type), at most once per stay and journey. The journey key
   // is on the event itself so a guest's timeline says which message it was.
   await appendEvent(
@@ -84,9 +93,10 @@ async function recordPassed(stay: LoadedStay, journeyKey: string, momentAt: numb
       venueId: stay.venueId,
       contactId: stay.contactId,
       journeyKey,
-      data: { stayId: stay.id, journeyKey, momentAt, reason: 'checked_out_before_live', checkOutAt: stay.checkOutAt, liveSince },
+      data: { stayId: stay.id, journeyKey, momentAt, reason, checkOutAt: stay.checkOutAt, liveSince },
     },
-    eventIdFor('engine', `stay:${stay.id}:${journeyKey}:passed`),
+    // Per link generation (PR D): a guest linked after an unlink gets their own record.
+    eventIdFor('engine', `stay:${stay.id}:${journeyKey}:passed${linkSeqSuffix(stay.linkSeq)}`),
   );
 }
 
@@ -124,6 +134,9 @@ async function installWith(ctx: VenueContext, journeyKey: string): Promise<{ ins
 export async function scheduleStayMoments(stay: LoadedStay, ctx: VenueContext, now: number): Promise<{ scheduled: number; skipped: number }> {
   const out = { scheduled: 0, skipped: 0 };
   if (!stay.contactId || stay.status === 'cancelled') return out;
+  // A venue that waited for its owner's Start sending (PR D): a guest who had left before the click
+  // gets nothing from it, and nothing of theirs counts as missed.
+  const startedAt = startedSendingAt(await readEngineSettings(), ctx.adaptive);
   const cat = await loadCatalogue();
   const contract = getTriggerContract('stay.window');
   if (!contract) return out;
@@ -148,16 +161,17 @@ export async function scheduleStayMoments(stay: LoadedStay, ctx: VenueContext, n
     const plan = planMoment(momentAt, now);
     if (plan.kind === 'too_late') {
       // Only for a journey the venue has: a moment of a playbook it never set up isn't "missed",
-      // nor one of a guest who had left before it went live (dates re-read after a turn-on).
-      if (pin && !checkedOutBeforeLive(stay, pin.liveSince)) {
+      // nor one of a guest who had left before it went live (dates re-read after a turn-on) or
+      // before the venue's Start sending.
+      if (pin && !checkedOutBeforeLive(stay, pin.liveSince) && !checkedOutBeforeLive(stay, startedAt)) {
         await recordSkipped(stay, journeyKey, momentAt, 'too_late', now);
         out.skipped += 1;
       }
       continue;
     }
-    const payload: StayTriggerPayload = { stayId: stay.id, journeyKey, installId: pin?.installId ?? '', momentAt, datesVersion: stay.datesVersion, contactId: stay.contactId };
+    const payload: StayTriggerPayload = { stayId: stay.id, journeyKey, installId: pin?.installId ?? '', momentAt, datesVersion: stay.datesVersion, contactId: stay.contactId, linkSeq: stay.linkSeq ?? 0 };
     await firestoreScheduler.schedule({
-      dedupeKey: stayTriggerKey(stay.id, journeyKey, stay.datesVersion, momentAt),
+      dedupeKey: stayTriggerKey(stay.id, journeyKey, stay.datesVersion, momentAt, stay.linkSeq),
       kind: 'stay_trigger',
       dueAt: plan.kind === 'later' ? plan.at : now,
       payload: { ...payload },
@@ -213,6 +227,8 @@ export async function handleStayTrigger(p: StayTriggerPayload, env: { now: numbe
   const stay = await loadStay(p.stayId);
   // A linked stay that got flagged as overlapping keeps its moments (D-C10); a cancelled one doesn't.
   if (!stay || stay.status === 'cancelled' || stay.contactId !== p.contactId) return 'gone';
+  // Unlinked and linked again since (PR D): this moment belonged to the earlier link.
+  if ((stay.linkSeq ?? 0) !== (p.linkSeq ?? 0)) return 'gone';
   if (stay.datesVersion !== p.datesVersion) return 'stale'; // the dates moved: a newer task has the new moment
   const ctx = await loadVenueContext(stay.venueId);
   if (!ctx) return 'gone';
@@ -225,12 +241,21 @@ export async function handleStayTrigger(p: StayTriggerPayload, env: { now: numbe
     await recordPassed(stay, p.journeyKey, p.momentAt, install.liveSince!, env.now);
     return 'checked_out_before_live';
   }
+  // The same for a venue that waited for its owner's Start sending (PR D, D-D1: nobody is
+  // backfilled): a guest who checked out before the click gets nothing from it.
+  const startedAt = startedSendingAt(env.settings, ctx.adaptive);
+  if (install && checkedOutBeforeLive(stay, startedAt)) {
+    await recordPassed(stay, p.journeyKey, p.momentAt, startedAt!, env.now, 'checked_out_before_start_sending');
+    return 'checked_out_before_live';
+  }
   if (env.now - p.momentAt > MOMENT_GRACE_MS) {
     if (install) await recordSkipped(stay, p.journeyKey, p.momentAt, 'too_late', env.now);
     return 'too_late';
   }
-  const current = modeFor(env.settings, stay.tenantUserId);
-  if (current === 'off') return 'off'; // launch off: nothing new starts
+  // Launch off — or the venue waits for the owner's Start sending (PR D), judged at the
+  // moment's time (the later of the moment and the link, as enrolment is): nothing new starts.
+  const current = venueModeFor(env.settings, ctx.adaptive, Math.max(p.momentAt, stay.linkedAt ?? p.momentAt));
+  if (current === 'off') return 'off';
   const mode = stricter(stay.linkMode, current);
 
   // Switched on now? (a paused venue, a journey or template switched off → that moment is lost)
@@ -248,7 +273,7 @@ export async function handleStayTrigger(p: StayTriggerPayload, env: { now: numbe
   // Its time is at least the link time (D-C33): enrolment skips events before the install went
   // live, and a guest linked after that must still get the moment that brought them in.
   const occurredAt = Math.max(p.momentAt, stay.linkedAt ?? p.momentAt);
-  const id = eventIdFor('engine', `stay:${stay.id}:${p.journeyKey}:${p.momentAt}`);
+  const id = eventIdFor('engine', `stay:${stay.id}:${p.journeyKey}:${p.momentAt}${linkSeqSuffix(stay.linkSeq)}`);
   const data = { stayId: stay.id, journeyKey: p.journeyKey, momentAt: p.momentAt, ...(stay.linkedGuestId ? { guestId: stay.linkedGuestId } : {}) };
   await appendEvent({ type: 'stay.moment', occurredAt, tenantUserId: stay.tenantUserId, venueId: stay.venueId, contactId: stay.contactId, guestId: stay.linkedGuestId, data }, id);
   const started = await enrolForEvent({
