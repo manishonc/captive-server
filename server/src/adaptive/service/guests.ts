@@ -20,6 +20,7 @@ import { pickLang } from '../core/schemas';
 import type { Channel } from '../core/constants';
 import { ApiError, notFound } from '../api/errors';
 import { getVenues, listTenantVenues } from '../store/tenantData';
+import { listVenuePlaybooks } from '../store/venueSetups';
 import { toJson } from '../store/serialize';
 import { tsMs } from '../store/time';
 import { now, refreshClock } from '../engine/clock';
@@ -30,7 +31,15 @@ import { contactPointId } from '../identity/key';
 import { normalizeE164, normalizeEmail } from '../../services/phone';
 import { ensureRollup } from '../rollups/rollup';
 import { maskedGuest } from '../core/owner/mask';
-import { buildTimeline, type TimelineConsentInput, type TimelineEventInput, type TimelineSendInput, type TimelineVenue } from '../core/owner/timeline';
+import {
+  buildTimeline,
+  offerLabelsFrom,
+  type OfferLabels,
+  type TimelineConsentInput,
+  type TimelineEventInput,
+  type TimelineSendInput,
+  type TimelineVenue,
+} from '../core/owner/timeline';
 import {
   contactAllStaysQuery,
   contactConsentQuery,
@@ -65,6 +74,22 @@ async function journeyNames(lang: 'en' | 'de'): Promise<Record<string, string>> 
   const out: Record<string, string> = {};
   for (const [key, rec] of cat.templates) out[key] = pickLang(rec.header.name, lang);
   return out;
+}
+
+/**
+ * For a German timeline: the offer labels of this tenant's venue setups, so an issued offer is
+ * named in German (the event stores the English label). English needs no read: it uses the
+ * stored label. Optional: if the read (or an odd setup doc) fails, the timeline keeps the stored
+ * labels — never failing the owner's or HeidiFi's guest view. Only the error's name is logged.
+ */
+export async function tenantOfferLabels(tenantUserId: string, lang: 'en' | 'de'): Promise<OfferLabels> {
+  if (lang !== 'de') return {};
+  try {
+    return offerLabelsFrom(await listVenuePlaybooks(tenantUserId));
+  } catch (err) {
+    console.error('[ADAPTIVE] German offer labels failed (stored labels used):', (err as Error)?.name ?? 'Error');
+    return {};
+  }
 }
 
 async function tenantVenueMap(tenantUserId: string): Promise<Record<string, TimelineVenue>> {
@@ -256,7 +281,12 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
   ]);
   if (!contactSnap.exists || contactSnap.get('tenantUserId') !== tenantUserId || !cvSnap.exists) throw notFound('This guest was not found at this venue');
   const contact = contactSnap.data() as ContactDoc;
-  const [record, venues, names] = await Promise.all([loadGuestRecord(contactId, tenantUserId), tenantVenueMap(tenantUserId), journeyNames(lang)]);
+  const [record, venues, names, offerLabels] = await Promise.all([
+    loadGuestRecord(contactId, tenantUserId),
+    tenantVenueMap(tenantUserId),
+    journeyNames(lang),
+    tenantOfferLabels(tenantUserId, lang),
+  ]);
   const timeline = buildTimeline({
     tenantUserId,
     events: record.events,
@@ -267,6 +297,7 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
     lang,
     audience: 'owner',
     defaultTz: venues[venueId]?.tz,
+    offerLabels,
   });
   const cv = cvSnap.data() as ContactVenueDoc;
   return {

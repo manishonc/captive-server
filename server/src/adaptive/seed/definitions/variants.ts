@@ -421,3 +421,32 @@ export const VARIANTS_V1: VariantSeedInput[] = [
     },
   },
 ];
+
+// ── Venue-neutral Wi-Fi card (PR E follow-up, decision E-D10) ────────────────
+// The Wi-Fi card goes out at every venue type (journeysGuestInfo.ts), so it no longer promises
+// a menu and opening hours (an Airbnb has neither): SMS and email share one neutral line that
+// fits every venue type (EN "Everything you need to know:", DE "Alles Wichtige:"). Patched here,
+// when this module loads — before the seed reads the list (definitions/index.ts imports
+// VARIANTS_V1 from this module) — with the same blanks, so the stored `mergeFieldsUsed` stays
+// right. The seed only creates missing docs: where it already ran, the stored wording is edited
+// by hand (docs/adaptive-api.md, "Seed").
+// Never throws: this module loads at server boot.
+const WIFI_CARD = VARIANTS_V1.find((v) => v.poolKey === 'wifi_info' && v.letter === 'A');
+if (WIFI_CARD) {
+  const en = WIFI_CARD.channels;
+  if (en.sms) en.sms = { ...en.sms, text: "Welcome to {{venue.name}}! You're online on {{guestinfo.wifiName}}. Everything you need to know: {{link.hub}}" };
+  if (en.email) {
+    en.email = {
+      ...en.email,
+      body: `${HI_EN},\n\nyou're online at {{venue.name}} on the {{guestinfo.wifiName}} network. Everything you need to know: {{link.hub}}\n\nEnjoy your visit,\n{{venue.name}}`,
+    };
+  }
+  const de = WIFI_CARD.locales?.de;
+  if (de?.sms) de.sms = { ...de.sms, text: 'Willkommen bei {{venue.name}}! Du bist im WLAN {{guestinfo.wifiName}} online. Alles Wichtige: {{link.hub}}' };
+  if (de?.email) {
+    de.email = {
+      ...de.email,
+      body: `${HI_DE},\n\ndu bist bei {{venue.name}} im WLAN {{guestinfo.wifiName}} online. Alles Wichtige: {{link.hub}}\n\nViel Spass bei deinem Besuch,\n{{venue.name}}`,
+    };
+  }
+}

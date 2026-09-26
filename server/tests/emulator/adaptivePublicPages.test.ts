@@ -4,7 +4,8 @@
  *
  * Run: bash tests/emulator/run.sh   (from captive-server/server)
  *
- *  - Offer: a live welcome's offer link → valid, then redeemed after the guest comes back;
+ *  - Offer: a live welcome's offer link → valid, then redeemed after the guest comes back, and
+ *    expired once the offer ends (expiry comes first, PR E follow-up);
  *    another guest's → expired after the expiry, gone (410) 7 days later. Never a guest name or
  *    contact detail; `Cache-Control: no-store`; opening it is not a click.
  *  - Info (a live Airbnb stay): the Wi-Fi password, door code and key instructions only inside
@@ -14,6 +15,9 @@
  *    code inside the stay window (its ends checked), null outside it.
  *  - Unknown code, the wrong kind of link, a test-run send, a legacy link, another venue, no
  *    venue → the SAME 404 (codes can't be probed).
+ *  - Rating (PR E follow-up): a live review ask's link → the venue, the guest's language and the
+ *    staff name of the config version the guest's journey runs with; never a 410; the same 404
+ *    as the other pages for anything else; no-store; not a click.
  */
 
 import {
@@ -22,6 +26,7 @@ import {
   advance,
   assert,
   assertEqual,
+  clearCaches,
   connect,
   contactIdFor,
   db,
@@ -41,6 +46,7 @@ import {
   type VenueFixture,
 } from './helpers';
 import { OWNER_ACTOR, mountApi } from './ownerApiHelpers';
+import { saveSetups } from '../../src/adaptive/service/tenant';
 import { R, at, day, freshStay, sync, writeGuestInfo } from './stayFixtures';
 import { sendKeyFor } from '../../src/adaptive/core/runtime/ids';
 import { DAY_MS, HOUR_MS, MINUTE_MS, localParts, zonedTime } from '../../src/adaptive/core/runtime/time';
@@ -50,7 +56,7 @@ const T: VenueFixture = { tenant: 'tenant_pubt', venueId: 'venue_pubt', apId: 'a
 const A1 = 'welcome_second_visit';
 const SHORT_LINKS = 'CaptivePortal_ShortLinks';
 
-async function linkOf(send: AnyDoc, kind: 'offer' | 'hub'): Promise<string> {
+async function linkOf(send: AnyDoc, kind: 'offer' | 'hub' | 'rating'): Promise<string> {
   for (const code of send.shortCodes ?? []) {
     const l = (await db.collection(SHORT_LINKS).doc(code).get()).data();
     if (l?.journeyLink === kind) return code;
@@ -69,11 +75,12 @@ async function main() {
   const api = await mountApi();
   const offer = (code: string, venueId: string | null = P.venueId, extra = '') => api.get(`/public/offer/${code}${venueId === null ? '' : `?venueId=${venueId}`}${extra}`);
   const info = (code: string, venueId: string | null = R.venueId, extra = '') => api.get(`/public/info/${code}${venueId === null ? '' : `?venueId=${venueId}`}${extra}`);
+  const rating = (code: string, venueId: string | null = P.venueId, extra = '') => api.get(`/public/rating/${code}${venueId === null ? '' : `?venueId=${venueId}`}${extra}`);
   try {
     console.log('\nOffer page (PR D §4)\n');
 
     let notFoundBody = '';
-    await test('offer: valid → redeemed after a return visit; another guest: expired, then 410; no-store, no guest details, not a click', async () => {
+    await test('offer: valid → redeemed after a return visit → expired after the expiry; another guest: expired, then 410; no-store, no guest details, not a click', async () => {
       await resetEmulator();
       await seedCatalogue();
       await setupVenue(P);
@@ -112,12 +119,17 @@ async function main() {
       await runDue();
       res = await offer(code1);
       assertEqual([res.status, res.body.offer.status], [200, 'redeemed'], 'redeemed');
+      const olgaExpiresAt = Date.parse(res.body.offer.expiresAt);
 
       // Omar never came back: expired after the expiry, the link gone 7 days after it.
       const expiresAt = Date.parse((await offer(code2)).body.offer.expiresAt);
       await setClock(expiresAt + DAY_MS);
       res = await offer(code2);
       assertEqual([res.status, res.body.offer.status], [200, 'expired'], 'expired (shown)');
+      // Olga's offer has ended too: expired, although she came back (expiry comes first, PR E follow-up).
+      assert(olgaExpiresAt < expiresAt + DAY_MS && expiresAt + DAY_MS <= olgaExpiresAt + 7 * DAY_MS, `Olga's offer ended, her link still opens: ${olgaExpiresAt} / ${expiresAt}`);
+      res = await offer(code1);
+      assertEqual([res.status, res.body.offer.status], [200, 'expired'], 'redeemed, then past expiry: expired');
       await setClock(expiresAt + 7 * DAY_MS + HOUR_MS);
       res = await offer(code2);
       assertEqual([res.status, res.body.code, res.headers.get('cache-control')], [410, 'gone', 'no-store'], 'gone 7 days after the expiry');
@@ -258,6 +270,101 @@ async function main() {
       assertEqual(await secretsAt(from), ['pw-HAUS-7', '0815'], 'from the start of the window: shown');
       res = await info(code);
       assert(res.text.includes('Haus Gast'), 'the page itself works throughout');
+    });
+
+    console.log('\nRating page (PR E follow-up)\n');
+
+    await test('rating: a live review ask → venue, the guest’s language and the pinned staff name; never a 410; the same 404 for anything else; no-store, not a click', async () => {
+      await resetEmulator();
+      await seedCatalogue();
+      await setupVenue(P);
+      const owner = { uid: `${P.tenant}_owner`, kind: 'tenant_user', role: 'ADMIN' } as const;
+      const staffName = async (name: string) => {
+        await saveSetups(P.tenant, { playbookKey: 'restaurant_growth', venueIds: [P.venueId], journeys: { review_ask: { enabled: true, slots: { staff_name: name } } } }, owner);
+        clearCaches();
+      };
+      await staffName('  Priya ');
+      const t0 = nextTuesday1240();
+      await setClock(t0);
+      await seedWallet(P.tenant, 5000);
+      await setLaunch({ [P.tenant]: 'live' }, { paused: false });
+      const askOf = async (guestId: string) => {
+        const contactId = await contactIdFor(P.tenant, guestId);
+        const inst = (await docsWhere(COL.journeyInstances, 'contactId', contactId)).find((i) => i.journeyKey === 'review_ask' && i.venueId === P.venueId);
+        assert(inst, 'a review ask started');
+        const key = sendKeyFor(inst.id, 's1');
+        return { ...((await db.collection(COL.journeySends).doc(key).get()).data() as Record<string, any>), id: key } as AnyDoc;
+      };
+
+      const rita = await connect({ venue: P, firstName: 'Rita', email: 'rita@test.local', phone: '791119201', phoneCountryCode: '+41', phoneVerified: true, consent: true, language: 'de' });
+      await runUntil(t0 + 7 * HOUR_MS); // the welcome, then the review ask ~6 h after the visit
+      const ask = await askOf(rita);
+      assertEqual([ask.status, ask.mode], ['sent', 'live'], 'the live review ask');
+      const code = await linkOf(ask, 'rating');
+
+      let res = await rating(code);
+      assertEqual(res.status, 200, `GET rating: ${res.text.slice(0, 200)}`);
+      assertEqual(res.headers.get('cache-control'), 'no-store', 'never cached');
+      assertEqual(res.body, { ok: true, venueId: P.venueId, venueName: `Venue ${P.venueId}`, lang: 'de', staffName: 'Priya' }, 'venue, the guest’s language, the staff name (trimmed) — nothing else');
+      for (const s of ['Rita', 'rita@test.local', '791119201', ask.contactId, ask.id, ask.instanceId]) assert(!res.text.includes(s), `no ${s} in the page data`);
+      assertEqual([(await rating(code, P.venueId, '&lang=fr')).body.lang, (await rating(code, P.venueId, '&lang=xx')).body.lang], ['fr', 'de'], 'a language hint (en/de/it/fr only)');
+      const clicks = (await db.collection(COL.journeySends).doc(ask.id).get()).get('engagement.clicks') ?? 0;
+      assertEqual(clicks, 0, 'opening the page is not a click');
+      assertEqual((await docsWhere(COL.journeyEvents, 'sendKey', ask.id)).filter((e) => e.type === 'message.clicked').length, 0, 'no click event');
+      assertEqual((await docsWhere(COL.journeyInstances, 'contactId', ask.contactId)).find((i) => i.journeyKey === 'review_ask')?.status, 'active', 'the review ask still waits for the click');
+
+      // The owner clears the name: a guest who starts now gets none; Rita's journey keeps its version.
+      await staffName('');
+      await setClock(t0 + DAY_MS);
+      const nora = await connect({ venue: P, firstName: 'Nora', email: 'nora@test.local', consent: true });
+      await runUntil(t0 + DAY_MS + 7 * HOUR_MS);
+      const noraAsk = await askOf(nora);
+      assertEqual([noraAsk.status, noraAsk.mode], ['sent', 'live'], 'Nora’s live review ask');
+      res = await rating(await linkOf(noraAsk, 'rating'));
+      assertEqual([res.status, res.body.lang, res.body.staffName], [200, 'en', null], 'no staff name; her language');
+      assertEqual((await rating(code)).body.staffName, 'Priya', 'Rita’s link: the version her journey runs with');
+
+      // Anything that isn't this venue's live journey rating link: the one 404 of the other pages.
+      await setClock(t0 + 2 * DAY_MS);
+      await setupVenue(T);
+      await setLaunch({ [P.tenant]: 'live', [T.tenant]: 'test' }, { paused: false });
+      const gt = await connect({ venue: T, email: 'dry.rate@test.local', consent: true });
+      await runDue();
+      await advance(15 * MINUTE_MS);
+      await runDue();
+      const dry = await a1Send(gt, T.tenant, T.venueId);
+      assertEqual(dry.status, 'dry_run', 'a test-run send');
+      await db.collection(SHORT_LINKS).doc('dryrate01').set({ sendKind: 'journey', sendKey: dry.id, marketingDocId: dry.id, journeyLink: 'rating', targetType: 'venue-rate', venueId: T.venueId, targetUrl: 'x' });
+      await db.collection(SHORT_LINKS).doc('legrate01').set({ marketingDocId: 'camp_1', targetType: 'venue-rate', venueId: P.venueId, targetUrl: 'https://visit.test/venue_pub/rate' });
+      const offerCode = await linkOf((await a1Send(rita, P.tenant, P.venueId)), 'offer');
+      const cases: Array<[string, Promise<{ status: number; text: string; headers: Headers }>]> = [
+        ['an unknown code', rating('zzzzzzzz')],
+        ['another venue', rating(code, 'venue_other')],
+        ["the venue of another account's link", rating(code, T.venueId)],
+        ['no venue', rating(code, null)],
+        ['a test-run send', rating('dryrate01', T.venueId)],
+        ['a legacy rating link (no sendKind)', rating('legrate01')],
+        ['a code with odd characters', rating('abc%2Fdef')],
+        ['an offer link on the rating route', rating(offerCode)],
+        ['a rating link on the offer page', offer(code)],
+        ['a rating link on the info page', info(code, P.venueId)],
+      ];
+      const texts: string[] = [];
+      for (const [label, pending] of cases) {
+        const r = await pending;
+        assertEqual(r.status, 404, label);
+        assertEqual(r.headers.get('cache-control'), 'no-store', `${label}: no-store`);
+        texts.push(r.text);
+      }
+      assert(texts.every((x) => x === texts[0]), `the same 404 every time: ${[...new Set(texts)].join(' | ')}`);
+      if (notFoundBody) assertEqual(texts[0], notFoundBody, 'the same 404 body as the offer and info pages');
+      const noSecret = await api.get(`/public/rating/${code}?venueId=${P.venueId}`, { secret: null });
+      assertEqual(noSecret.status, 401, 'behind the shared secret');
+
+      // No end date: long after the visit the page still answers (a rating from it still counts).
+      await setClock(t0 + 120 * DAY_MS);
+      res = await rating(code);
+      assertEqual([res.status, res.body.staffName, res.headers.get('cache-control')], [200, 'Priya', 'no-store'], '120 days later: still 200, never a 410');
     });
   } finally {
     await api.close();

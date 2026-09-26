@@ -1,6 +1,7 @@
 /**
- * Data for the two small guest pages the cms serves (plan §5: `GET /public/offer/:shortCode`,
- * `GET /public/info/:shortCode`; PR D). Mounted at `/internal/adaptive/public/…` behind the
+ * Data for the small guest pages the cms serves (plan §5: `GET /public/offer/:shortCode`,
+ * `GET /public/info/:shortCode`; PR D — and `GET /public/rating/:shortCode`, the rating page's
+ * language and staff name, PR E follow-up). Mounted at `/internal/adaptive/public/…` behind the
  * shared secret — the cms page calls it server-side (a top-level `/public` is the pricing feed).
  *
  *  - Only a live journey link of the right kind, at the venue the page is for, answers.
@@ -8,7 +9,8 @@
  *    gets the same 404, so codes can't be probed.
  *  - No guest name, no contact details, no ids beyond the venue.
  *  - Opening a page isn't a click (the cms forwards clicks separately, H5).
- *  - Secrets and link lifetimes: core/owner/publicPages.ts (D-D7).
+ *  - Secrets and link lifetimes: core/owner/publicPages.ts (D-D7). The rating page has no end
+ *    date (nothing secret; a rating from the link counts at any time).
  */
 
 import { db } from '../../firebase';
@@ -22,10 +24,11 @@ import { localDateKey } from '../core/runtime/time';
 import { tsMs } from '../store/time';
 import { now, refreshClock } from '../engine/clock';
 import { loadInstance } from '../engine/instanceStore';
+import { pinnedConfig } from '../engine/context';
 import { loadStay } from '../stays/store';
 import { resolveStayTimes } from '../stays/times';
 import { GUEST_INFO_FIELD_NAMES, GUEST_INFO_SECRET_FIELDS } from '../core/owner/guestInfo';
-import { infoLinkOpen, offerLinkOpen, offerStatus, pageField, secretsShown, type InfoStay } from '../core/owner/publicPages';
+import { infoLinkOpen, offerLinkOpen, offerStatus, pageField, secretsShown, staffNameOf, type InfoStay } from '../core/owner/publicPages';
 
 const CODE = /^[A-Za-z0-9_]{1,64}$/;
 const SEND_KEY = /^js_[0-9a-f]{32}$/;
@@ -37,7 +40,7 @@ function asLang(v: unknown): Lang | null {
 }
 
 /** The live journey link of this kind at this venue, with its send — or the one 404. */
-async function journeyPage(shortCode: string, venueId: unknown, kind: 'offer' | 'hub') {
+async function journeyPage(shortCode: string, venueId: unknown, kind: 'offer' | 'hub' | 'rating') {
   if (!CODE.test(shortCode) || typeof venueId !== 'string' || !VENUE.test(venueId)) throw notFound(NOT_FOUND);
   const link = (await db.collection('CaptivePortal_ShortLinks').doc(shortCode).get()).data();
   if (!link || link.sendKind !== 'journey' || link.journeyLink !== kind || typeof link.sendKey !== 'string' || !SEND_KEY.test(link.sendKey)) throw notFound(NOT_FOUND);
@@ -120,5 +123,23 @@ export async function publicInfo(shortCode: string, venueId: unknown, langHint?:
       shownUntil: secrets.until === null ? null : new Date(secrets.until).toISOString(),
     },
     stay: stay ? { checkIn: stay.checkIn, checkOut: stay.checkOut, nights: stay.nights, checkInTime: times.checkIn, checkOutTime: times.checkOut } : null,
+  };
+}
+
+/**
+ * The rating page opened from a journey's review ask (`{{link.rating}}`): the guest's language and
+ * the staff name the owner put in that journey's `staff_name` blank — from the config version the
+ * guest's journey runs with, as the engine reads it (`pinnedConfig`, engine/advance.ts). No offer,
+ * no guest details. Never a 410 (see core/owner/publicPages.ts).
+ */
+export async function publicRating(shortCode: string, venueId: unknown, langHint?: unknown) {
+  const p = await journeyPage(shortCode, venueId, 'rating');
+  const lang = asLang(langHint) ?? p.lang;
+  const pinned = await pinnedConfig(p.inst.meta.installId, p.inst.meta.configVersion, p.inst.meta.journeyKey);
+  return {
+    venueId: p.send.venueId,
+    venueName: p.venueName,
+    lang,
+    staffName: staffNameOf(pinned.slots.staff_name, lang),
   };
 }
