@@ -4,7 +4,7 @@
  *   resume if a send record already exists (a retried task never sends twice)
  *   → time (now, or a slot later in the venue's day)
  *   → facts (contact, consent, blocks, caps, weekly touches, counts, credits)
- *   → channel → wording → render → the 10-rule gate → the "why" record
+ *   → channel → wording → render → the send gate → the "why" record
  *   → test run: write a `dry_run` send record and carry on as if sent
  *     live:     mint the links → phase 1 transaction → provider → record → charge
  *               (send/dispatch.ts)
@@ -33,15 +33,17 @@ import { consentFor, consentState } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
 import type { EngineSettings } from '../store/engineSettings';
 import { retentionFrom, tsMs } from '../store/time';
-import { getCreditConfig, creditsForMessage, getWalletSnapshot, onCreditsSpent, providerCostForMessage } from '../../services/credits';
+import { getCreditConfig, getWalletSnapshot, onCreditsSpent } from '../../services/credits';
+import { creditsFor, providerCostFor } from '../send/pricing';
 import { spendableForChannel } from '../../services/creditBuckets';
 import { getEntitlements } from '../../services/entitlements';
-import { smsSegments } from '../../services/smsBilling';
+import { smsSegmentCount } from '../core/runtime/smsParts';
 import { maskDestination } from '../../services/phone';
 import type { ChannelAdapter, Outbound } from '../send/adapters/types';
 import { composeEmail, maskSecretValues, smsFinalText } from '../send/compose';
 import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBookingUrl } from '../send/links';
 import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
+import { newestTouchAt } from '../send/touches';
 import { dayKey, raiseAlert } from './alerts';
 import { journeyOnState, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
 import { DRY_RUN_LINKS, linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from './renderSend';
@@ -104,6 +106,12 @@ export type SendOutcome =
 export const channelAdapters: Partial<Record<Channel, ChannelAdapter>> = {};
 
 const DISPATCH_BUSY_RETRY_MS = 2 * MINUTE_MS;
+
+/**
+ * Test-only hook (never set in production): runs right before a live send's phase-1 claim,
+ * so an emulator test can change what the claim re-reads (PR F0: another message's touch).
+ */
+export const __sendTestHooks: { beforeClaim?: (sendKey: string) => Promise<void> } = {};
 
 function lastClickChannel(contact: ContactDoc): Channel | null {
   return contact.engagement?.lastClickChannel ?? null;
@@ -224,6 +232,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     const audience = email ? a.ctx?.audience.email ?? 'all' : a.ctx?.audience.sms ?? 'verified';
     const verified = email ? contact.emailVerified : contact.phoneVerified;
     let ruleFail: string | null = null;
+    // The cms owner screens mirror this switch (running-words.ts `SENDING_CHANNELS`): change both together.
     if (channel === 'whatsapp') ruleFail = 'whatsapp_off';
     else if (channel === 'sms') {
       const country = phoneCountry(contact.phoneE164)?.country ?? null;
@@ -420,9 +429,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
 
   // ── 6. Price + the full gate ──
   const creditConfig = await getCreditConfig();
-  const price = cfg.purpose === 'marketing' ? creditsForMessage(creditConfig, channel, smsText) : 0;
-  const providerCostMinor = providerCostForMessage(creditConfig, channel, smsText);
-  const segments = smsText !== undefined ? smsSegments(smsText) : null;
+  const price = cfg.purpose === 'marketing' ? creditsFor(creditConfig, channel, smsText) : 0;
+  const providerCostMinor = providerCostFor(creditConfig, channel, smsText);
+  const segments = smsText !== undefined ? smsSegmentCount(smsText) : null;
   // A wallet in the red is suspended: nothing is spendable.
   const spendable = wallet ? (wallet.suspended ? 0 : spendableForChannel(wallet.channelBalances, channel)) : null;
   const weekAgo = now - 7 * DAY_MS;
@@ -462,6 +471,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       utilityWindow: rules.utilityQuietHours,
       jitterMinutes: rules.deferJitterMinutes,
     },
+    // PR F0: the newest other marketing message to this person, from any venue or owner.
+    spacing: { lastAt: newestTouchAt(np?.recentMarketingTouches ?? [], sendKey), minGapMs: rules.marketingGapHours * HOUR_MS },
     fairUse: { count: serviceMonth, limit: rules.utilityFairUsePerVenuePerMonth },
     credits: { price, spendable: live ? spendable : null, waitStartedAt: inst.state.waiting?.creditsWaitStartedAt ?? null, queueHours: rules.creditQueueHours },
   };
@@ -551,6 +562,9 @@ function deferred(
   const { inst } = a;
   const keepsIntended = gate.reason === 'paused' || gate.reason === 'lapse_unknown';
   const firstOfReason = inst.state.waiting?.lastDeferReason !== gate.reason;
+  // PR F0: a spacing hold moves when another message went meanwhile; record the new time,
+  // or the owner's timeline would keep the first "held until".
+  const spacingMoved = !firstOfReason && gate.reason === 'spacing' && inst.state.waiting?.untilAt !== gate.until;
   if (firstOfReason) {
     void alertFor(gate.reason, a, x.tz);
     // Waiting for credits: nudge the auto top-up once (plan §3.5 rule 10).
@@ -572,7 +586,7 @@ function deferred(
     ...((x.dispatchAttempts ?? (inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts : undefined)) !== undefined
       ? { dispatchAttempts: x.dispatchAttempts ?? inst.state.waiting!.dispatchAttempts }
       : {}),
-    events: firstOfReason ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until, replay: x.replay } } as EventInput] : [],
+    events: firstOfReason || spacingMoved ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until, replay: x.replay } } as EventInput] : [],
   };
 }
 
@@ -713,9 +727,9 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     message = { kind: 'email', to: address, subject: final.subject ?? '', html: composed.html, text: composed.text, sendKey, unsubscribeUrl: marketing ? d.unsubscribeUrl : null };
   }
   // Priced on the placeholders; the real links have the same length, so this is the same number.
-  const price = marketing ? creditsForMessage(d.creditConfig, channel, smsBody ?? undefined) : 0;
+  const price = marketing ? creditsFor(d.creditConfig, channel, smsBody ?? undefined) : 0;
   if (price !== d.price) console.warn('[ADAPTIVE] final SMS priced differently than the gate saw:', sendKey, d.price, price);
-  const segments = smsBody !== null ? smsSegments(smsBody) : null;
+  const segments = smsBody !== null ? smsSegmentCount(smsBody) : null;
   const preview = (d.previewRendered.subject ? `${d.previewRendered.subject} — ` : '') + d.previewRendered.text;
   const pointId = channel === 'email' ? d.contact.emailPointId : d.contact.phonePointId;
   const doc: JourneySendDoc = {
@@ -780,6 +794,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   };
 
   // ── Phase 1: re-check and claim ──
+  if (__sendTestHooks.beforeClaim && process.env.FIRESTORE_EMULATOR_HOST) await __sendTestHooks.beforeClaim(sendKey);
   const claim = await claimSend(live);
   // The claim wrote this run's earlier events; the final commit must not write them again.
   if (claim.kind === 'ok') a.pendingEvents?.splice(0, live.pendingEvents.length);

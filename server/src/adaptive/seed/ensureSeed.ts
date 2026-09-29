@@ -5,23 +5,36 @@
  * Only ever `create()`s: a unit whose anchor doc exists is skipped, so admin
  * edits are never overwritten, and two replicas booting at once are safe (the
  * second create fails with ALREADY_EXISTS and is counted as skipped).
+ * PR F0: after that pass the seed upgrades (seed/upgrades.ts) may rewrite a platform wording
+ * doc that still holds one of the earlier seed texts they list; a doc edited by hand never is.
  */
 
 import { db } from '../../firebase';
 import { stripUndefined } from '../store/serialize';
 import { buildSeedPlan } from './buildSeed';
+import { applyWordingUpgrades, upgradeTargets } from './upgrades';
 
 export interface SeedResult {
   created: string[];
   skipped: string[];
   failed: Array<{ label: string; error: string }>;
   problems: string[];
+  /** PR F0 seed upgrades (seed/upgrades.ts): wording docs rewritten to the current seed text. */
+  upgraded?: string[];
+  /** …and wording docs left alone because they were edited by hand. */
+  keptEdited?: string[];
 }
 
 export async function ensureAdaptiveSeed(opts: { dryRun?: boolean } = {}): Promise<SeedResult> {
   const plan = buildSeedPlan(new Date());
   const result: SeedResult = { created: [], skipped: [], failed: [], problems: plan.problems };
   if (plan.problems.length) return result;
+  // PR F0: a broken upgrade entry is a definition problem too: stop before anything is written.
+  const upgradeProblems = upgradeTargets(plan).problems;
+  if (upgradeProblems.length) {
+    result.problems.push(...upgradeProblems);
+    return result;
+  }
 
   for (const unit of plan.units) {
     try {
@@ -46,6 +59,13 @@ export async function ensureAdaptiveSeed(opts: { dryRun?: boolean } = {}): Promi
       }
     }
   }
+  // PR F0: wording fixes for docs an earlier release of the seed created (create-only above
+  // skipped them). Only a doc that still holds an earlier seed text is rewritten.
+  const upgrades = await applyWordingUpgrades(plan, { dryRun: opts.dryRun });
+  result.upgraded = upgrades.upgraded;
+  result.keptEdited = upgrades.keptEdited;
+  result.failed.push(...upgrades.failed);
+  result.problems.push(...upgrades.problems);
   return result;
 }
 
@@ -59,6 +79,8 @@ export function startAdaptiveSeed(): void {
       }
       if (r.created.length) console.log(`[ADAPTIVE SEED] Created ${r.created.length}: ${r.created.join(', ')}`);
       if (r.failed.length) console.error('[ADAPTIVE SEED] Failed:', r.failed);
+      if (r.upgraded?.length) console.log(`[ADAPTIVE SEED] Upgraded ${r.upgraded.length}: ${r.upgraded.join(', ')}`);
+      if (r.keptEdited?.length) console.warn(`[ADAPTIVE SEED] Not upgraded (edited by hand): ${r.keptEdited.join(', ')}`);
     })
     .catch((err) => console.error('[ADAPTIVE SEED] Seed run failed (the server keeps running):', err));
 }

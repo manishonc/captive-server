@@ -16,8 +16,9 @@ import { DAY_MS } from '../core/runtime/time';
 import type { DecisionRecord } from '../core/runtime/decision';
 import { retentionFrom, tsMs } from '../store/time';
 import { maskDestination } from '../../services/phone';
-import { smsSegments } from '../../services/smsBilling';
-import { getCreditConfig, providerCostForMessage } from '../../services/credits';
+import { getCreditConfig } from '../../services/credits';
+import { smsSegmentCount } from '../core/runtime/smsParts';
+import { providerCostFor } from '../send/pricing';
 import { loadCatalogue } from '../service/catalogue';
 import { channelAdapters } from './sendPath';
 import { callProvider, dispatchLease } from '../send/dispatch';
@@ -107,8 +108,8 @@ export async function sendReplyNotice(args: {
       errorCode: null,
       errorMessage: null,
       credits: null,
-      providerCostMinor: providerCostForMessage(creditConfig, 'sms', body),
-      smsSegments: smsSegments(body),
+      providerCostMinor: providerCostFor(creditConfig, 'sms', body),
+      smsSegments: smsSegmentCount(body),
       shortCodes: [],
       content: { preview: body.slice(0, 280), bodyHash: hashId('b', body).slice(2, 34) },
       engagement: { deliveredAt: null, openedAt: null, firstClickAt: null, clicks: 0, repliedAt: null },
@@ -149,7 +150,7 @@ export async function sendReplyNotice(args: {
         channel: 'sms',
         slot: 'now',
         mode: 'live',
-        data: { mode: 'live', kind: 'reply_notice', channel: 'sms', purpose: 'service', credits: 0, providerCostMinor: providerCostForMessage(creditConfig, 'sms', claimed.body), segments: result.segments ?? smsSegments(claimed.body), slot: 'now' },
+        data: { mode: 'live', kind: 'reply_notice', channel: 'sms', purpose: 'service', credits: 0, providerCostMinor: providerCostFor(creditConfig, 'sms', claimed.body), segments: result.segments ?? smsSegmentCount(claimed.body), slot: 'now' },
       },
       eventIdFor('engine', `${sendKey}:message.sent`),
     ).catch((err) => console.warn('[ADAPTIVE] reply notice event not written:', sendKey, (err as Error)?.message || err));

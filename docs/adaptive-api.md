@@ -196,6 +196,12 @@ an issued offer is named with the German label of the venue's offer menu (its se
 one first, then the others); the event itself stores the English label, which English timelines
 and a menu without German keep using.
 
+PR F0: every `journeys[]` entry of both guest routes (the list and one guest) also has `purpose`
+(`marketing` | `service` | `mixed`, from the journey template; `null` for a journey no longer in the
+catalogue). The cms uses it to word a guest who said no on every sending channel: a running marketing
+journey reads "Unsubscribed — no more marketing here", an info journey keeps its own words. Deploy
+captive-server before the cms: without `purpose` the cms counts every running journey as marketing.
+
 ### Guest pages — `/public/…` (server-to-server; the cms page calls it)
 
 | Method & path | Query | Returns |
@@ -246,7 +252,24 @@ npx tsx src/adaptive/seed/run.ts           # dry run
 npx tsx src/adaptive/seed/run.ts --apply   # create what is missing
 ```
 
+### Seed upgrades (PR F0)
+
+Since PR F0 the boot-time seed also **upgrades** platform wording it created in an earlier release:
+after the create-only pass, each entry in `server/src/adaptive/seed/wordingUpgrades.ts` names a wording
+(pool + letter) and the hashes of the earlier seed texts it replaces. A stored doc that still holds one of
+them gets today's text (and hash); the old text is kept in `CaptivePortal_Variants/{id}/history/{hash}` and
+the upgrade id in `seedUpgrades`. A doc edited by hand — or put back to an old text after its upgrade ran —
+is never overwritten: the boot log names it
+("Not upgraded (edited by hand)"), and `run.ts` lists it. The dry run shows what would be upgraded.
+
+The PR F0 upgrades: the welcome A/B, German book-direct and checkout A SMS as GSM-7 (no 🎁, no "–"),
+welcome B without "next visit" twice, and the Wi-Fi card — from either earlier text, so **the hand edit below
+is no longer needed**: a Wi-Fi card doc that still has the PR 1 wording, or PR E's, is upgraded at the next
+boot. Only a doc someone edited differently stays as it is.
+
 ### Wi-Fi card wording — hand edit where the seed already ran (PR E follow-up, E-D10)
+
+_Superseded by the PR F0 seed upgrade above: kept for the record._
 
 The Wi-Fi card (pool `wifi_info`, letter A) no longer says "Menu, opening hours…" (an Airbnb has
 neither); SMS and email now share one neutral line that fits every venue type. New databases get

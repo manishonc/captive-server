@@ -48,6 +48,7 @@ import {
   seedWallet,
   setClock,
   setLaunch,
+  setMarketingGap,
   setSafety,
   setupVenue,
   test,
@@ -388,6 +389,10 @@ async function main() {
       assertEqual(anna.name, 'Anna M.', 'first name + initial');
       assert(anna.email && anna.email !== 'anna.list@test.local' && anna.phone && !anna.phone.includes('791116003'), `masked: ${anna.email} ${anna.phone}`);
       assertEqual([anna.consent.email.state, anna.journeys.some((j: any) => j.journeyKey === A1 && j.mode === 'test')], ['yes', true], 'consent chips and journeys');
+      // PR F0: the rows and the drawer name each journey's purpose (the cms words a stopped guest's journey by it).
+      assertEqual(anna.journeys.find((j: any) => j.journeyKey === A1)?.purpose, 'marketing', "the row's welcome journey is marketing");
+      const annaDrawer = await api.get(`${V}/guests/${ids[0]}`);
+      assertEqual(annaDrawer.body.journeys.find((j: any) => j.journeyKey === A1)?.purpose, 'marketing', "the drawer's too");
       const everything = p1.text + p2.text;
       assert(!/(anna|bert|cleo)\.list@/.test(everything) && !/79111600\d/.test(everything), 'no raw address anywhere in the list');
       assertEqual((await api.get(`${V}/guests?cursor=nonsense`)).status, 400, 'a bad cursor → 400');
@@ -498,6 +503,9 @@ async function main() {
       await setClock(t0);
       await seedWallet(S1.tenant, 5000);
       await setLaunch({ [S1.tenant]: 'live' }, { paused: false });
+      // PR F0: Gia's two welcomes (S1, S2) at the same moment would now go 4 h apart (spacing). This
+      // test is about the owner's stop and resume, so it keeps its timeline with the gap off.
+      await setMarketingGap(0);
       // G1: phone + email at S1. G2: email only, at S1 and S2.
       const g1 = await joined(S1.tenant, { venue: S1, firstName: 'Gil', email: 'gil@test.local', phone: '791118001', phoneCountryCode: '+41', phoneVerified: true, consent: true });
       const g2Guest = await connect({ venue: S1, firstName: 'Gia', email: 'gia@test.local', consent: true, guestId: 'g_gia' });

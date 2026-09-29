@@ -157,4 +157,16 @@ export function afterQuietHours(end: Date, jitterMinutes: [number, number], jitt
   return end.getTime() + minutes * MINUTE_MS;
 }
 
+/**
+ * PR F0 spacing: the end of the gap, rounded up to a whole minute (quiet hours are checked by
+ * the minute: 20:59:49 reads "outside", but a worker waking at 21:00:05 would then hold it to
+ * the morning), + a repeatable 0–20 min from the send's own key (a different key than the
+ * quiet-hours spread, so the two don't line up).
+ */
+export function spacingSpread(at: number, jitterMinutes: [number, number], jitterKey: string): number {
+  const [lo, hi] = jitterMinutes;
+  const minutes = lo + Math.floor(unitFromKey(`${jitterKey}:s`) * (Math.max(hi, lo) - lo + 1));
+  return Math.ceil(at / MINUTE_MS) * MINUTE_MS + minutes * MINUTE_MS;
+}
+
 export { atLocalTime };

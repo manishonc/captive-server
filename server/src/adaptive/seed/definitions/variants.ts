@@ -450,3 +450,71 @@ if (WIFI_CARD) {
     };
   }
 }
+
+// ── SMS as GSM-7 (PR F0, decision F-D10) ─────────────────────────────────────
+// 🎁 and "–" sent these SMS as Unicode (UCS-2: 70 characters a part instead of 160), so the
+// German welcome took 4 parts (60 credits) instead of 2. They now use "," or "." and no emoji;
+// welcome A keeps its emoji in the email, where it costs nothing (the emoji axis is email-only).
+// Welcome B no longer says "next visit" twice with the 10% offer ("10% off your next visit …
+// on your next visit"), the German welcome A no longer says "auf" twice with it ("wartet 10%
+// Rabatt auf deinen nächsten Besuch auf dich"), and the Wi-Fi card's preheader no longer promises "house info" at
+// venues without any. Patched when this module loads, like the Wi-Fi card above. Where the
+// seed already ran, the seed upgrade step (seed/upgrades.ts) carries the new text into the
+// stored doc — only while it still holds the old seed text, so a hand edit is never overwritten.
+// Never throws: this module loads at server boot.
+function patchWording(poolKey: string, letter: string, patch: (v: VariantSeedInput) => void): void {
+  const variant = VARIANTS_V1.find((v) => v.poolKey === poolKey && v.letter === letter);
+  if (variant) patch(variant);
+}
+
+patchWording('welcome_offer', 'A', (v) => {
+  const en = v.channels;
+  if (en.sms) en.sms = { ...en.sms, text: `${HI_EN}, thanks for visiting {{venue.name}}! Come back within {{offer.days}} days for {{offer.label}}: {{link.offer}}` };
+  if (en.email) {
+    en.email = {
+      ...en.email,
+      body: `${HI_EN},\n\nthanks for stopping by {{venue.name}}! Come back within {{offer.days}} days and enjoy {{offer.label}} on us 🎁\n\nShow this when you're here: {{link.offer}}\n\nSee you soon,\n{{venue.name}}`,
+    };
+  }
+  const de = v.locales?.de;
+  if (de?.sms) de.sms = { ...de.sms, text: `${HI_DE}, danke für deinen Besuch bei {{venue.name}}! Komm innert {{offer.days}} Tagen wieder, dann wartet auf dich {{offer.label}}: {{link.offer}}` };
+  if (de?.email) {
+    de.email = {
+      ...de.email,
+      body: `${HI_DE},\n\ndanke für deinen Besuch bei {{venue.name}}! Komm innert {{offer.days}} Tagen wieder – dann wartet auf dich {{offer.label}}, aufs Haus 🎁\n\nZeig das einfach vor Ort: {{link.offer}}\n\nBis bald,\n{{venue.name}}`,
+    };
+  }
+});
+
+patchWording('welcome_offer', 'B', (v) => {
+  if (v.channels.sms) v.channels.sms = { ...v.channels.sms, text: `{{venue.name}}: there's {{offer.label}} waiting for you, valid until {{offer.expiryDate | date:"d.M."}} {{link.offer}}` };
+  const de = v.locales?.de;
+  if (de?.sms) de.sms = { ...de.sms, text: `{{venue.name}}: Auf dich wartet {{offer.label}}, gültig bis {{offer.expiryDate | date:"d.M."}} {{link.offer}}` };
+});
+
+patchWording('book_direct', 'A', (v) => {
+  const de = v.locales?.de;
+  if (de?.sms) de.sms = { ...de.sms, text: 'Hat dir {{venue.name}} gefallen? Buch nächstes Mal direkt bei uns, dann gibt es {{offer.label}}: {{link.booking}}' };
+});
+
+patchWording('stay_checkout', 'A', (v) => {
+  if (v.channels.sms) {
+    v.channels.sms = {
+      ...v.channels.sms,
+      text: `${HI_EN}, check-out tomorrow is at {{guestinfo.checkOutTime}}. Want to stay longer? Late check-out until 14:00 is CHF {{slot.late_checkout_price}}. Ask your host: {{guestinfo.hostContactUrl}}`,
+    };
+  }
+  const de = v.locales?.de;
+  if (de?.sms) {
+    de.sms = {
+      ...de.sms,
+      text: `${HI_DE}, morgen ist Check-out um {{guestinfo.checkOutTime}}. Länger bleiben? Später Check-out bis 14:00 kostet CHF {{slot.late_checkout_price}}. Frag deinen Gastgeber: {{guestinfo.hostContactUrl}}`,
+    };
+  }
+});
+
+patchWording('wifi_info', 'A', (v) => {
+  if (v.channels.email) v.channels.email = { ...v.channels.email, preheader: 'Your Wi-Fi details and more' };
+  const de = v.locales?.de;
+  if (de?.email) de.email = { ...de.email, preheader: 'Deine WLAN-Details und mehr' };
+});

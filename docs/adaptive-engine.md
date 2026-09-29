@@ -19,7 +19,7 @@ guest logs in ── /create-user or /unifi/authorize ── +1 guarded line ─
                                                                                    │
 adaptive-worker (own container) ◀── leases due tasks every 5 s ────────────────────┘
   event_route  → contact + consent (ConsentEvents) → visit (Visits) → journeys start (JourneyInstances)
-  node_run     → the interpreter walks steps; a send goes through the 10-rule gate
+  node_run     → the interpreter walks steps; a send goes through the 11-rule gate
                → test: JourneySends (dry_run) + a "why" record
                → live: mint links → phase 1 (re-check + claim) → provider → record → charge
   visit_end    → 3 h "visit ended" fallback (A2 review ask)
@@ -47,7 +47,7 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
 ## Sending (live)
 
 - **Exactly once** (`send/dispatch.ts`):
-  1. One transaction re-checks the pause, consent, blocks, the weekly limit and a low rating, then
+  1. One transaction re-checks the pause, consent, blocks, the weekly limit, the spacing and a low rating, then
      creates the send record `dispatching`.
   2. One provider request: no automatic retries, 15 s timeout, never scheduled at the provider.
   3. The answer is recorded:
@@ -62,13 +62,71 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
     twice).
 - **Priced on the text sent:** links are real short links (`${VISITOR_BASE_URL}/s/<code>`, minted only
   once the gate says yes); the SMS gets a STOP line in the guest's language; credits = rate card ×
-  segments of that exact text. Adaptive always charges, whatever `ENFORCE_CREDITS` says.
+  parts of that exact text, counted as the carrier bills them (PR F0: `core/runtime/smsParts.ts`, an emoji
+  is two UTF-16 units). Adaptive always charges, whatever `ENFORCE_CREDITS` says.
 - **Email:** plain-text wording becomes simple HTML (escaped), with the preheader, a localized unsubscribe
   footer + `List-Unsubscribe` headers (marketing), "Powered by HeidiFi" unless the plan hides it, and the
   sendKey in `X-Mailin-custom` so Brevo webhooks find the send. No open pixel.
 - **SMS:** the same Twilio sender and status-callback URL as today (the webhook's signature check
   depends on it); statuses are matched by the message SID.
 - A channel without credentials is skipped (the ladder moves on) and HeidiFi is alerted.
+
+## Spacing between marketing messages (PR F0)
+
+- **Rule 9, `spacing`** (right after quiet hours; fair use and credits are now rules 10 and 11, and the "why"
+  view shows 11 checks): no marketing
+  message to a person within `AdaptiveConfig/global.marketingGapHours` (4) of their last one, whichever
+  venue or owner sent it — the same scope as the weekly limit, read from the same
+  `NetworkPeople.recentMarketingTouches`. Before this, two messages held overnight both went at
+  09:00–09:20.
+- Held: until 4 h after the last one + a repeatable 0–20 min (from the send key); a gap that ends in quiet
+  hours goes on to their end. Past the step's `expireAfter` the message is skipped (`spacing_expired`),
+  as with quiet hours — the 0–20 min is counted too, so a gap that ends just before the deadline can still
+  skip it (the safe side: nothing is sent after its deadline). Info messages are never spaced.
+- The phase-1 transaction re-reads the touches, so two sends to one person claimed at the same moment can't
+  both pass. A hold that moves (another message went meanwhile) writes a new `send.deferred`, so the
+  owner's timeline shows the new time.
+- Limits: like the weekly limit it sees only Adaptive's live marketing sends (Marketing-tab and Campaign
+  Manager sends write no touch; test runs and info messages write none either, so a welcome can follow a
+  Wi-Fi card within minutes). No API writes `marketingGapHours` yet: the default applies to a config doc
+  without it; changing it is a hand edit of `AdaptiveConfig/global` — hours from 0 to 48 (`0` switches it
+  off; the owner sentence names whole hours, and says "just got another message" otherwise). A value that
+  isn't one of those (e.g. `"0"` as text, or 49) reads as 4 h and logs `[ADAPTIVE] AdaptiveConfig/global
+  marketingGapHours … using 4 h` once per process; the rest of the doc is unaffected.
+- Records written before PR F0 have no `spacing` input: Replay treats that as "no gap set", and reports them
+  as "the engine changed since" (ENGINE_RUNTIME_VERSION 2026-09-29.a).
+
+## SMS parts and seeded wording (PR F0)
+
+- `core/runtime/smsParts.ts` counts parts the way the carrier bills: GSM-7 160 / 153 septets (an extension
+  character such as `€` takes two), anything else UCS-2 at 70 / 67 UTF-16 units (an emoji takes two), and no
+  character is split across two parts. Adaptive's pricing (`send/pricing.ts`), the sandbox provider, reply
+  notices and the owner estimate use it. The shared `services/smsBilling.ts` counter (legacy campaigns) is
+  unchanged; it counts an emoji as one unit.
+- The seeded SMS are GSM-7 now: no 🎁 and no "–" (welcome A/B, German book-direct, checkout A). The German
+  welcome is 2 parts (30 credits), not 4 (60). `tests/adaptiveSeedUpgrade.test.ts` keeps every seeded SMS
+  GSM-7 and every marketing SMS within 2 parts (36-character venue name, longest offer, real link, STOP line).
+- The owner estimate prices SMS the way the engine sends it (`service/estimateSms.ts`): an SMS-first
+  journey's first message by SMS at the parts its wording takes at that venue, the follow-ups on the next rung
+  of the ladder (email: an SMS is never "opened", so a follow-up moves on). The PR 1 formula priced every
+  touch as a one-part SMS; the difference is added per venue and journey. It is an approximation: a guest who
+  taps the SMS link gets the welcome's last reminder by SMS again (`same_as_last_click`), priced here as email,
+  so the bill can be higher by about one SMS per clicking guest.
+- Merge values in an SMS (a guest or venue name typed on a phone) get their typographic punctuation replaced
+  (’ ‘ ‹ › → ', “ ” „ « » → ", – — → -, … → ..., non-breaking and other wide spaces → space), so one "Luigi’s" doesn't make the
+  SMS Unicode — only when that makes the whole SMS GSM-7 without more parts. Letters are never changed: "Zoë"
+  or "François" keep that SMS UCS-2 (priced correctly), and then nothing is replaced. Codes (Wi-Fi password,
+  door code, key instructions), the Wi-Fi name, links and any value that is a web address always go exactly as typed.
+- The Twilio adapter sends `smartEncoded: false`: our price is the text as sent. When Twilio reports a
+  different part count than ours, the worker logs `[ADAPTIVE] twilio counted N SMS parts, Adaptive priced M`.
+- Getting new seed wording into a database where the seed already ran: the **seed upgrade step**
+  (`seed/wordingUpgrades.ts`, run by the boot-time seed after its create-only pass). It rewrites a platform
+  wording doc only while its stored text is exactly one of the earlier seed texts it lists, keeps the old
+  text in `CaptivePortal_Variants/{id}/history/`, and records the upgrade in `seedUpgrades`. A text already kept
+  in `history/` is never replaced again, so an old text put back on purpose stays. A doc edited by hand is left
+  alone and named in the boot log ("Not upgraded (edited by hand)", with the stored text's hash). To change
+  seeded wording later: patch it at the end of `seed/definitions/variants.ts` and add an entry with the old text's
+  hash (several entries for one wording are fine; a broken entry stops the seed before it writes anything).
 
 ## Signals coming back
 

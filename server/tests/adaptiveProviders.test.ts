@@ -414,7 +414,7 @@ async function main() {
   // =========================================================================
   console.log('\nTwilio: request shape');
 
-  await test('Messaging Service: To/Body/MessagingServiceSid/StatusCallback exactly, no scheduling', async () => {
+  await test('Messaging Service: To/Body/MessagingServiceSid/StatusCallback exactly, SmartEncoded false, no scheduling', async () => {
     setEnv({ ...TWILIO_ENV, TWILIO_PHONE_NUMBER: '+15550001111', SERVER_PUBLIC_URL: 'https://api.heidifi.test' });
     const { client, calls } = fakeHttp(() => ({ statusCode: 201, body: twilioMessage() }));
     expectKind(await twilioAdapter(client).send(sms()), 'accepted');
@@ -429,17 +429,19 @@ async function main() {
         StatusCallback: 'https://api.heidifi.test/webhook/twilio/sms-status',
         MessagingServiceSid: MSS,
         Body: 'Come back for a free coffee. Reply STOP to opt out.',
+        // PR F0: sent explicitly, so a Messaging Service with Smart Encoding on can't change the priced text.
+        SmartEncoded: 'false',
       },
       'form data',
     );
-    for (const k of ['SendAt', 'ScheduleType', 'SmartEncoded', 'From']) assert(!(k in c.data), `no ${k}`);
+    for (const k of ['SendAt', 'ScheduleType', 'From']) assert(!(k in c.data), `no ${k}`);
   });
 
   await test('no Messaging Service → From = TWILIO_PHONE_NUMBER; no SERVER_PUBLIC_URL → no StatusCallback', async () => {
     setEnv({ TWILIO_ACCOUNT_SID: SID, TWILIO_AUTH_TOKEN: 'token-test', TWILIO_PHONE_NUMBER: '+15550001111' });
     const { client, calls } = fakeHttp(() => ({ statusCode: 201, body: twilioMessage() }));
     expectKind(await twilioAdapter(client).send(sms()), 'accepted');
-    assertEqual(calls[0].data, { To: '+41791234567', From: '+15550001111', Body: sms().body }, 'form data');
+    assertEqual(calls[0].data, { To: '+41791234567', From: '+15550001111', Body: sms().body, SmartEncoded: 'false' }, 'form data');
   });
 
   await test('StatusCallback uses SERVER_PUBLIC_URL raw (trailing slash kept, like services/twilio.ts)', async () => {

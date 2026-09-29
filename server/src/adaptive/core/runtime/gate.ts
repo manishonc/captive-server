@@ -1,5 +1,8 @@
 /**
- * The send gate (04-engine-runtime §4): ten rules, in order, first "no" wins.
+ * The send gate (04-engine-runtime §4): eleven rules, in order, first "no" wins.
+ * PR F0 added `spacing` after `quiet_hours`: at least N hours (AdaptiveConfig
+ * `marketingGapHours`, 4) between two marketing messages to one person, across
+ * every venue and owner — the weekly limit's scope.
  *
  * Every rule is evaluated every time, so the decision record always holds the
  * full checklist ("touches 1/5", "21:40 Europe/Zurich is inside 21:00–09:00 →
@@ -9,7 +12,7 @@
 
 import type { Channel } from '../constants';
 import { HOUR_MS, MINUTE_MS, isInWindow, localParts, windowEnd } from './time';
-import { afterQuietHours } from './pickers';
+import { afterQuietHours, spacingSpread } from './pickers';
 import type { LastTouch, RunMode } from './types';
 
 export type Verdict = 'allow' | 'defer' | 'skip' | 'block';
@@ -23,6 +26,7 @@ export type RuleName =
   | 'must_differ'
   | 'weekly_limit'
   | 'quiet_hours'
+  | 'spacing'
   | 'fair_use'
   | 'credits';
 
@@ -92,6 +96,12 @@ export interface GateInput {
     utilityWindow: { start: string; end: string };
     jitterMinutes: [number, number];
   };
+  /**
+   * PR F0: when this person's newest other marketing message went (any venue, any owner;
+   * null = none in the window) and the gap to keep after it (0 = off). Required, so a new
+   * builder can't forget it; a replay snapshot from before the rule reads as gap 0.
+   */
+  spacing: { lastAt: number | null; minGapMs: number };
   fairUse: { count: number; limit: number };
   credits: {
     price: number;
@@ -208,16 +218,14 @@ function ruleWeekly(i: GateInput): RuleCheck {
   return allow('weekly_limit', `${count} of ${limit} in the last 7 days`);
 }
 
-function ruleQuiet(i: GateInput): RuleCheck {
-  if (i.purpose === 'service' && i.urgent) return allow('quiet_hours', 'urgent info message');
-  const window = i.purpose === 'service' ? i.quiet.utilityWindow : i.quiet.window;
-  const now = new Date(i.now);
-  const zones = [i.quiet.venueTz, ...(i.quiet.phoneTz && i.quiet.phoneTz !== i.quiet.venueTz ? [i.quiet.phoneTz] : [])];
-  const quietIn = zones.filter((tz) => isInWindow(now, tz, window));
-  if (!quietIn.length) return allow('quiet_hours', `${hhmm(now, i.quiet.venueTz)} ${i.quiet.venueTz} is outside ${window.start}–${window.end}`);
+/** The venue's zone, plus the guest's phone zone when it differs (quiet hours hold in both). */
+function quietZones(i: GateInput): string[] {
+  return [i.quiet.venueTz, ...(i.quiet.phoneTz && i.quiet.phoneTz !== i.quiet.venueTz ? [i.quiet.phoneTz] : [])];
+}
 
-  // Wait until every zone is out of quiet hours, plus the morning jitter.
-  let until = i.now;
+/** From `start` (inside quiet hours somewhere), the moment every zone is out of them (no jitter). */
+function quietWindowEnd(zones: string[], window: { start: string; end: string }, start: number): number {
+  let until = start;
   for (let pass = 0; pass < 3; pass += 1) {
     const inside = zones.filter((tz) => isInWindow(new Date(until), tz, window));
     if (!inside.length) break;
@@ -226,6 +234,19 @@ function ruleQuiet(i: GateInput): RuleCheck {
     const from = until;
     for (const tz of inside) until = Math.max(until, windowEnd(new Date(from), tz, window).getTime());
   }
+  return until;
+}
+
+function ruleQuiet(i: GateInput): RuleCheck {
+  if (i.purpose === 'service' && i.urgent) return allow('quiet_hours', 'urgent info message');
+  const window = i.purpose === 'service' ? i.quiet.utilityWindow : i.quiet.window;
+  const now = new Date(i.now);
+  const zones = quietZones(i);
+  const quietIn = zones.filter((tz) => isInWindow(now, tz, window));
+  if (!quietIn.length) return allow('quiet_hours', `${hhmm(now, i.quiet.venueTz)} ${i.quiet.venueTz} is outside ${window.start}–${window.end}`);
+
+  // Wait until every zone is out of quiet hours, plus the morning jitter.
+  let until = quietWindowEnd(zones, window, i.now);
   until = afterQuietHours(new Date(until), i.quiet.jitterMinutes, i.jitterKey);
   const tz = quietIn[0];
   const fact = `${hhmm(now, tz)} ${tz} is inside ${window.start}–${window.end} → ${hhmm(new Date(until), tz)}`;
@@ -233,6 +254,43 @@ function ruleQuiet(i: GateInput): RuleCheck {
     return { rule: 'quiet_hours', verdict: 'skip', fact: `${fact}, too late for this step`, reason: 'quiet_hours_expired' };
   }
   return { rule: 'quiet_hours', verdict: 'defer', fact, reason: 'quiet_hours', until };
+}
+
+/** "35 min", "4 h", "1 h 20 min" (never negative; rounded down, so a hold never reads "4 h ago, gap 4 h"). */
+function spanText(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / MINUTE_MS));
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+/**
+ * PR F0: no two marketing messages to one person within `minGapMs`, whichever venue or
+ * owner sent the first (quiet hours alone let every held message go at 09:00–09:20).
+ * Waits for the gap plus a repeatable 0–20 min; a gap that ends inside quiet hours goes on
+ * to their end (one hop). Past the step's `expireAfter` the message is skipped.
+ */
+function ruleSpacing(i: GateInput): RuleCheck {
+  if (i.purpose === 'service') return allow('spacing', 'info message — not counted');
+  const s = i.spacing;
+  if (!s || !(s.minGapMs > 0)) return allow('spacing', 'no gap between messages is set');
+  const gap = spanText(s.minGapMs);
+  if (s.lastAt === null) return allow('spacing', `no other marketing message in the last ${gap}`);
+  const ago = spanText(i.now - s.lastAt);
+  const readyAt = s.lastAt + s.minGapMs;
+  if (i.now >= readyAt) return allow('spacing', `last marketing message ${ago} ago (gap ${gap})`);
+
+  let until = spacingSpread(readyAt, i.quiet.jitterMinutes, i.jitterKey);
+  const zones = quietZones(i);
+  if (zones.some((tz) => isInWindow(new Date(until), tz, i.quiet.window))) {
+    until = afterQuietHours(new Date(quietWindowEnd(zones, i.quiet.window, until)), i.quiet.jitterMinutes, i.jitterKey);
+  }
+  const fact = `last marketing message ${ago} ago, gap ${gap} → ${hhmm(new Date(until), i.quiet.venueTz)}`;
+  if (i.expireAfterMs !== null && until > i.enteredAt + i.expireAfterMs) {
+    return { rule: 'spacing', verdict: 'skip', fact: `${fact}, too late for this step`, reason: 'spacing_expired' };
+  }
+  return { rule: 'spacing', verdict: 'defer', fact, reason: 'spacing', until };
 }
 
 function ruleFairUse(i: GateInput): RuleCheck {
@@ -266,6 +324,7 @@ const RULES: Array<(i: GateInput) => RuleCheck> = [
   ruleDiffer,
   ruleWeekly,
   ruleQuiet,
+  ruleSpacing,
   ruleFairUse,
   ruleCredits,
 ];
@@ -286,6 +345,7 @@ export const GATE_RULE_ORDER: RuleName[] = [
   'must_differ',
   'weekly_limit',
   'quiet_hours',
+  'spacing',
   'fair_use',
   'credits',
 ];

@@ -19,6 +19,7 @@ export const ADAPTIVE_CONFIG_V1: AdaptiveConfig = {
   replyNoticeCooldownDays: 30,
   utilityFairUsePerVenuePerMonth: 300,
   deferJitterMinutes: [0, 20],
+  marketingGapHours: 4,
   retention: { eventsMonths: 25, anonymizeAfterMonths: 24, anonymizeFloorMonths: 12 },
   killSwitch: { sendingPaused: true, reason: 'Engine not launched yet' },
 };

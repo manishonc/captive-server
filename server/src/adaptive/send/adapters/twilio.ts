@@ -6,8 +6,9 @@
  *  - `timeout` is in MILLISECONDS (default 30000; 0 would silently mean 30000)
  *    and is a socket-inactivity timeout, not a total deadline, hence the outer
  *    hard deadline;
- *  - never `scheduleType` / `sendAt` (the queue owns timing) and never
- *    `smartEncoded` (credits are priced from our own text).
+ *  - never `scheduleType` / `sendAt` (the queue owns timing), and `smartEncoded: false`
+ *    sent explicitly (PR F0): credits are priced from our own text, and a Messaging Service
+ *    with Smart Encoding switched on in the console would otherwise change it after pricing.
  *
  * `statusCallback` must be byte-identical to services/twilio.ts and to what
  * routes/twilioWebhook.ts validates: raw SERVER_PUBLIC_URL, no trim, no query
@@ -119,6 +120,7 @@ export function createTwilioSmsAdapter(opts: TwilioAdapterOptions = {}): Channel
       body: sms.body,
       ...(mss ? { messagingServiceSid: mss } : { from: process.env.TWILIO_PHONE_NUMBER as string }),
       ...(publicUrl ? { statusCallback: `${publicUrl}/webhook/twilio/sms-status` } : {}),
+      smartEncoded: false,
     };
 
     // The SDK validates parameters synchronously, before any request exists;

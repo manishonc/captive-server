@@ -63,7 +63,7 @@ export interface ReplaySnapshot {
   stage: ReplayStage;
   /** Rule 1's inputs (every stage). */
   system: ReplaySystem;
-  /** Stage `gate`: the other nine rules' inputs. */
+  /** Stage `gate`: the other rules' inputs. */
   gate: ReplayGate | null;
   /** Stage `channel`: the channel pick's inputs. */
   channel: ReplayChannel | null;
@@ -119,6 +119,8 @@ function storedGate(i: GateInput): ReplayGate {
       utilityWindow: { start: i.quiet.utilityWindow.start, end: i.quiet.utilityWindow.end },
       jitterMinutes: [i.quiet.jitterMinutes[0], i.quiet.jitterMinutes[1]],
     },
+    // A run-time input without it (it is required by type) is stored as "gap off".
+    spacing: i.spacing ? { lastAt: i.spacing.lastAt, minGapMs: i.spacing.minGapMs } : { lastAt: null, minGapMs: 0 },
     fairUse: { count: i.fairUse.count, limit: i.fairUse.limit },
     credits: { price: i.credits.price, spendable: i.credits.spendable, waitStartedAt: i.credits.waitStartedAt, queueHours: i.credits.queueHours },
   };
@@ -225,6 +227,8 @@ function systemInput(stored: DecisionRecord, snap: ReplaySnapshot): GateInput {
 function gateInputFrom(stored: DecisionRecord, gate: ReplayGate, system: ReplaySystem, sendKey: string): GateInput {
   return {
     ...gate,
+    // A snapshot from before PR F0 has no `spacing`: gap 0, so the rule reads "no gap set".
+    spacing: gate.spacing ?? { lastAt: null, minGapMs: 0 },
     now: stored.at,
     mode: stored.mode,
     purpose: stored.purpose,
