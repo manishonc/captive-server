@@ -111,6 +111,10 @@ export interface VariantDoc {
   updatedAt: StoredTime;
   createdBy: string;
   schemaVersion: number;
+  /** PR F0: the seed upgrades applied to this platform wording (seed/wordingUpgrades.ts). */
+  seedUpgrades?: string[];
+  /** PR F0: who changed it last (`seed` for an upgrade). */
+  updatedBy?: string;
 }
 
 export interface OverlapInfo {

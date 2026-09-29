@@ -16,7 +16,7 @@
  */
 
 import { db } from '../../../firebase';
-import { smsSegments } from '../../../services/smsBilling';
+import { smsSegmentCount } from '../../core/runtime/smsParts';
 import { sandboxEnabled } from '../../engine/clock';
 import { COL } from '../../store/collections';
 import type { ChannelAdapter, Outbound, ProviderResult } from './types';
@@ -76,7 +76,7 @@ export function createSandboxAdapter(channel: 'email' | 'sms'): ChannelAdapter {
       if (failure) return failure;
 
       const providerMessageId = sandboxMessageId(message);
-      const segments = message.kind === 'sms' ? smsSegments(message.body) : null;
+      const segments = message.kind === 'sms' ? smsSegmentCount(message.body) : null;
       const doc =
         message.kind === 'email'
           ? {

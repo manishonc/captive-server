@@ -45,6 +45,7 @@ import {
   setLaunch,
   setupVenue,
   test,
+  withoutReviewAsk,
   type AnyDoc,
   type VenueFixture,
 } from './helpers';
@@ -77,6 +78,8 @@ async function annaStory(): Promise<Story> {
   await resetEmulator();
   await seedCatalogue();
   await setupVenue(E);
+  // PR F0: the review ask would wake with the welcome at 09:00–09:20 and, going first, hold it 4 h.
+  await withoutReviewAsk(E);
   await seedWallet(E.tenant, 5000);
   await setLaunch({ [E.tenant]: 'live' }, { paused: false });
   const tue = nextTuesday1240();
@@ -183,7 +186,7 @@ async function main() {
 
       const send = g.sends.find((x: any) => x.sendKey === s.send.id);
       assert(send, 'the send is listed');
-      assertEqual(rulesOf(send.decision), GATE_RULE_ORDER, 'send: the 10 rules in order');
+      assertEqual(rulesOf(send.decision), GATE_RULE_ORDER, 'send: the 11 rules in order');
       assert(factsOk(send.decision) && send.decision.checks.every((c: any) => c.ok), 'send: every rule passed, each with a fact');
       assert(send.statusHistory.some((h: any) => h.type === 'message.sent'), 'send: provider status history from message.* events');
 
@@ -193,7 +196,7 @@ async function main() {
       ] as const) {
         const e = g.events.find((x: any) => x.id === ev.id);
         assert(e, `${label}: the event is listed`);
-        assertEqual(rulesOf(e.data.decision), GATE_RULE_ORDER, `${label}: the 10 rules in order`);
+        assertEqual(rulesOf(e.data.decision), GATE_RULE_ORDER, `${label}: the 11 rules in order`);
         assert(factsOk(e.data.decision), `${label}: a fact for each rule`);
         assertEqual(e.data.decision.checks.filter((c: any) => !c.ok).map((c: any) => c.rule)[0], failing, `${label}: the first failing rule`);
         const item = g.timeline.find((i: any) => i.detail?.eventId === ev.id);

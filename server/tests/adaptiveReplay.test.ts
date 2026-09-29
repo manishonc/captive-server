@@ -97,6 +97,7 @@ function gateInput(over: Partial<GateInput> = {}): GateInput {
     diff: { lastTouch: { channel: 'email', variantId: 'var_9d8c7b6a5f4e3d2c1b0a99887766554a', slot: 'afternoon', sendKey: 'js_0a1b2c3d4e5f60718293a4b5c6d7e8f9', purpose: 'marketing', at: T0 - 2 * 24 * HOUR_MS }, variantId: 'var_1a2b3c4d5e6f708192a3b4c5d6e7f809', slot: 'now' },
     weekly: { count: 1, limit: 3 },
     quiet: { venueTz: TZ, phoneTz: null, window: { start: '21:00', end: '09:00' }, utilityWindow: { start: '22:00', end: '08:00' }, jitterMinutes: [0, 20] },
+    spacing: { lastAt: null, minGapMs: 0 },
     fairUse: { count: 0, limit: 300 },
     credits: { price: 15, spendable: 100, waitStartedAt: null, queueHours: 72 },
   };
@@ -328,7 +329,7 @@ test('a replayable answer: same, stage, engine versions, sentences in EN/DE', ()
   assert(a.replayable === true && a.same && a.stage === 'gate' && a.engine.sameCode && a.engine.recorded === ENGINE_RUNTIME_VERSION, JSON.stringify(a));
   if (a.replayable) {
     assert(a.sentence.stored === a.sentence.replayed && a.sentence.stored.startsWith('Zurückgehalten bis'), a.sentence.stored);
-    assert(a.stored.until === a.replayed.until && a.replayed.checks.length === 10, 'summary');
+    assert(a.stored.until === a.replayed.until && a.replayed.checks.length === 11, 'summary');
   }
   const older = replayAnswer({ stored: stored({ ...d, versions: { ...d.versions, runtime: '2026-01-01.a' } }), replay: buildReplaySnapshot({ stage: 'gate', input: i }), sendKey: SEND_KEY, lang: 'en', tz: TZ });
   assert(older.replayable && !older.engine.sameCode && older.engine.recorded === '2026-01-01.a', 'another code version');
@@ -351,6 +352,8 @@ const WORST = gateInput({
   caps: { touches: 4, maxTouches: 5, clicks: 2, stopAfterClicks: 3 },
   weekly: { count: 2, limit: 3 },
   quiet: { venueTz: 'America/Argentina/ComodRivadavia', phoneTz: 'America/Indiana/Petersburg', window: { start: '21:00', end: '09:00' }, utilityWindow: { start: '22:00', end: '08:00' }, jitterMinutes: [0, 20] },
+  // PR F0: the longest spacing fact (a skip: "…, too late for this step").
+  spacing: { lastAt: LATE_AR - 2 * HOUR_MS, minGapMs: 48 * HOUR_MS },
   fairUse: { count: 299, limit: 300 },
   credits: { price: 150, spendable: 12345, waitStartedAt: LATE_AR - 5 * HOUR_MS, queueHours: 72 },
 });

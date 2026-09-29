@@ -2,7 +2,7 @@
  * Sending exactly once (plan §3.7) — the three phases of a live send:
  *
  *  1. One transaction: re-read what can change between the gate and now (the
- *     pause, consent, blocks, the weekly limit, a low rating, a cancelled stay) and run the gate
+ *     pause, consent, blocks, the weekly limit and spacing, a low rating, a cancelled stay) and run the gate
  *     again on it; then create the send record `dispatching`, add the weekly
  *     touch, bump the instance and park it on the send with a backstop timer.
  *  2. The provider call — one request, no automatic retries, 15 s timeout.
@@ -35,6 +35,7 @@ import { instanceRef, stateUpdate, type LoadedInstance } from '../engine/instanc
 import { applyPhoneStop } from '../engine/optouts';
 import { raiseAlert, dayKey } from '../engine/alerts';
 import type { ChannelAdapter, Outbound, ProviderResult } from './adapters/types';
+import { newestTouchAt } from './touches';
 
 /** A provider "try again later" answer is retried this many times, then the step is skipped. */
 export const MAX_DISPATCH_ATTEMPTS = 3;
@@ -112,6 +113,8 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
       address: { blocked: point?.suppression?.[p.channel]?.reason ?? null, lowRatingAt: tsMs(cv.lowRatingAt) },
       consent: { state: consentState(consentFor(contact, inst.meta.venueId)[p.channel]) },
       weekly: { ...p.gateInput.weekly, count: touches.filter((t) => (tsMs(t.at) ?? 0) >= weekAgo).length },
+      // PR F0: re-read here too, so two sends to one person claimed at the same time can't both pass.
+      spacing: { ...p.gateInput.spacing, lastAt: newestTouchAt(touches, sendKey) },
     };
     const gate = runGate(gi);
     if (gate.verdict !== 'allow') return { kind: 'gate', gate, input: gi } as const;
@@ -196,6 +199,12 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
   const marketing = p.purpose === 'marketing';
 
   if (result.kind === 'accepted') {
+    // PR F0: the provider's own part count replaces ours on the record, while the credits stay
+    // at our count. A difference means our counter and the carrier disagree (how a character is
+    // encoded, Smart Encoding): log it, so a pricing gap shows up.
+    if (p.channel === 'sms' && typeof result.segments === 'number' && typeof p.doc.smsSegments === 'number' && result.segments !== p.doc.smsSegments) {
+      console.warn(`[ADAPTIVE] ${result.provider} counted ${result.segments} SMS parts, Adaptive priced ${p.doc.smsSegments}:`, sendKey);
+    }
     const record = () => db.runTransaction(async (tx) => {
       const ev = sendEvent(p, 'message.sent', {
         channel: p.channel,

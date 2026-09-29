@@ -76,6 +76,14 @@ async function journeyNames(lang: 'en' | 'de'): Promise<Record<string, string>> 
   return out;
 }
 
+/** PR F0: each journey's purpose, so the owner's guest row can tell an info journey from marketing. */
+async function journeyPurposes(): Promise<Record<string, string>> {
+  const cat = await loadCatalogue();
+  const out: Record<string, string> = {};
+  for (const [key, rec] of cat.templates) out[key] = String(rec.header.purpose ?? 'marketing');
+  return out;
+}
+
 /**
  * For a German timeline: the offer labels of this tenant's venue setups, so an issued offer is
  * named in German (the event stores the English label). English needs no read: it uses the
@@ -159,6 +167,7 @@ export async function listGuests(tenantUserId: string, venueId: string, query: {
   const instSnaps = instanceIds.length ? await db.getAll(...instanceIds.map((id) => db.collection(COL.journeyInstances).doc(id))) : [];
   const insts = new Map(instSnaps.filter((s) => s.exists).map((s) => [s.id, s.data() as Record<string, any>]));
   const names = await journeyNames(lang);
+  const purposes = await journeyPurposes();
   const guests = cvs.map((c, i) => {
     const contact = (contactSnaps[i]?.data() ?? null) as ContactDoc | null;
     const journeys = Object.entries(c.doc.journeys ?? {})
@@ -167,6 +176,7 @@ export async function listGuests(tenantUserId: string, venueId: string, query: {
         return {
           journeyKey: key,
           name: names[key] ?? key,
+          purpose: purposes[key] ?? null,
           running: Boolean(inst && inst.status === 'active'),
           mode: inst?.mode === 'live' ? 'live' : inst ? 'test' : null,
           nextAt: iso(inst?.waiting?.untilAt),
@@ -287,6 +297,8 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
     journeyNames(lang),
     tenantOfferLabels(tenantUserId, lang),
   ]);
+  // PR F0: the cms drawer words a running marketing journey like the guest's row (the catalogue is cached).
+  const purposes = await journeyPurposes();
   const timeline = buildTimeline({
     tenantUserId,
     events: record.events,
@@ -324,6 +336,7 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
         endedAt: iso(i.data.endedAt),
         exitReason: i.data.exitReason ?? null,
         nextAt: i.data.status === 'active' ? iso(i.data.waiting?.untilAt) : null,
+        purpose: purposes[i.data.journeyKey] ?? null,
       }))
       .sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? ''))),
     stays: record.stays

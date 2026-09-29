@@ -121,6 +121,22 @@ export async function setLaunch(accounts: Record<string, LaunchMode>, opts: { de
   clearCaches();
 }
 
+/** PR F0: the gap between two marketing messages to one person (`marketingGapHours`; 0 = off). */
+export async function setMarketingGap(hours: number): Promise<void> {
+  await db.collection(COL.config).doc(CONFIG_DOC_ID).update({ marketingGapHours: hours });
+  clearCaches();
+}
+
+/**
+ * PR F0: the review ask off at this venue (restaurant_growth). It starts when the visit ends; held
+ * overnight with the welcome, both wake at 09:00–09:20, and with the 4 h gap whichever goes first
+ * holds the other — a race for a test that watches the welcome.
+ */
+export async function withoutReviewAsk(f: VenueFixture): Promise<void> {
+  await saveSetups(f.tenant, { playbookKey: 'restaurant_growth', venueIds: [f.venueId], journeys: { review_ask: { enabled: false, slots: {} } } }, { uid: `${f.tenant}_owner`, kind: 'tenant_user', role: 'ADMIN' });
+  clearCaches();
+}
+
 /** Safety limits on AdaptiveConfig/global (e.g. a high sign-up limit for bulk tests). */
 export async function setSafety(safety: Partial<{ maxSendsPerVenuePerDay: number; maxSendsPlatformPerDay: number; maxNewContactsPerApPerHour: number; staleAfterHours: number }>): Promise<void> {
   const update: Record<string, unknown> = {};

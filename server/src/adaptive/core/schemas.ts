@@ -300,6 +300,7 @@ export const channelContentSchema = z.object({
 });
 export type ChannelContent = z.infer<typeof channelContentSchema>;
 
+/** `emoji` describes the email only since PR F0: SMS never carry one (an emoji makes an SMS Unicode, 2–3× the parts). */
 export const variantAxesSchema = z.object({
   hook: z.string().max(30),
   length: z.enum(['short', 'medium', 'long']),
@@ -359,6 +360,11 @@ export const adaptiveConfigSchema = z.object({
   replyNoticeCooldownDays: z.number().int().min(0),
   utilityFairUsePerVenuePerMonth: z.number().int().min(0),
   deferJitterMinutes: z.tuple([z.number().int().min(0), z.number().int().min(0)]),
+  /**
+   * PR F0: hours between two marketing messages to one person (all venues); 0 = off. A doc
+   * without it — or with a bad value — reads 4, and never makes the rest of the doc unreadable.
+   */
+  marketingGapHours: z.number().min(0).max(48).catch(4),
   retention: z.object({
     eventsMonths: z.number().int().min(1),
     anonymizeAfterMonths: z.number().int().min(1),

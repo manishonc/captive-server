@@ -25,6 +25,14 @@ async function main() {
   for (const label of result.created) console.log(`  + ${label}`);
   console.log(`Already there (${result.skipped.length}):`);
   for (const label of result.skipped) console.log(`  = ${label}`);
+  if (result.upgraded?.length) {
+    console.log(`${apply ? 'Upgraded' : 'Would upgrade'} (${result.upgraded.length}):`);
+    for (const label of result.upgraded) console.log(`  ~ ${label}`);
+  }
+  if (result.keptEdited?.length) {
+    console.log(`Not upgraded, edited by hand (${result.keptEdited.length}):`);
+    for (const label of result.keptEdited) console.log(`  ! ${label}`);
+  }
   if (result.failed.length) {
     console.error('Failed:');
     for (const f of result.failed) console.error(`  ! ${f.label}: ${f.error}`);

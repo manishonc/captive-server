@@ -9,7 +9,7 @@
  *  - **Launch off writes nothing** — the default after deploy.
  *  - **The Anna trace (test run)**: welcome by SMS 15 min after connect, email with
  *    new wording in the afternoon after 48 h without a reaction, exhausted after the
- *    last wait — every "send" a dry run with a full 10-rule "why" record, no credits.
+ *    last wait — every "send" a dry run with a full 11-rule "why" record, no credits.
  *  - **A second visit redeems the offer** → thank-you (info message) → converted;
  *    a reconnect 4 h later is the same visit.
  *  - **Idempotent**: the UniFi double call and a replayed task give one contact,
@@ -124,7 +124,7 @@ async function main() {
     const s1 = sends[0];
     assertEqual([s1.status, s1.channel, s1.mode, s1.nodeId], ['dry_run', 'sms', 'test', 's1'], 'SMS welcome as a dry run');
     assertEqual(s1.decision.result, 'allow', 'gate allowed');
-    assertEqual(s1.decision.checks.length, 10, 'ten rules recorded');
+    assertEqual(s1.decision.checks.length, 11, 'eleven rules recorded');
     assert(s1.credits.amount > 0 && s1.credits.amount % 15 === 0, `priced per SMS segment (${s1.credits.amount})`);
     assertEqual(s1.credits.ledgerId, null, 'nothing charged');
     assert(String(s1.content.preview).includes('Anna'), `rendered in German with her name: ${s1.content.preview}`);

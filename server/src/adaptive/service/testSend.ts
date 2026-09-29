@@ -38,6 +38,7 @@ import { loadCatalogue, templateVersion } from './catalogue';
 import { loadGuestInfo, loadVenueContext } from '../engine/context';
 import { linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from '../engine/renderSend';
 import { composeEmail, maskSecretValues, placeholderLink, smsFinalText } from '../send/compose';
+import { renderText } from '../core/render';
 import { VISITOR_BASE_URL, validBookingUrl } from '../send/links';
 import { registerAdapters, type AdapterRegistry } from '../send/adapters';
 import { resolveStayTimes } from '../stays/times';
@@ -203,7 +204,7 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
     result = await adapter.send({ kind: 'sms', to, body: smsFinalText(rendered.text, wordingLang, template), sendKey });
   } else {
     const email = content.content as { preheader?: string; bodyFormat?: 'text' | 'html' | 'blocks' };
-    const pre = renderMessage({ text: email.preheader ?? '' }, 'sms', values).text;
+    const pre = renderText(email.preheader ?? '', values).text;
     // The footer tag as guests get it: hidden when the account's plan hides it (engine/sendPath.ts).
     const poweredBy = await getEntitlements(tenantUserId)
       .then((e) => !e.flags?.hidePoweredBy)

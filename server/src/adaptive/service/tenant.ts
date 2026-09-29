@@ -42,6 +42,8 @@ import {
 } from '../core/validateSetup';
 import { error as issueError, makeReport, type Issue, type ValidationReport } from '../core/issues';
 import { estimateMonthly, type EstimateResult } from '../core/estimate';
+import { journeySmsParts, withSmsSteps } from './estimateSms';
+import { pricingLinks } from '../send/links';
 import { renderText, sampleValues } from '../core/render';
 import type { Channel, Lang, VenueType } from '../core/constants';
 import { VENUE_TYPES } from '../core/constants';
@@ -249,6 +251,28 @@ export async function estimate(tenantUserId: string, body: unknown): Promise<Est
     },
     { returnRate: hints.returnRate, avgSpendMinor: hints.avgSpend.amountMinor },
   );
+  // PR F0: SMS priced the way the engine sends it — an SMS-first journey's first message by SMS at
+  // the parts its wording takes at each venue (its own name), the follow-ups on the next rung
+  // (email); the estimate above priced every touch as a one-part SMS.
+  const estimateVenues = [...venues.keys()].map((id) => ({ venueId: id, ...(stats.get(id) ?? { captures30d: 0, optedIn30d: 0, withPhone: 0, emailOnly: 0 }) }));
+  const smsLink = Object.values(pricingLinks(['offer']))[0] ?? '';
+  const journeysWithParts = journeyInputs.map((j) => {
+    const t = templates.get(j.journeyKey);
+    const smsParts: Record<string, number> = {};
+    for (const [venueId, v] of venues) {
+      smsParts[venueId] = t
+        ? journeySmsParts({ definition: t.definition, variants: cat.variants, venueName: v?.name || 'Your venue', slots: journeys[j.journeyKey]?.slots ?? {}, offers: playbook.content.offerMenuDefaults, link: smsLink })
+        : 1;
+    }
+    return { ...j, smsParts };
+  });
+  const estimatePrices = {
+    email: rateCard.channelRates.email.creditsPerMessage,
+    sms: rateCard.channelRates.sms.creditsPerSegment,
+    creditsPerUnit: rateCard.currencies[currency]?.creditsPerUnit ?? 100,
+    currency,
+  };
+  Object.assign(result, withSmsSteps(result, estimateVenues, journeysWithParts, estimatePrices));
   Object.assign(result, { audience: audienceByVenue });
   return { ...result, basis: 'Guests who said yes to messages in the last 30 days', returnRate: hints.returnRate, avgSpendMinor: hints.avgSpend.amountMinor };
 }

@@ -16,6 +16,7 @@ import type { ContactDoc } from '../store/engineTypes';
 import type { VariantDoc } from '../store/types';
 import { localDateForRender } from '../core/runtime/time';
 import { evaluateCondition, factsFrom } from '../core/runtime/conditions';
+import { smsCheaperText, smsSafeText } from '../core/runtime/smsParts';
 import type { StayTimes } from '../stays/times';
 
 export type LinkKind = 'offer' | 'rating' | 'hub' | 'booking' | 'unsubscribe';
@@ -165,6 +166,19 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/** Guest info fields an SMS carries exactly as typed (the secrets are also filled without `secret.`). */
+const SMS_EXACT_GUEST_INFO = new Set(['wifiName', 'wifiPassword', 'doorCode', 'keyInstructions']);
+
+/**
+ * PR F0: merge values an SMS carries exactly as typed — codes, the Wi-Fi name, links and web
+ * addresses (by field, and any value that is one: a blank of type url, say `slot.review_url`).
+ */
+export function smsKeepsExact(field: string, value?: string): boolean {
+  if (field.startsWith('guestinfo.secret.') || field.startsWith('link.') || field.endsWith('Url')) return true;
+  if (value !== undefined && /^\s*https?:\/\//i.test(value)) return true;
+  return field.startsWith('guestinfo.') && SMS_EXACT_GUEST_INFO.has(field.slice('guestinfo.'.length));
+}
+
 /**
  * Renders one channel's content. For email, merge values are HTML-escaped (a name
  * comes from a public form) and subjects are kept to one line.
@@ -172,14 +186,24 @@ function escapeHtml(s: string): string {
 export function renderMessage(content: any, channel: Channel, values: RenderValues): RenderedMessage {
   const missing = new Set<string>();
   const fields = new Set<string>();
-  const fill = (text: string, html: boolean) => {
+  const fillWith = (text: string, safe: RenderValues) => {
     for (const e of parseMergeExpressions(text)) fields.add(canonicalField(e.name));
-    const safe: RenderValues = html ? Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v === undefined ? v : escapeHtml(v)])) : values;
     const r = renderText(text, safe);
     r.unknown.forEach((u) => missing.add(u));
     return r.text;
   };
-  if (channel === 'sms') return { text: fill(String(content.text ?? ''), false), missing: [...missing], fieldsUsed: [...fields] };
+  const fill = (text: string, html: boolean) =>
+    fillWith(text, html ? Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v === undefined ? v : escapeHtml(v)])) : values);
+  if (channel === 'sms') {
+    // PR F0: typographic punctuation in the values (a name typed on a phone) would make the SMS Unicode.
+    // Codes, the Wi-Fi name and links go exactly as typed; the cleaned text only when it makes the SMS GSM-7 without more parts (smsCheaperText).
+    const template = String(content.text ?? '');
+    const smsValues: RenderValues = Object.fromEntries(
+      Object.entries(values).map(([k, v]) => [k, v === undefined || smsKeepsExact(k, v) ? v : smsSafeText(v)]),
+    );
+    const text = smsCheaperText(fillWith(template, values), fillWith(template, smsValues));
+    return { text, missing: [...missing], fieldsUsed: [...fields] };
+  }
   if (channel === 'email') {
     const subject = fill(String(content.subject ?? ''), false).replace(/[\r\n]+/g, ' ').trim();
     const body = fill(String(content.body ?? ''), content.bodyFormat === 'html');

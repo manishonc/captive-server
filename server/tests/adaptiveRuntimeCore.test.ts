@@ -373,6 +373,7 @@ function gateInput(over: Partial<GateInput> = {}): GateInput {
     diff: { lastTouch: null, variantId: 'var_a', slot: 'now' },
     weekly: { count: 0, limit: 3 },
     quiet: { venueTz: TZ, phoneTz: null, window: { start: '21:00', end: '09:00' }, utilityWindow: { start: '22:00', end: '08:00' }, jitterMinutes: [0, 20] },
+    spacing: { lastAt: null, minGapMs: 0 },
     fairUse: { count: 0, limit: 300 },
     credits: { price: 15, spendable: 100, waitStartedAt: null, queueHours: 72 },
   };
@@ -382,7 +383,7 @@ function gateInput(over: Partial<GateInput> = {}): GateInput {
 test('everything fine → allow, with one fact per rule', () => {
   const g = runGate(gateInput());
   assertEqual(g.verdict, 'allow', 'allow');
-  assertEqual(g.checks.length, 10, 'ten rules');
+  assertEqual(g.checks.length, 11, 'eleven rules (PR F0 added spacing)');
   assert(g.checks.find((c) => c.rule === 'journey_caps')?.fact === 'touches 0/5', 'touches fact');
 });
 

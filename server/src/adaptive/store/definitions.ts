@@ -93,6 +93,20 @@ export async function listQuestions(): Promise<Question[]> {
   return snap.docs.map((d) => d.data() as Question).sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
+const warnedGaps = new Set<string>();
+
+/**
+ * PR F0: a `marketingGapHours` that isn't a number from 0 to 48 reads as 4 h (`.catch` in the
+ * schema) — said once per process and value, as the config is read on every catalogue refresh.
+ */
+function warnGap(raw: unknown): void {
+  // A number as itself (JSON would print NaN and Infinity as null).
+  const key = (typeof raw === 'number' ? String(raw) : String(JSON.stringify(raw) ?? raw)).slice(0, 40);
+  if (warnedGaps.has(key)) return;
+  warnedGaps.add(key);
+  console.warn(`[ADAPTIVE] AdaptiveConfig/global marketingGapHours ${key} is not a number from 0 to 48; using 4 h`);
+}
+
 /**
  * Platform rules. Falls back to the seeded v1 values (never looser) when the doc
  * is missing or malformed, so a bad write can't loosen a bound.
@@ -103,6 +117,7 @@ export async function getAdaptiveConfig(): Promise<AdaptiveConfig & { version: n
     if (snap.exists) {
       const data = snap.data() as Record<string, unknown>;
       const parsed = adaptiveConfigSchema.safeParse(data);
+      if (parsed.success && data.marketingGapHours !== undefined && data.marketingGapHours !== parsed.data.marketingGapHours) warnGap(data.marketingGapHours);
       if (parsed.success) return { ...parsed.data, version: Number(data.version) || null };
       console.error('[ADAPTIVE] AdaptiveConfig/global is malformed; using the seeded defaults');
     }

@@ -120,6 +120,8 @@ const REASON_WORDS: Record<string, Record<'en' | 'de', string>> = {
   weekly_limit: { en: 'the guest already got the most marketing messages allowed this week (including from other places)', de: 'der Gast diese Woche schon die erlaubte Zahl Werbenachrichten erhalten hat (auch von anderen Orten)' },
   quiet_hours: { en: 'it was quiet hours', de: 'Ruhezeit war' },
   quiet_hours_expired: { en: 'quiet hours would have made it too late', de: 'es wegen der Ruhezeit zu spät gewesen wäre' },
+  spacing: { en: 'the guest had just got another marketing message (including from other places)', de: 'der Gast gerade eine andere Werbenachricht erhalten hatte (auch von anderen Orten)' },
+  spacing_expired: { en: "waiting after the guest's last marketing message would have made it too late", de: 'es wegen des Abstands zur letzten Werbenachricht zu spät gewesen wäre' },
   fair_use: { en: 'this venue reached its monthly info-message limit', de: 'dieser Standort sein monatliches Limit für Info-Nachrichten erreicht hat' },
   credits: { en: 'there were not enough credits', de: 'nicht genug Credits vorhanden waren' },
   credits_expired: { en: 'there were not enough credits for too long', de: 'zu lange nicht genug Credits vorhanden waren' },
@@ -154,6 +156,16 @@ function reasonText(record: DecisionRecord, l: 'en' | 'de'): string {
       return l === 'de'
         ? `der Gast in den letzten 7 Tagen schon ${m[1]} Werbenachrichten erhalten hat (Limit ${m[2]}, auch von anderen Orten)`
         : `the guest already got ${m[1]} marketing messages in the last 7 days (limit ${m[2]}, including from other places)`;
+    }
+  }
+  if (reason === 'spacing') {
+    // "last marketing message 35 min ago, gap 4 h → 13:07": the gap is copied, never assumed.
+    const m = /gap (\d+) h →/.exec(fact);
+    if (m) {
+      const one = m[1] === '1';
+      return l === 'de'
+        ? `der Gast ${one ? 'in der letzten Stunde' : `in den letzten ${m[1]} Stunden`} schon eine Werbenachricht erhalten hatte (auch von anderen Orten)`
+        : `the guest already got a marketing message in the last ${one ? 'hour' : `${m[1]} hours`} (including from other places)`;
     }
   }
   if (reason === 'credits_expired') {
