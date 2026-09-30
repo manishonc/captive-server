@@ -20,6 +20,11 @@ export const visitIdFor = (connectEventId: string) => hashId('vi', connectEventI
 /** One booking of one feed. The feed id is `venue_{venueId}`, so a delete and re-add keeps the stay ids. */
 export const stayIdFor = (feedId: string, uid: string) => hashId('st', `${feedId}:${uid}`);
 
+/** PR F1: a venue's arms for one journey step; the pooled arms of that step; the venue learner's state. */
+export const banditArmsIdFor = (venueId: string, journeyKey: string, nodeId: string) => hashId('ba', `venue:${venueId}:${journeyKey}:${nodeId}`);
+export const banditPoolIdFor = (journeyKey: string, nodeId: string) => hashId('pool', `${journeyKey}:${nodeId}`);
+export const banditLearnIdFor = (venueId: string) => `learn_${venueId}`;
+
 /** Tasks are spread over 16 shards so several workers can split the queue later. */
 export const SHARDS = 16;
 

@@ -258,6 +258,7 @@ export async function loadGuestRecord(contactId: string, tenantUserId: string | 
       venueId: d.venueId,
       decision: d.decision ?? null,
       kind: d.kind ?? null,
+      bandit: d.bandit ?? null,
       raw: d,
     };
   }

@@ -156,6 +156,11 @@
     { "collectionGroup": "CaptivePortal_StayFeeds", "fieldPath": "lastError", "indexes": [] },
     { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "replay", "indexes": [] },
     { "collectionGroup": "CaptivePortal_AdaptiveAlerts", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
-    { "collectionGroup": "signups", "fieldPath": "expireAt", "ttl": true, "indexes": [] }
+    { "collectionGroup": "signups", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneySends", "fieldPath": "bandit", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_BanditArms", "fieldPath": "segments", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_BanditArms", "fieldPath": "facts", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "waiting.variantPick", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "waiting.slotPick", "indexes": [] }
   ]
 }

@@ -16,7 +16,7 @@ import type { AdaptiveVenueDoc } from '../store/types';
 import type { Actor } from '../core/schemas';
 import { getVenues } from '../store/tenantData';
 import { ApiError, conflict } from '../api/errors';
-import { modeFor, readEngineSettings, venueHeld, venueNeedsStartSending, type LaunchMode } from '../store/engineSettings';
+import { banditModeFor, modeFor, readEngineSettings, venueHeld, venueNeedsStartSending, type LaunchMode } from '../store/engineSettings';
 import { venueHasSomethingOn } from '../core/runtime/hold';
 import { now, refreshClock, sandboxEnabled } from '../engine/clock';
 import { tsMs } from '../store/time';
@@ -41,7 +41,7 @@ export async function launchAwareOverview<V extends OverviewVenueLike>(
   tenantUserId: string,
   adaptiveDocs: AdaptiveVenueDoc[],
   venues: V[],
-): Promise<{ sendingLive?: boolean; sendingPaused?: boolean; launchMode?: LaunchMode; venues?: V[] }> {
+): Promise<{ sendingLive?: boolean; sendingPaused?: boolean; launchMode?: LaunchMode; banditOn?: boolean; venues?: V[] }> {
   try {
     const settings = await readEngineSettings();
     await refreshClock();
@@ -52,6 +52,9 @@ export async function launchAwareOverview<V extends OverviewVenueLike>(
       sendingLive: mode === 'live',
       sendingPaused: settings.paused,
       launchMode: mode,
+      // PR F1: HeidiFi's bandit picks wording and time for this account's live sends (off and test
+      // runs never train, so the owner's learning line shows only while it is live too).
+      banditOn: mode === 'live' && banditModeFor(settings, tenantUserId) === 'on',
       venues: venues.map((v) => {
         const av = byVenue.get(v.venueId);
         if (!v.adaptive || !av) return v;

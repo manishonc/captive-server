@@ -32,7 +32,7 @@ import { writeFileSync } from 'fs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL, ENGINE_STATUS_DOC_ID } from '../store/collections';
-import { anyAccountOn, readEngineSettingsStrict, SAFE_SETTINGS, type EngineSettings } from '../store/engineSettings';
+import { anyAccountOn, anyBanditOn, banditModeFor, readEngineSettingsStrict, SAFE_SETTINGS, type EngineSettings } from '../store/engineSettings';
 import { claimDue, completeTask, failTask, reclaimExpiredLeases, releaseTask, TASK_SCHEMA_VERSION, type ClaimedTask } from '../queue/firestoreQueue';
 import { now, refreshClock } from '../engine/clock';
 import { routeEvent, handleVisitEnd } from '../engine/route';
@@ -50,6 +50,9 @@ import { tsMs } from '../store/time';
 import { extendLease } from '../queue/firestoreQueue';
 import { pollFeed, stayFeedWatchdog } from '../stays/sync';
 import { handleStayTrigger, type StayTriggerPayload } from '../stays/moments';
+import { learnVenue, rebuildPools } from '../bandit/learn';
+import { learnTask, poolTask } from '../bandit/tasks';
+import { firestoreScheduler } from '../queue/firestoreQueue';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -60,6 +63,7 @@ const STALL_MS = 5 * 60_000;
 const HEARTBEAT_FILE = '/tmp/adaptive-heartbeat';
 const WORKER_ENTRY_TTL_MS = 24 * 60 * 60_000;
 const STAY_WATCHDOG_MS = 60 * 60_000;
+const POOL_ARM_MS = 60 * 60_000;
 
 type WorkerState = 'starting' | 'running' | 'idle_identity' | 'idle_indexes' | 'stopping';
 
@@ -76,6 +80,7 @@ export class AdaptiveWorker {
   private lastBeatAt = 0;
   private lastReclaimAt = 0;
   private lastStayWatchdogAt = 0;
+  private lastPoolArmAt = 0;
   private settings: EngineSettings = SAFE_SETTINGS;
   private settingsAt = 0;
   private state: WorkerState = 'starting';
@@ -162,6 +167,15 @@ export class AdaptiveWorker {
       }
     }
 
+    // PR F1: while the bandit is on anywhere, the pooled numbers are rebuilt once a day (one task
+    // per day, deduped), so a deleted account's share drops out even where no learner runs.
+    if (Date.now() - this.lastPoolArmAt > POOL_ARM_MS) {
+      this.lastPoolArmAt = Date.now();
+      if (anyBanditOn(this.settings)) {
+        await firestoreScheduler.schedule(poolTask(now())).catch((err) => console.warn('[ADAPTIVE WORKER] arming the pool rebuild failed:', err?.message || err));
+      }
+    }
+
     const tasks = await claimDue(this.id, now(), BATCH);
     if (!tasks.length) {
       await sleep(anyAccountOn(this.settings) ? POLL_MS : IDLE_POLL_MS);
@@ -238,12 +252,31 @@ export class AdaptiveWorker {
         case 'rollup_venue': {
           // The venue's daily numbers (rollups/rollup.ts); a big backlog continues shortly.
           const r = typeof task.payload.venueId === 'string' ? await rollupVenue(task.payload.venueId) : { more: false };
+          // PR F1: while the bandit is on for the account, its learner runs once an hour too.
+          if (typeof task.payload.venueId === 'string' && banditModeFor(env.settings, task.tenantUserId) === 'on') {
+            await firestoreScheduler.schedule(learnTask(task.payload.venueId, task.tenantUserId, env.now)).catch((err) => console.warn('[ADAPTIVE WORKER] arming the bandit learner failed:', err?.message || err));
+          }
           if (r.more) {
             await releaseTask(task.id, this.id, 5_000, env.now);
             return;
           }
           break;
         }
+        case 'learn_arms': {
+          // The bandit's learner for one venue (bandit/learn.ts); a backlog continues shortly.
+          if (typeof task.payload.venueId !== 'string') break;
+          const r = await learnVenue(task.payload.venueId, { engineNow: env.now, tenantUserId: task.tenantUserId, closeUntil: task.dueAt, onProgress: () => extendLease(task.id, this.id) });
+          // The run's work is committed: a failed arming mustn't fail it (the loop arms the pool hourly too).
+          await firestoreScheduler.schedule(poolTask(env.now)).catch((err) => console.warn('[ADAPTIVE WORKER] arming the pool rebuild failed:', err?.message || err));
+          if (r.more) {
+            await releaseTask(task.id, this.id, 5_000, env.now);
+            return;
+          }
+          break;
+        }
+        case 'learn_pool':
+          await rebuildPools({ onProgress: () => extendLease(task.id, this.id) });
+          break;
         case 'apply_config_inflight':
           // An owner's "apply to guests already in these journeys" save.
           await applyConfigInFlight(task.payload as any);
@@ -278,7 +311,7 @@ export class AdaptiveWorker {
       await failTask(task.id, this.id, message, env.now).catch(() => undefined);
     } finally {
       // Whatever this task wrote for the venue is counted by its next rollup.
-      if (task.kind !== 'rollup_venue') await ensureRollup(task.venueId, task.tenantUserId).catch((err) => console.warn('[ADAPTIVE WORKER] arming the rollup failed:', err?.message || err));
+      if (task.kind !== 'rollup_venue' && task.kind !== 'learn_arms' && task.kind !== 'learn_pool') await ensureRollup(task.venueId, task.tenantUserId).catch((err) => console.warn('[ADAPTIVE WORKER] arming the rollup failed:', err?.message || err));
       this.inflight -= 1;
     }
   }

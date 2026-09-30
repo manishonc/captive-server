@@ -11,8 +11,12 @@ import type { ChannelCheck } from './pickers';
 import type { RunMode } from './types';
 import { ENGINE_RUNTIME_VERSION } from './version';
 
-/** 2: `versions.runtime`, and the send / event keeps a replay snapshot next to it (core/runtime/replay.ts). */
-export const DECISION_VERSION = 2;
+/**
+ * 2: `versions.runtime`, and the send / event keeps a replay snapshot next to it (core/runtime/replay.ts).
+ * 3 (PR F1): the bandit's methods (`bandit:<level>`, `forced:require_diff`, `rotation:bandit_unavailable`)
+ * and, when it picked, its draws in `bandit` next to the decision (core/runtime/bandit.ts).
+ */
+export const DECISION_VERSION = 3;
 
 export interface DecisionRecord {
   v: number;

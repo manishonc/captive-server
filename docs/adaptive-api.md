@@ -228,6 +228,20 @@ Offer `status` (PR E follow-up): `expired` once past `expiresAt`, even when the 
 | `GET /admin/guests/:contactId` | `?lang` | the full record: contact, places, sends (with every rule's check and fact, `statusHistory`), consent ledger, instances, stays, blocks, weekly window, events, timeline | `adaptive.admin.guest_view` (GET, audited) |
 | `POST /admin/decisions/replay` | `{ sendKey \| eventId, lang?, actor }` | `{ replay: { replayable, same, stage, engine { recorded, current, sameCode }, stored, replayed, differences[], sentence } }` — decisions recorded before PR D answer `replayable: false` | `adaptive.decision.replay` |
 
+PR F1 (the bandit, docs/adaptive-engine.md): `GET /admin/launch` also returns `bandit { mode, accounts,
+changedBy }`; `PUT /admin/launch` also takes `change.bandit { mode?: 'off'|'on', accounts?: { tenant: 'off'|'on'|null } }`
+— turning it on (for the default or an account) is a loosening with the phrase "BANDIT ON", off is the
+brake. `POST /admin/decisions/replay` also answers `banditChecked: true` when the record had the bandit's
+draws (their differences are listed like any other). New:
+
+| Route | Body / query | Answer | Audit |
+|---|---|---|---|
+| `GET /admin/journeys/:key/bandit` | — | `{ journeyKey, bandit { mode, accountsOn, accountsOff }, lastLearnedAt, steps: [{ nodeId, pool, timing, defaultSlot, venues, wordings: [{ arm, variantId, letter, status, earlierText, pulls, closed, clicks, visits, ratings, unsubs, rate, chanceBest, retiredAt }], slots: [...] }] }` — every venue summed per marketing step of the published version (live from the venue docs), matched to today's wordings by content, `retiredAt` = venues where the wording retired; counts only | — |
+
+The owner overview (`GET /tenants/:t/overview`) also returns `banditOn` (the bandit picks wording and time
+for this account's live sends: on for the account and the account live). Sandbox: `POST /dev/launch` also takes `bandit`; `POST /dev/learn { venueId?, pool? }`
+runs the learner now (and the pooled rebuild) and returns the arms.
+
 Account names (`accountNames[…].name` on the launch card, `account.name` in guest search) come from
 the `Users` doc: `displayName`, then `display_name` (cms owner docs, PR E follow-up), `companyName`,
 `name` — the first that isn't empty; `null` when none.

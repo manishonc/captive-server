@@ -4,7 +4,8 @@
  *
  *   GET  /admin/engine        workers, versions, identity-key check, queue, index check
  *   POST /dev/clock           sandbox only — move the fake clock ({ advance: '48h' } | { at: ISO } | { reset: true })
- *   POST /dev/launch          sandbox only — set launch modes / the pause
+ *   POST /dev/launch          sandbox only — set launch modes / the pause (and the bandit, PR F1)
+ *   POST /dev/learn           sandbox only — the bandit learner now {venueId?, pool?} (PR F1)
  *   GET  /dev/guest-log       sandbox only — ?email= | ?phone= — events, sends, "why" sentences
  *   POST /dev/rollup          sandbox only — { venueId? } — the daily numbers now (no 2-min lag)
  *   POST /dev/provider-event  sandbox only — { sendKey, event: delivered|failed|opened|bounce|spam|
@@ -54,6 +55,7 @@ router.post('/dev/clock', handle(async (req) => engine.devClock(req.body ?? {}))
 router.post('/dev/launch', handle(async (req) => engine.devLaunch(req.body ?? {})));
 router.post('/dev/provider-event', handle(async (req) => engine.devProviderEvent(req.body ?? {})));
 router.post('/dev/rollup', handle(async (req) => engine.devRollup(req.body ?? {})));
+router.post('/dev/learn', handle(async (req) => engine.devLearn(req.body ?? {})));
 router.put('/dev/calendar/:name', handle(async (req) => engine.devPutCalendar(String(req.params.name ?? ''), req.body ?? {})));
 router.get('/dev/calendar/:name', async (req: Request, res: Response) => {
   try {

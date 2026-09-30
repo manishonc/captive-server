@@ -20,6 +20,9 @@ export type LaunchMode = 'off' | 'test' | 'live';
 
 const modeSchema = z.enum(['off', 'test', 'live']);
 
+export type BanditMode = 'off' | 'on';
+const banditModeSchema = z.enum(['off', 'on']);
+
 /** A time that may be a Timestamp, a Date or ms; anything unreadable is null (read as "unknown" → held). */
 const timeSchema = z.unknown().transform((v) => tsMs(v));
 /** When each account moved into live (PR D Start sending): the default's date, and per-account dates. */
@@ -50,6 +53,14 @@ const settingsSchema = z.object({
   sms: z.object({ allowedCountries: z.array(z.string().length(2)).catch(DEFAULT_SMS_COUNTRIES) }).catch({ allowedCountries: DEFAULT_SMS_COUNTRIES }),
   alerts: z.object({ email: z.string().email().nullable().catch(null) }).catch({ email: null }),
   killSwitch: z.object({ sendingPaused: z.boolean().catch(true) }).catch({ sendingPaused: true }),
+  // PR F1: the bandit — off unless HeidiFi turns it on (globally or per account); a bad value is off.
+  bandit: z
+    .object({
+      mode: banditModeSchema.catch('off'),
+      accounts: z.record(z.string(), banditModeSchema.catch('off')).catch({}),
+      changedBy: z.string().nullable().optional(),
+    })
+    .catch({ mode: 'off', accounts: {} }),
 });
 
 export interface EngineSettings {
@@ -64,6 +75,8 @@ export interface EngineSettings {
   sms: { allowedCountries: string[] };
   alerts: { email: string | null };
   paused: boolean;
+  /** PR F1: `off` = exactly the rotation of PR B; `on` = the bandit picks wording and slot. */
+  bandit?: { mode: BanditMode; accounts: Record<string, BanditMode>; changedBy: string | null };
 }
 
 export const SAFE_SETTINGS: EngineSettings = {
@@ -72,6 +85,7 @@ export const SAFE_SETTINGS: EngineSettings = {
   sms: { allowedCountries: DEFAULT_SMS_COUNTRIES },
   alerts: { email: null },
   paused: true,
+  bandit: { mode: 'off', accounts: {}, changedBy: null },
 };
 
 export function parseEngineSettings(data: Record<string, unknown> | undefined): EngineSettings {
@@ -82,6 +96,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     sms: data.sms ?? {},
     alerts: data.alerts ?? {},
     killSwitch: data.killSwitch ?? {},
+    bandit: data.bandit ?? {},
   });
   return {
     launch: {
@@ -94,7 +109,19 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     sms: p.sms,
     alerts: { email: p.alerts.email ?? null },
     paused: p.killSwitch.sendingPaused,
+    bandit: { mode: p.bandit.mode, accounts: p.bandit.accounts, changedBy: p.bandit.changedBy ?? null },
   };
+}
+
+/** PR F1: the bandit for one account — its override, else the global mode (missing = off). */
+export function banditModeFor(settings: EngineSettings, tenantUserId: string | null | undefined): BanditMode {
+  if (!tenantUserId || !settings.bandit) return 'off';
+  return settings.bandit.accounts[tenantUserId] ?? settings.bandit.mode;
+}
+
+/** Is the bandit on anywhere (the learner has work)? */
+export function anyBanditOn(settings: EngineSettings): boolean {
+  return Boolean(settings.bandit) && (settings.bandit!.mode === 'on' || Object.values(settings.bandit!.accounts).some((m) => m === 'on'));
 }
 
 /** Fresh read that throws when Firestore can't be read (the worker keeps its last good copy). */

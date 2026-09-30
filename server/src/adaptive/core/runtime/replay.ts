@@ -19,6 +19,7 @@ import { buildDecision, explainDecision, type DecisionRecord } from './decision'
 import { checkSystem, runGate, type GateInput, type GateResult, type RuleCheck, type RuleName } from './gate';
 import { checkChannel, pickChannel, type ChannelCheck, type ChannelFacts, type ChannelRule } from './pickers';
 import { ENGINE_RUNTIME_VERSION } from './version';
+import { checkBanditBlock, readBanditBlock } from './bandit';
 
 export const REPLAY_VERSION = 1;
 /** A snapshot stays under this (the decision itself stays under 2 KB). */
@@ -413,6 +414,8 @@ export type ReplayAnswer =
       sentence: { stored: string; replayed: string };
       /** Set when the send stopped after the gate allowed it, or a later stage wasn't recorded. */
       note: string | null;
+      /** PR F1: the bandit's picks and draws were re-checked (the record had them). */
+      banditChecked?: boolean;
     }
   | {
       replayable: false;
@@ -424,7 +427,7 @@ export type ReplayAnswer =
     };
 
 /** The answer for one stored decision (`replay` as read from Firestore; sentences in `tz`). */
-export function replayAnswer(args: { stored: DecisionRecord; replay: unknown; sendKey: string | null; lang: 'en' | 'de'; tz: string }): ReplayAnswer {
+export function replayAnswer(args: { stored: DecisionRecord; replay: unknown; sendKey: string | null; lang: 'en' | 'de'; tz: string; bandit?: unknown }): ReplayAnswer {
   const { stored, sendKey, lang, tz } = args;
   const snapshot = readReplaySnapshot(args.replay);
   if (!snapshot || !sendKey) {
@@ -439,16 +442,20 @@ export function replayAnswer(args: { stored: DecisionRecord; replay: unknown; se
   }
   const out = replayDecision(stored, snapshot, sendKey);
   const recorded = stored.versions?.runtime ?? null;
+  // PR F1: the pick from the stored θ, every θ drawn again from the seed, the pick = the decision's.
+  const block = readBanditBlock(args.bandit);
+  const banditDiffs = block ? checkBanditBlock(block, sendKey, stored) : [];
   return {
     replayable: true,
     sendKey,
-    same: out.same,
+    same: out.same && banditDiffs.length === 0,
     stage: out.stage,
     engine: { recorded, current: ENGINE_RUNTIME_VERSION, sameCode: recorded === ENGINE_RUNTIME_VERSION },
     stored: decisionSummary(stored),
     replayed: decisionSummary(out.replayed),
-    differences: out.differences,
+    differences: [...out.differences, ...banditDiffs],
     sentence: { stored: explainDecision(stored, lang, tz), replayed: explainDecision(out.replayed, lang, tz) },
     note: out.note,
+    ...(block ? { banditChecked: true } : {}),
   };
 }

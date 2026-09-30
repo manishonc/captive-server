@@ -30,7 +30,10 @@ export type TaskKind =
   | 'apply_config_inflight'
   // Airbnb stays (PR C): a calendar feed's 4-hourly poll (or a Sync now), and a stay moment
   | 'stay_poll'
-  | 'stay_trigger';
+  | 'stay_trigger'
+  // The bandit (PR F1): a venue's learner run, and the daily rebuild of the pooled priors
+  | 'learn_arms'
+  | 'learn_pool';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;

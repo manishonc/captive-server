@@ -4,6 +4,7 @@
  */
 
 import type { Channel } from '../constants';
+import type { BanditBlock } from './bandit';
 
 export type InstanceStatus =
   | 'active'
@@ -70,6 +71,10 @@ export interface WaitState {
   creditsShortFor?: { channel: string; price: number };
   /** Provider "try again later" answers so far for this send (capped). */
   dispatchAttempts?: number;
+  /** PR F1: the bandit's slot draw on the first look (the final record shows it). */
+  slotPick?: BanditBlock['slot'];
+  /** PR F1: the wording an earlier look of this send picked (sticky: a held send keeps it). */
+  variantPick?: { vid: string; method: string; part: BanditBlock['var'] };
 }
 
 export interface InstanceState {
