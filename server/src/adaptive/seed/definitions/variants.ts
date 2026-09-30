@@ -518,3 +518,99 @@ patchWording('wifi_info', 'A', (v) => {
   const de = v.locales?.de;
   if (de?.email) de.email = { ...de.email, preheader: 'Deine WLAN-Details und mehr' };
 });
+
+// ── PR F1 (F-D11): a second wording for the review ask, the last reminder and the stay review ──
+// So the bandit has something to compare at these steps (GSM-7 SMS, en + de). Each B SMS is never
+// longer in parts than its A, at any venue name, first name and offer (tests/adaptiveBandit.test.ts),
+// so the bandit compares wording, not cost. New letters are new docs: the create-only seed adds
+// them at the next boot. With the bandit off, the rotation sends B as a follow-up (review ask /
+// stay review s2), never first.
+
+VARIANTS_V1.push(
+  {
+    poolKey: 'review_ask',
+    journeyKey: 'review_ask',
+    letter: 'B',
+    name: 'Help us get better',
+    purpose: 'marketing',
+    axes: { hook: 'feedback', length: 'short', tone: 'personal', emoji: false },
+    channels: {
+      sms: { text: `${HI_EN}, your feedback helps {{venue.name}} improve: {{link.rating}}` },
+      email: {
+        subject: 'A quick question from {{venue.name}}',
+        preheader: 'Your feedback helps us',
+        bodyFormat: 'text',
+        body: `${HI_EN},\n\nthanks for coming to {{venue.name}}! Every rating comes straight to us and helps us get better. How was your visit? {{link.rating}}\n\nEvery guest can also leave a public review on Google.\n\n{{venue.name}}`,
+      },
+    },
+    locales: {
+      de: {
+        sms: { text: `${HI_DE}, dein Feedback macht {{venue.name}} besser: {{link.rating}}` },
+        email: {
+          subject: 'Eine kurze Frage von {{venue.name}}',
+          preheader: 'Dein Feedback hilft uns',
+          bodyFormat: 'text',
+          body: `${HI_DE},\n\ndanke, dass du bei {{venue.name}} warst! Jede Bewertung kommt direkt bei uns an und hilft uns, besser zu werden. Wie war dein Besuch? {{link.rating}}\n\nAlle Gäste können auch eine öffentliche Bewertung auf Google hinterlassen.\n\n{{venue.name}}`,
+        },
+      },
+    },
+  },
+  {
+    poolKey: 'last_chance',
+    journeyKey: 'welcome_second_visit',
+    letter: 'B',
+    name: 'Still yours',
+    purpose: 'marketing',
+    axes: { hook: 'ownership', length: 'short', tone: 'personal', emoji: false },
+    channels: {
+      sms: { text: `${HI_EN}, your offer at {{venue.name}} is reserved for you until {{offer.expiryDate | date:"d.M."}} {{link.offer}}` },
+      email: {
+        subject: 'Still yours: your offer at {{venue.name}}',
+        preheader: 'Kept for you until {{offer.expiryDate | date:"d.M."}}',
+        bodyFormat: 'text',
+        body: `${HI_EN},\n\n{{offer.label}} at {{venue.name}} is still yours. We're keeping it for you until {{offer.expiryDate | date:"d.M."}}\n\nShow this when you're here: {{link.offer}}\n\nSee you soon,\n{{venue.name}}`,
+      },
+    },
+    locales: {
+      de: {
+        sms: { text: `${HI_DE}, dein Angebot bei {{venue.name}} ist bis {{offer.expiryDate | date:"d.M."}} für dich reserviert: {{link.offer}}` },
+        email: {
+          subject: 'Noch für dich reserviert: dein Angebot bei {{venue.name}}',
+          preheader: 'Gültig bis {{offer.expiryDate | date:"d.M."}}',
+          bodyFormat: 'text',
+          body: `${HI_DE},\n\ndein Angebot bei {{venue.name}} ist noch bis {{offer.expiryDate | date:"d.M."}} für dich reserviert: {{offer.label}}.\n\nZeig das einfach vor Ort: {{link.offer}}\n\nBis bald,\n{{venue.name}}`,
+        },
+      },
+    },
+  },
+  {
+    poolKey: 'stay_review',
+    journeyKey: 'stay_review',
+    letter: 'B',
+    name: 'Tell your host',
+    purpose: 'marketing',
+    // The rating goes privately to the host (only the optional Google button is public): the hook is
+    // the direct line to them, not "helping future guests".
+    axes: { hook: 'host', length: 'short', tone: 'personal', emoji: false },
+    channels: {
+      sms: { text: `${HI_EN}, how was your stay at {{venue.name}}? Tell your host: {{link.rating}}` },
+      email: {
+        subject: 'Thank you for staying with us',
+        preheader: 'Tell your host how it was',
+        bodyFormat: 'text',
+        body: `${HI_EN},\n\nwe hope you enjoyed your stay at {{venue.name}}! Would you tell us how it was? Your rating comes straight to us: {{link.rating}}\n\n{{venue.name}}`,
+      },
+    },
+    locales: {
+      de: {
+        sms: { text: `${HI_DE}, wie war dein Aufenthalt in {{venue.name}}? Sag es deinem Gastgeber: {{link.rating}}` },
+        email: {
+          subject: 'Danke für deinen Aufenthalt',
+          preheader: 'Sag deinem Gastgeber, wie es war',
+          bodyFormat: 'text',
+          body: `${HI_DE},\n\nwir hoffen, du hattest einen schönen Aufenthalt in {{venue.name}}! Magst du uns sagen, wie es war? Deine Bewertung kommt direkt bei uns an: {{link.rating}}\n\n{{venue.name}}`,
+        },
+      },
+    },
+  },
+);

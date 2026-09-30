@@ -324,7 +324,8 @@ test('a record without a snapshot → replayable: false, with the consistency ch
 test('a replayable answer: same, stage, engine versions, sentences in EN/DE', () => {
   const i = gateInput({ now: LATE, enteredAt: LATE, intendedAt: LATE });
   const d = gateDecision(i);
-  assert(d.v === DECISION_VERSION && DECISION_VERSION === 2 && d.versions.runtime === ENGINE_RUNTIME_VERSION, 'v2 + versions.runtime');
+  // v3 since PR F1 (the bandit's methods and block); the runtime version rides along since v2.
+  assert(d.v === DECISION_VERSION && DECISION_VERSION === 3 && d.versions.runtime === ENGINE_RUNTIME_VERSION, 'v3 + versions.runtime');
   const a = replayAnswer({ stored: stored(d), replay: stored(buildReplaySnapshot({ stage: 'gate', input: i })), sendKey: SEND_KEY, lang: 'de', tz: TZ });
   assert(a.replayable === true && a.same && a.stage === 'gate' && a.engine.sameCode && a.engine.recorded === ENGINE_RUNTIME_VERSION, JSON.stringify(a));
   if (a.replayable) {

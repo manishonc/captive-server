@@ -26,6 +26,7 @@
 import { creditsWord, explainDecision, type DecisionRecord } from '../runtime/decision';
 import { isValidTimeZone } from '../runtime/time';
 import type { I18n } from '../schemas';
+import { readBanditBlock } from '../runtime/bandit';
 
 export type TimelineLang = 'en' | 'de';
 
@@ -61,6 +62,8 @@ export interface TimelineSendInput {
   decision?: DecisionRecord | null;
   /** `reply_notice` for the automatic answer to a plain SMS reply. */
   kind?: string | null;
+  /** PR F1: the send's bandit block (`JourneySends.bandit`, as stored); admin detail only. */
+  bandit?: unknown;
 }
 
 export interface TimelineConsentInput {
@@ -758,6 +761,7 @@ const DENY_KEYS = new Set([
   'address',
   'decision',
   'replay',
+  'bandit',
 ]);
 
 /** Email addresses and phone-like digit runs (9+ digits) out of free text. */
@@ -966,6 +970,9 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
         source: ev.source ?? null,
         data: safeData(data),
         decision: decisionDetail(decision),
+        // PR F1: the bandit's picks and draws (arm keys, α, β, θ — no guest data), from where the
+        // decision came from: the event's own, else the send's (a live `message.sent` row).
+        bandit: readBanditBlock(asDecision(data.decision) ? (data as Record<string, unknown>).bandit : send?.bandit) ?? undefined,
         send: send
           ? stripUndefined({ status: send.status, channel: send.channel, purpose: send.purpose ?? null, mode: send.mode ?? null, credits: send.credits ?? null, toMasked: send.toMasked ?? null, kind: send.kind ?? undefined })
           : undefined,

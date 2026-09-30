@@ -37,6 +37,8 @@ interface Loaded {
   replay: unknown;
   sendKey: string | null;
   venueId: string | null;
+  /** PR F1: the bandit's picks and draws, when the record has them. */
+  bandit?: unknown;
 }
 
 async function loadSend(sendKey: string): Promise<Loaded> {
@@ -44,7 +46,7 @@ async function loadSend(sendKey: string): Promise<Loaded> {
   if (!snap.exists) throw notFound('No send with that key.');
   const decision = asDecision(snap.get('decision'));
   if (!decision) throw notFound('That send has no decision record.');
-  return { decision, replay: snap.get('replay') ?? null, sendKey, venueId: (snap.get('venueId') as string | undefined) ?? null };
+  return { decision, replay: snap.get('replay') ?? null, sendKey, venueId: (snap.get('venueId') as string | undefined) ?? null, bandit: snap.get('bandit') ?? null };
 }
 
 async function load(req: { sendKey?: string; eventId?: string }): Promise<Loaded> {
@@ -58,7 +60,7 @@ async function load(req: { sendKey?: string; eventId?: string }): Promise<Loaded
   const data = (snap.get('data') ?? {}) as Record<string, unknown>;
   const sendKey = (snap.get('sendKey') as string | null | undefined) ?? null;
   const decision = asDecision(data.decision);
-  if (decision) return { decision, replay: data.replay ?? null, sendKey, venueId: (snap.get('venueId') as string | null | undefined) ?? null };
+  if (decision) return { decision, replay: data.replay ?? null, sendKey, venueId: (snap.get('venueId') as string | null | undefined) ?? null, bandit: data.bandit ?? null };
   // A live send's decision is on the send, not on its `message.sent` event.
   if (sendKey && validId(sendKey)) return loadSend(sendKey);
   throw notFound('That event has no decision record.');
@@ -84,5 +86,5 @@ export async function replayDecision(req: ReplayRequest): Promise<ReplayAnswer> 
   if (hasSend === hasEvent) throw new ApiError('bad_request', 'Give either a sendKey or an eventId.');
   const loaded = await load(hasSend ? { sendKey: req.sendKey } : { eventId: req.eventId });
   const tz = await zoneFor(loaded.replay, loaded.venueId);
-  return replayAnswer({ stored: loaded.decision, replay: loaded.replay, sendKey: loaded.sendKey, lang: req.lang === 'de' ? 'de' : 'en', tz });
+  return replayAnswer({ stored: loaded.decision, replay: loaded.replay, sendKey: loaded.sendKey, lang: req.lang === 'de' ? 'de' : 'en', tz, bandit: loaded.bandit });
 }

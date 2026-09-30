@@ -35,6 +35,8 @@ export const COL = {
   stays: 'CaptivePortal_Stays',
   /** Local sandbox only: calendar texts the `sandbox:calendar/<name>` links read. */
   sandboxCalendars: 'CaptivePortal_AdaptiveSandboxCalendars',
+  // The bandit (PR F1): arms per venue, journey and step; pooled priors; the learner's state
+  banditArms: 'CaptivePortal_BanditArms',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',

@@ -31,7 +31,12 @@ import { ENGINE_VERSION, SCHEMA_VERSION } from '../core/constants';
 import { sha256Hex } from '../core/checksum';
 import { consentFor, consentState } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
-import type { EngineSettings } from '../store/engineSettings';
+import { banditModeFor, type EngineSettings } from '../store/engineSettings';
+import { banditSeed, fitBanditBlock, pickSlot, pickWording, segmentOf, sentInSlot, type BanditBlock } from '../core/runtime/bandit';
+import { variantArmKey } from '../core/runtime/banditKeys';
+import { loadStepArms, type StepArms } from './banditArms';
+import { learnCloseTask } from '../bandit/tasks';
+import { firestoreScheduler } from '../queue/firestoreQueue';
 import { retentionFrom, tsMs } from '../store/time';
 import { getCreditConfig, getWalletSnapshot, onCreditsSpent } from '../../services/credits';
 import { creditsFor, providerCostFor } from '../send/pricing';
@@ -95,6 +100,9 @@ export type SendOutcome =
       dispatchAttempts?: number;
       /** Set when this step already bumped the instance (a dispatch that has to wait). */
       revAfter?: number | null;
+      /** PR F1: the bandit's slot draw and the wording picked so far (kept in the wait). */
+      slotPick?: BanditBlock['slot'];
+      variantPick?: { vid: string; method: string; part: BanditBlock['var'] };
       events: EventInput[];
     }
   /** Another worker is in the middle of this send: look again shortly. */
@@ -111,7 +119,7 @@ const DISPATCH_BUSY_RETRY_MS = 2 * MINUTE_MS;
  * Test-only hook (never set in production): runs right before a live send's phase-1 claim,
  * so an emulator test can change what the claim re-reads (PR F0: another message's touch).
  */
-export const __sendTestHooks: { beforeClaim?: (sendKey: string) => Promise<void> } = {};
+export const __sendTestHooks: { beforeClaim?: (sendKey: string) => Promise<void>; afterClaim?: (sendKey: string) => Promise<void> } = {};
 
 function lastClickChannel(contact: ContactDoc): Channel | null {
   return contact.engagement?.lastClickChannel ?? null;
@@ -147,6 +155,17 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const mode = inst.meta.mode;
   const lang = inst.meta.context.lang;
   const tz = inst.meta.context.venueTz;
+  // PR F1: the bandit picks the wording and the slot of this account's marketing sends (off = the rotation).
+  const banditOn = cfg.purpose === 'marketing' && banditModeFor(a.settings, inst.meta.tenantUserId) === 'on';
+  const segment = segmentOf(inst.meta.context);
+  let stepArms: StepArms | null | undefined; // undefined: not read yet; null: unavailable
+  const armsFor = async (): Promise<StepArms | null> => {
+    if (stepArms === undefined) stepArms = await loadStepArms(inst.meta.venueId, inst.meta.journeyKey, nodeId);
+    return stepArms;
+  };
+  const armsIn = (sa: StepArms) => ({ venue: sa.venue?.segments ?? null, pool: sa.pool?.segments ?? null });
+  const sameStepWait = inst.state.waiting?.nodeId === nodeId ? inst.state.waiting : null;
+  let slotPart: BanditBlock['slot'] = null;
 
   // ── 0. Resume: a record for this step means it was already decided ──
   const existing = await db.collection(COL.journeySends).doc(sendKey).get();
@@ -190,17 +209,27 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       intendedAt = a.reachedAt;
       slotRule = 'reached_late';
     } else {
-      const pick = pickTime(cfg.timing, now, tz, rules.slots, sendKey);
+      let timing = cfg.timing;
+      if (banditOn && cfg.timing.mode === 'slot') {
+        const sa = await armsFor();
+        const sp = sa ? pickSlot({ lastSlot: inst.state.lastTouch?.slot ?? null, requireDiffSlot: Boolean(cfg.requireDiff?.includes('slot')), segment, arms: armsIn(sa), seed: banditSeed(sendKey, 'slot') }) : null;
+        if (sp) {
+          timing = { ...cfg.timing, default: sp.slot };
+          slotPart = sp.part;
+        }
+      }
+      const pick = pickTime(timing, now, tz, rules.slots, sendKey);
       slot = pick.slot;
-      slotRule = pick.rule;
+      slotRule = slotPart ? `bandit:${slotPart.lvl}` : pick.rule;
       if (pick.at > now + MINUTE_MS) {
-        return { kind: 'later', at: pick.at, intendedAt: pick.at, slot, reason: 'slot', events: [] };
+        return { kind: 'later', at: pick.at, intendedAt: pick.at, slot, reason: 'slot', ...(slotPart ? { slotPick: slotPart } : {}), events: [] };
       }
     }
   } else {
     intendedAt = inst.state.waiting?.intendedAt ?? a.taskDueAt;
     slot = inst.state.waiting?.slot ?? 'now';
-    slotRule = `slot:${slot}`;
+    slotPart = banditOn ? sameStepWait?.slotPick ?? null : null;
+    slotRule = slotPart ? `bandit:${slotPart.lvl}` : `slot:${slot}`;
   }
 
   // ── 2. Facts ──
@@ -303,6 +332,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     const gate = systemGate(pre);
     const decision = buildDecision({ now, mode, poolKey: cfg.pool, purpose: cfg.purpose, gate, channelChecks: [], channel: { picked: null, rule: 'not reached' }, variant: { picked: null, method: 'none' }, slot: slotRecord, credits: null, versions });
     const replay = replaySnapshot({ stage: 'system', system });
+    // PR F1: the slot's draws go with the record (its rule says `bandit:…`), as on every later stop.
+    const preBandit: BanditBlock | null = banditOn && slotPart ? { v: 1, seg: segment, var: null, slot: slotPart } : null;
     if (pre.verdict === 'defer' && pre.until !== undefined) {
       const firstOfReason = inst.state.waiting?.lastDeferReason !== pre.reason;
       if (firstOfReason) void alertFor(pre.reason ?? null, a, tz);
@@ -317,10 +348,13 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         // unless the wallet (read above) can pay that message now.
         ...(stillCreditsShort(inst.state.waiting, nodeId, wallet) ? { creditsShort: true, creditsShortFor: inst.state.waiting!.creditsShortFor } : {}),
         ...(inst.state.waiting?.nodeId === nodeId && inst.state.waiting?.dispatchAttempts !== undefined ? { dispatchAttempts: inst.state.waiting.dispatchAttempts } : {}),
-        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until, replay } }] : [],
+        // PR F1: a held send keeps the bandit's picks.
+        ...(slotPart ? { slotPick: slotPart } : {}),
+        ...(banditOn && sameStepWait?.variantPick ? { variantPick: sameStepWait.variantPick } : {}),
+        events: firstOfReason ? [{ tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, type: 'send.deferred', occurredAt: now, data: { decision, until: pre.until, replay, ...(preBandit ? { bandit: preBandit } : {}) } }] : [],
       };
     }
-    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off', stayEnd(pre.reason), replay);
+    return skipWith(decision, a, sendKey, undefined, pre.reason === 'switched_off', stayEnd(pre.reason), replay, preBandit);
   }
 
   // ── 4. Channel ──
@@ -378,16 +412,52 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         lastClickChannel: lastClickChannel(contact),
       },
     });
-    return skipWith(decision, a, sendKey, undefined, false, null, replay);
+    return skipWith(decision, a, sendKey, undefined, false, null, replay, banditOn && slotPart ? { v: 1, seg: segment, var: null, slot: slotPart } : null);
   }
   const channel = pick.channel;
 
   // ── 5. Wording + render ──
-  const vpick = pickVariant(
-    variants.filter((v) => variantContent(v, channel, lang)).map((v) => ({ id: v.id, letter: v.letter })),
-    inst.state.lastTouch?.variantId ?? null,
-  );
+  const options = variants.filter((v) => variantContent(v, channel, lang));
+  const rotation = () => pickVariant(options.map((v) => ({ id: v.id, letter: v.letter })), inst.state.lastTouch?.variantId ?? null);
+  let vpick: { variantId: string | null; method: string };
+  let varPart: BanditBlock['var'] = null;
+  // PR F1: sticky per send — a held send keeps the wording its first look picked (while it has
+  // this channel, and while its text is the one that was drawn: an edited text is a new arm).
+  const sticky = banditOn ? sameStepWait?.variantPick : undefined;
+  if (sticky && options.some((v) => v.id === sticky.vid && (!sticky.part || sticky.part.pick === variantArmKey(v)))) {
+    vpick = { variantId: sticky.vid, method: sticky.method };
+    varPart = sticky.part ?? null;
+  } else if (banditOn) {
+    const sa = await armsFor();
+    const wp = sa
+      ? pickWording({
+          candidates: options.map((v) => ({ id: v.id, letter: v.letter, armKey: variantArmKey(v) })),
+          lastVariantId: inst.state.lastTouch?.variantId ?? null,
+          requireDiffVariant: Boolean(cfg.requireDiff?.includes('variant')),
+          segment,
+          arms: armsIn(sa),
+          seed: banditSeed(sendKey, 'var'),
+        })
+      : null;
+    if (wp) {
+      vpick = { variantId: wp.vid, method: wp.method };
+      varPart = wp.part;
+    } else {
+      const r = rotation();
+      // Unreadable arms with a real choice: say so (the rotation stood in).
+      vpick = !sa && options.length > 1 ? { variantId: r.variantId, method: 'rotation:bandit_unavailable' } : r;
+    }
+  } else {
+    vpick = rotation();
+  }
   const variant = variants.find((v) => v.id === vpick.variantId)!;
+  const banditBlock: BanditBlock | null = banditOn && (varPart || slotPart) ? fitBanditBlock({ v: 1, seg: segment, var: varPart, slot: slotPart }) : null;
+  // While the bandit is on, every wording pick is kept by a wait (one without draws too: a
+  // rotation stand-in or a forced pick), so a held send goes out with the wording it named.
+  const picks = {
+    ...(slotPart ? { slotPick: slotPart } : {}),
+    ...(banditOn ? { variantPick: { vid: variant.id, method: vpick.method, part: varPart } } : {}),
+  };
   const vc = variantContent(variant, channel, lang)!;
   // Links: same-length stand-ins for pricing and the gate (real ones are minted only
   // once the gate says yes), readable ones for the stored preview.
@@ -490,10 +560,10 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const common = { tenantUserId: inst.meta.tenantUserId, venueId: inst.meta.venueId, contactId: inst.meta.contactId, instanceId: inst.id, journeyKey: inst.meta.journeyKey, mode, nodeId, sendKey, channel, variantId: variant.id, slot };
 
   // ── 5. Outcome ──
-  if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz, replay });
+  if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz, replay, bandit: banditBlock, picks });
 
   if (gate.verdict === 'allow' && mode === 'test') {
-    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, replay, price, ladderPos: pick.ladderPos, contact, common });
+    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, replay, price, ladderPos: pick.ladderPos, contact, common, bandit: banditBlock });
   }
 
   if (gate.verdict === 'allow') {
@@ -525,11 +595,14 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       unsubscribeUrl,
       common,
       tz,
+      bandit: banditBlock,
+      picks,
+      slotWindow: slotPart?.pick ? rules.slots[slotPart.pick as keyof typeof rules.slots] : undefined,
     });
   }
 
   if (gate.verdict === 'block') void alertFor(gate.reason, a, tz);
-  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off', stayEnd(gate.reason), replay);
+  return skipWith(decision, a, sendKey, common, gate.reason === 'switched_off', stayEnd(gate.reason), replay, banditBlock);
 }
 
 /** A credit shortage from the last look at this step that the wallet still can't cover (unknown → it stands). */
@@ -557,7 +630,19 @@ function deferred(
   gate: GateResult,
   decision: DecisionRecord,
   a: SendArgs,
-  x: { intendedAt: number; slot: string; sendKey: string; common: Record<string, unknown>; tz: string; replay: ReplaySnapshot | null; revAfter?: number | null; dispatchAttempts?: number },
+  x: {
+    intendedAt: number;
+    slot: string;
+    sendKey: string;
+    common: Record<string, unknown>;
+    tz: string;
+    replay: ReplaySnapshot | null;
+    revAfter?: number | null;
+    dispatchAttempts?: number;
+    /** PR F1: the bandit's record, and the picks the wait keeps. */
+    bandit?: BanditBlock | null;
+    picks?: { slotPick?: BanditBlock['slot']; variantPick?: { vid: string; method: string; part: BanditBlock['var'] } };
+  },
 ): SendOutcome {
   const { inst } = a;
   const keepsIntended = gate.reason === 'paused' || gate.reason === 'lapse_unknown';
@@ -586,7 +671,11 @@ function deferred(
     ...((x.dispatchAttempts ?? (inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts : undefined)) !== undefined
       ? { dispatchAttempts: x.dispatchAttempts ?? inst.state.waiting!.dispatchAttempts }
       : {}),
-    events: firstOfReason || spacingMoved ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until, replay: x.replay } } as EventInput] : [],
+    ...(x.picks ?? {}),
+    events:
+      firstOfReason || spacingMoved
+        ? [{ ...x.common, type: 'send.deferred', occurredAt: a.now, data: { decision, until: gate.until, replay: x.replay, ...(x.bandit ? { bandit: x.bandit } : {}) } } as EventInput]
+        : [],
   };
 }
 
@@ -667,6 +756,10 @@ interface LiveArgs {
   unsubscribeUrl: string;
   common: Record<string, unknown>;
   tz: string;
+  /** PR F1: the bandit's record (null when it's off or had nothing to pick), the picks a wait keeps, the picked slot's window. */
+  bandit: BanditBlock | null;
+  picks: { slotPick?: BanditBlock['slot']; variantPick?: { vid: string; method: string; part: BanditBlock['var'] } };
+  slotWindow?: [string, string];
 }
 
 /** Live: mint the links, build the exact message, then the three phases (send/dispatch.ts). */
@@ -676,7 +769,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   const marketing = d.cfg.purpose === 'marketing';
   const block = (reason: string): SendOutcome => {
     void alertFor(reason, a, d.tz);
-    return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common, false, null, d.replay);
+    return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common, false, null, d.replay, d.bandit);
   };
   if (d.channel === 'whatsapp') return block('channel_not_ready');
   const channel = d.channel;
@@ -686,7 +779,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   const attempts = inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts ?? 0 : 0;
   if (attempts >= MAX_DISPATCH_ATTEMPTS) return block('provider_unavailable');
   const address = channel === 'email' ? d.contact.email : d.contact.phoneE164;
-  if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common, false, null, d.replay);
+  if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common, false, null, d.replay, d.bandit);
   if (channel === 'email' && marketing && !d.unsubscribeUrl) return block('email_unsubscribe_not_configured');
 
   // Real links, only now that the gate said yes.
@@ -763,6 +856,8 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     attribution: null,
     decision: d.decision,
     replay: d.replay,
+    // PR F1: `in` = the send went inside the picked slot (only such sends train the slot).
+    ...(d.bandit ? { bandit: d.bandit.slot ? { ...d.bandit, slot: { ...d.bandit.slot, in: sentInSlot(a.now, d.tz, d.slotWindow) } } : d.bandit } : {}),
     dispatchLease: dispatchLease(a.workerId),
     createdAt: new Date(a.now),
     sentAt: null,
@@ -791,6 +886,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     ladderPos: d.ladderPos,
     common: d.common,
     pendingEvents: [...(a.pendingEvents ?? [])],
+    picks: d.picks,
   };
 
   // ── Phase 1: re-check and claim ──
@@ -798,6 +894,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   const claim = await claimSend(live);
   // The claim wrote this run's earlier events; the final commit must not write them again.
   if (claim.kind === 'ok') a.pendingEvents?.splice(0, live.pendingEvents.length);
+  if (claim.kind === 'ok' && __sendTestHooks.afterClaim && process.env.FIRESTORE_EMULATOR_HOST) await __sendTestHooks.afterClaim(sendKey);
   if (claim.kind === 'conflict') return { kind: 'conflict' };
   if (claim.kind === 'gate') {
     // Something changed since the first look (paused, a STOP, the weekly limit…).
@@ -805,14 +902,16 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     const decision = d.decisionFor(g);
     // The snapshot of what the re-check read, not the first look (else Replay would answer "allow").
     const replay = replaySnapshot({ stage: 'gate', input: claim.input });
-    if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz, replay });
-    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off', stayEnd(g.reason), replay);
+    if (g.verdict === 'defer' && g.until !== null) return deferred(g, decision, a, { intendedAt: d.intendedAt, slot: d.slot, sendKey, common: d.common, tz: d.tz, replay, bandit: d.bandit, picks: d.picks });
+    return skipWith(decision, a, sendKey, d.common, g.reason === 'switched_off', stayEnd(g.reason), replay, d.bandit);
   }
 
   // ── Phase 2 + 3: the provider, then the record ──
   const result = await callProvider(adapter, message);
   const recorded = await recordResult(live, result, attempts);
   if (recorded.kind === 'sent') {
+    // PR F1: the learner closes this send once its 7 days are over, even if the venue goes quiet.
+    if (d.bandit) void firestoreScheduler.schedule(learnCloseTask(inst.meta.venueId, inst.meta.tenantUserId, a.now)).catch(() => undefined);
     return {
       kind: 'done',
       outcome: 'sent',
@@ -833,6 +932,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     creditsWaitStartedAt: inst.state.waiting?.creditsWaitStartedAt,
     dispatchAttempts: attempts + 1,
     revAfter: claim.revAfter,
+    ...d.picks,
     events: [],
   };
 }
@@ -864,6 +964,7 @@ function skipWith(
   suppress = false,
   stayEndReason: 'stay_cancelled' | 'stay_unlinked' | null = null,
   replay: ReplaySnapshot | null = null,
+  bandit: BanditBlock | null = null,
 ): SendOutcome {
   return {
     kind: 'done',
@@ -878,7 +979,7 @@ function skipWith(
         ...(common ?? { tenantUserId: a.inst.meta.tenantUserId, venueId: a.inst.meta.venueId, contactId: a.inst.meta.contactId, instanceId: a.inst.id, journeyKey: a.inst.meta.journeyKey, mode: a.inst.meta.mode, nodeId: a.nodeId, sendKey }),
         type: decision.result === 'block' ? 'send.blocked' : 'send.skipped',
         occurredAt: a.now,
-        data: { decision, replay },
+        data: { decision, replay, ...(bandit ? { bandit } : {}) },
       } as EventInput,
     ],
   };
@@ -900,6 +1001,7 @@ async function dryRun(p: {
   ladderPos: number;
   contact: ContactDoc;
   common: Record<string, unknown>;
+  bandit: BanditBlock | null;
 }): Promise<SendOutcome> {
   const { a, sendKey } = p;
   const now = a.now;
@@ -937,6 +1039,7 @@ async function dryRun(p: {
     attribution: null,
     decision: p.decision,
     replay: p.replay,
+    ...(p.bandit ? { bandit: p.bandit } : {}),
     dispatchLease: null,
     createdAt: new Date(now),
     sentAt: null,
@@ -953,7 +1056,7 @@ async function dryRun(p: {
     if (sendSnap.exists) return false;
     tx.create(db.collection(COL.journeySends).doc(sendKey), doc);
     tx.update(ref, { rev: readRev + 1, updatedAt: new Date(now) });
-    tx.set(eventRef(), eventDoc({ ...(p.common as any), type: 'send.dry_run', occurredAt: now, data: { decision: p.decision, replay: p.replay } }));
+    tx.set(eventRef(), eventDoc({ ...(p.common as any), type: 'send.dry_run', occurredAt: now, data: { decision: p.decision, replay: p.replay, ...(p.bandit ? { bandit: p.bandit } : {}) } }));
     return true;
   });
   if (!ok) return { kind: 'conflict' };

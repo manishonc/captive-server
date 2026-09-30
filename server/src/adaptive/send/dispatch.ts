@@ -36,6 +36,7 @@ import { applyPhoneStop } from '../engine/optouts';
 import { raiseAlert, dayKey } from '../engine/alerts';
 import type { ChannelAdapter, Outbound, ProviderResult } from './adapters/types';
 import { newestTouchAt } from './touches';
+import type { WaitState } from '../core/runtime/types';
 
 /** A provider "try again later" answer is retried this many times, then the step is skipped. */
 export const MAX_DISPATCH_ATTEMPTS = 3;
@@ -68,6 +69,8 @@ export interface LiveSend {
   common: Record<string, unknown>;
   /** Events from earlier steps of this run (written with the claim, so a lost final commit keeps them). */
   pendingEvents: EventInput[];
+  /** PR F1: the bandit's picks, kept in the parked wait (a provider retry whose commit is lost resumes with them). */
+  picks?: Pick<WaitState, 'slotPick' | 'variantPick'>;
 }
 
 /** `gate`: the re-check said no; `input` is what it really checked (the decision's replay snapshot is built from it). */
@@ -147,6 +150,8 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
             ...(prev?.nodeId === p.nodeId && prev.lastDeferReason ? { lastDeferReason: prev.lastDeferReason } : {}),
             ...(prev?.nodeId === p.nodeId && prev.creditsWaitStartedAt !== undefined ? { creditsWaitStartedAt: prev.creditsWaitStartedAt } : {}),
             ...(prev?.nodeId === p.nodeId && prev.dispatchAttempts !== undefined ? { dispatchAttempts: prev.dispatchAttempts } : {}),
+            ...(p.picks?.slotPick ? { slotPick: p.picks.slotPick } : {}),
+            ...(p.picks?.variantPick ? { variantPick: p.picks.variantPick } : {}),
           },
         },
         p.now,

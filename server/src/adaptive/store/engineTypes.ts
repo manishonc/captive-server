@@ -7,6 +7,7 @@ import type { Channel, Lang } from '../core/constants';
 import type { StoredTime } from './types';
 import type { DecisionRecord } from '../core/runtime/decision';
 import type { ReplaySnapshot } from '../core/runtime/replay';
+import type { ArmBlock, BanditBlock, Segment } from '../core/runtime/bandit';
 
 export type ConsentState = 'granted' | 'revoked';
 export type RevokedVia = 'channel' | 'page' | 'owner' | 'splash';
@@ -192,6 +193,8 @@ export interface JourneySendDoc {
   decision: DecisionRecord;
   /** What the rules read, so Replay can re-run the decision (v2 decisions; null when it couldn't be built). */
   replay?: ReplaySnapshot | null;
+  /** PR F1: the bandit's picks and draws (only when the bandit is on for the account; core/runtime/bandit.ts). */
+  bandit?: BanditBlock | null;
   dispatchLease: { owner: string; until: StoredTime } | null;
   createdAt: StoredTime;
   sentAt: StoredTime;
@@ -317,3 +320,34 @@ export interface StayDoc {
   updatedAt: StoredTime;
   schemaVersion: number;
 }
+
+// ── The bandit (PR F1) ───────────────────────────────────────────────────────
+
+/**
+ * `CaptivePortal_BanditArms/{banditArmsId(venue, journey, node)}`: one doc per venue, journey
+ * and send step — every segment's arms in one read by id. Only the learner writes it.
+ */
+export interface BanditArmsDoc {
+  scope: 'venue';
+  tenantUserId: string;
+  venueId: string;
+  journeyKey: string;
+  nodeId: string;
+  segments: Partial<Record<Segment | 'all', ArmBlock>>;
+  lastDriftAt: StoredTime | null;
+  updatedAt: StoredTime;
+  schemaVersion: number;
+}
+
+/** `pool_{hash(journey:node)}`: every venue's data summed, rebuilt from scratch daily (no tenant). */
+export interface BanditPoolDoc {
+  scope: 'pool';
+  tenantUserId: null;
+  journeyKey: string;
+  nodeId: string;
+  segments: Partial<Record<Segment | 'all', ArmBlock>>;
+  venues: number;
+  rebuiltAt: StoredTime;
+  schemaVersion: number;
+}
+

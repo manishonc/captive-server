@@ -56,6 +56,11 @@ export const launchChangeSchema = z
       .refine((cs) => cs.every((c) => KNOWN_PHONE_COUNTRIES.includes(c)), 'only countries the phone table knows')
       .optional(),
     alertsEmail: z.string().trim().email().max(254).nullable().optional(),
+    // PR F1: the bandit, globally and per account (`null` = follow the global switch again).
+    bandit: z
+      .object({ mode: z.enum(['off', 'on']).optional(), accounts: z.record(tenantKey, z.enum(['off', 'on']).nullable()).optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -76,6 +81,7 @@ function stateOf(s: EngineSettings): LaunchState {
     safety: s.safety,
     smsCountries: s.sms.allowedCountries,
     alertsEmail: s.alerts.email,
+    bandit: { mode: s.bandit?.mode ?? 'off', accounts: s.bandit?.accounts ?? {} },
   };
 }
 
@@ -162,7 +168,7 @@ export async function getLaunch() {
   ]);
   // Names for every account the card shows: the overrides and the ones with venues waiting
   // (an account that follows a live default has no override).
-  const names = await accountNames([...Object.keys(settings.launch.accounts), ...Object.keys(waiting)]).catch(() => {
+  const names = await accountNames([...Object.keys(settings.launch.accounts), ...Object.keys(waiting), ...Object.keys(settings.bandit?.accounts ?? {})]).catch(() => {
     warnings.push('Could not read the account names');
     return {} as Record<string, { name: string | null; email: string | null }>;
   });
@@ -197,6 +203,8 @@ export async function getLaunch() {
     safety: settings.safety,
     sms: { allowedCountries: settings.sms.allowedCountries, knownCountries: KNOWN_PHONE_COUNTRIES },
     alerts: { email: settings.alerts.email },
+    // PR F1: the bandit switch (off = the rotation of PR B).
+    bandit: { mode: settings.bandit?.mode ?? 'off', accounts: settings.bandit?.accounts ?? {}, changedBy: settings.bandit?.changedBy ?? null },
     accountNames: names,
     waitingForStartSending: waiting,
     warnings,
@@ -281,6 +289,11 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
     if (input.change.safety) set(['safety'], after.safety);
     if (input.change.smsCountries) set(['sms', 'allowedCountries'], after.smsCountries);
     if (input.change.alertsEmail !== undefined) set(['alerts', 'email'], after.alertsEmail);
+    if (input.change.bandit) {
+      if (input.change.bandit.mode !== undefined && after.bandit?.mode !== before.bandit?.mode) set(['bandit', 'mode'], after.bandit!.mode);
+      for (const [t, m] of Object.entries(input.change.bandit.accounts ?? {})) set(['bandit', 'accounts', t], m === null ? FieldValue.delete() : m);
+      set(['bandit', 'changedBy'], by);
+    }
     set(['version'], next);
     set(['updatedAt'], new Date(realNow));
     set(['updatedBy'], by);
@@ -304,6 +317,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         safety: before.safety,
         smsCountries: before.smsCountries,
         alertsEmail: before.alertsEmail,
+        bandit: before.bandit ?? null,
       },
       after: {
         default: after.default,
@@ -315,6 +329,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         safety: after.safety,
         smsCountries: after.smsCountries,
         alertsEmail: after.alertsEmail,
+        bandit: after.bandit ?? null,
       },
     });
     return { changed: true as const, summary, version: next };

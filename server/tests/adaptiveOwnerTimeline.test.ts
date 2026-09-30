@@ -645,10 +645,10 @@ test('offer.issued: German label in the German timeline; English unchanged; anot
 
 // ── Purity ───────────────────────────────────────────────────────────────────
 
-test('the module is pure: its only runtime imports are the decision sentences and time helpers', () => {
+test('the module is pure: its only runtime imports are the decision sentences, time helpers and the bandit block reader', () => {
   const src = readFileSync(join(__dirname, '../src/adaptive/core/owner/timeline.ts'), 'utf8');
   const runtime = [...src.matchAll(/^import\s+(?!type\b)[^;]*?from\s+'([^']+)'/gm)].map((m) => m[1]);
-  assertEqual(runtime.sort(), ['../runtime/decision', '../runtime/time'], 'runtime imports');
+  assertEqual(runtime.sort(), ['../runtime/bandit', '../runtime/decision', '../runtime/time'], 'runtime imports');
   const cache = typeof require !== 'undefined' ? Object.keys(require.cache ?? {}) : [];
   assert(!cache.some((k) => /[\\/]src[\\/]firebase\.ts$/.test(k)), 'firebase.ts was not loaded');
 });

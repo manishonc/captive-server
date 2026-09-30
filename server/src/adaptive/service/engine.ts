@@ -117,7 +117,7 @@ export async function devClock(body: { advance?: string; reset?: boolean; at?: s
   return { now: new Date(now()).toISOString() };
 }
 
-export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<string, LaunchMode>; paused?: boolean }) {
+export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<string, LaunchMode>; paused?: boolean; bandit?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null> } }) {
   requireSandbox();
   // The admin card's own function (PR D), so "live since" and the history are written the same
   // way locally — without the typed phrase and the worker check.
@@ -125,13 +125,15 @@ export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<
   if (body.default) change.default = body.default;
   if (body.accounts && Object.keys(body.accounts).length) change.accounts = body.accounts;
   if (typeof body.paused === 'boolean') change.paused = body.paused;
+  // PR F1: the bandit switch, like the admin card's (no phrase in the sandbox).
+  if (body.bandit && typeof body.bandit === 'object') change.bandit = body.bandit;
   if (Object.keys(change).length) {
     const { applyLaunchChange } = await import('./launch');
     await applyLaunchChange({ change }, { actor: { uid: 'sandbox', kind: 'seed' }, sandbox: true });
   }
   clearEngineSettingsCache();
   const settings = await readEngineSettings();
-  return { launch: settings.launch, paused: settings.paused };
+  return { launch: settings.launch, paused: settings.paused, bandit: settings.bandit ?? { mode: 'off', accounts: {} } };
 }
 
 /** Everything the engine knows about one person — the local stand-in for the PR D guest timeline. */
@@ -251,6 +253,25 @@ export async function devProviderEvent(body: unknown) {
       break;
   }
   return { queued: p.event, sendKey: p.sendKey };
+}
+
+/** Sandbox: the bandit learner now (PR F1) for one or every venue, and the pooled rebuild when asked; returns the arms. */
+export async function devLearn(body: { venueId?: string; pool?: boolean }) {
+  requireSandbox();
+  const { learnVenue, rebuildPools } = await import('../bandit/learn');
+  const { now: engineNowFn, refreshClock: refresh } = await import('../engine/clock');
+  await refresh();
+  const venueIds = body.venueId
+    ? [String(body.venueId)]
+    : (await db.collection(COL.adaptiveVenues).select('venueId').get()).docs.map((d) => String(d.get('venueId') ?? '')).filter(Boolean);
+  const out: Record<string, unknown> = {};
+  for (const venueId of venueIds) {
+    const result = await learnVenue(venueId, { engineNow: engineNowFn(), cutoffMs: Date.now() + 1000 });
+    const docs = await db.collection(COL.banditArms).where('venueId', '==', venueId).get();
+    out[venueId] = { ...result, docs: docs.docs.map((d) => ({ id: d.id, ...toJson(d.data()) })) };
+  }
+  const pools = body.pool ? await rebuildPools() : null;
+  return { venues: out, pools };
 }
 
 /**

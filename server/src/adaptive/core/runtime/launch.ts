@@ -9,6 +9,8 @@
  *  - "Live since" moves every time the default or an account moves into live (fail closed: a
  *    venue turned on during an off gap waits for its owner's click too). An account that stays
  *    live keeps its date.
+ *  - PR F1: the bandit switch (global + per account) lives here too. Turning it on is a loosening
+ *    ("BANDIT ON"); off is the brake (one click).
  */
 
 export type Mode = 'off' | 'test' | 'live';
@@ -28,7 +30,11 @@ export interface LaunchState {
   safety: SafetyLimits;
   smsCountries: string[];
   alertsEmail: string | null;
+  /** PR F1: the bandit (missing = off everywhere). */
+  bandit?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch> };
 }
+
+export type BanditSwitch = 'off' | 'on';
 
 export interface LaunchChange {
   default?: Mode;
@@ -38,6 +44,8 @@ export interface LaunchChange {
   safety?: Partial<SafetyLimits>;
   smsCountries?: string[];
   alertsEmail?: string | null;
+  /** PR F1: `null` removes an account's bandit override. */
+  bandit?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null> };
 }
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -65,7 +73,24 @@ export function applyChange(before: LaunchState, c: LaunchChange): LaunchState {
     safety: { ...before.safety, ...(c.safety ?? {}) },
     smsCountries: c.smsCountries ?? before.smsCountries,
     alertsEmail: c.alertsEmail === undefined ? before.alertsEmail : c.alertsEmail,
+    bandit: applyBandit(before.bandit, c.bandit),
   };
+}
+
+function applyBandit(before: LaunchState['bandit'], c: LaunchChange['bandit']): NonNullable<LaunchState['bandit']> {
+  const b = before ?? { mode: 'off' as BanditSwitch, accounts: {} };
+  const accounts = { ...b.accounts };
+  for (const [t, m] of Object.entries(c?.accounts ?? {})) {
+    if (m === null) delete accounts[t];
+    else accounts[t] = m;
+  }
+  return { mode: c?.mode ?? b.mode, accounts };
+}
+
+/** The bandit for one account: its override, else the global switch. */
+export function banditFor(s: Pick<LaunchState, 'bandit'>, tenant: string): BanditSwitch {
+  const b = s.bandit ?? { mode: 'off', accounts: {} };
+  return has(b.accounts, tenant) ? b.accounts[tenant] : b.mode;
 }
 
 /** The new `liveSince` after a change, at real time `now` (see the file header). */
@@ -100,7 +125,7 @@ export function nextLiveSince(before: LaunchState, after: Pick<LaunchState, 'def
   return ls;
 }
 
-export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits';
+export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on';
 
 export interface ChangeSummary {
   /** Plain lines for the card: "tenant_x: test run → live". */
@@ -117,8 +142,9 @@ const PHRASES: Record<LooseningKind, string> = {
   account_live: 'GO LIVE',
   release_pause: 'RELEASE PAUSE',
   loosen_limits: 'LOOSEN LIMITS',
+  bandit_on: 'BANDIT ON',
 };
-const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits'];
+const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on'];
 const MODE_WORDS: Record<Mode, string> = { off: 'off', test: 'test run', live: 'live' };
 
 export function summarizeChange(before: LaunchState, after: LaunchState): ChangeSummary {
@@ -153,6 +179,19 @@ export function summarizeChange(before: LaunchState, after: LaunchState): Change
   }
   if (removed.length) lines.push(`SMS countries removed: ${removed.join(', ')}`);
   if (before.alertsEmail !== after.alertsEmail) lines.push(`Alert email: ${before.alertsEmail ?? '(none)'} → ${after.alertsEmail ?? '(none)'}`);
+  // PR F1: the bandit switch.
+  const bb = before.bandit ?? { mode: 'off' as BanditSwitch, accounts: {} };
+  const ab = after.bandit ?? bb;
+  // The admin card calls it "Learning" (the bandit, in the code).
+  if (bb.mode !== ab.mode) lines.push(`Learning (default): ${bb.mode} → ${ab.mode}`);
+  for (const t of [...new Set([...Object.keys(bb.accounts), ...Object.keys(ab.accounts)])].sort()) {
+    const was = has(bb.accounts, t) ? bb.accounts[t] : null;
+    const will = has(ab.accounts, t) ? ab.accounts[t] : null;
+    // `<account>: …` like the launch lines, so the admin card shows the account's name.
+    if (was !== will) lines.push(`${t}: learning ${was ?? `default (${bb.mode})`} → ${will ?? `default (${ab.mode})`}`);
+  }
+  const tenantsB = new Set([...Object.keys(bb.accounts), ...Object.keys(ab.accounts)]);
+  if ((bb.mode === 'off' && ab.mode === 'on') || [...tenantsB].some((t) => banditFor(before, t) === 'off' && banditFor(after, t) === 'on')) kinds.add('bandit_on');
   const loosening = ORDER.filter((k) => kinds.has(k));
   return { lines, loosening, confirmPhrase: loosening.length ? loosening.map((k) => PHRASES[k]).join(' AND ') : null, empty: lines.length === 0 };
 }

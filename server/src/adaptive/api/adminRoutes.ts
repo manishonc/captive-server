@@ -18,6 +18,7 @@ import { adminActorOf, idParam, makeHandle } from './http';
 import { checkLaunch, getLaunch, putLaunch } from '../service/launch';
 import { adminGuest, retryTask, searchGuests } from '../service/adminTools';
 import { replayDecision } from '../service/replay';
+import { journeyBanditNumbers } from '../service/banditAdmin';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE ADMIN API');
@@ -50,6 +51,9 @@ router.post(
   }),
 );
 router.get('/admin/guests/:contactId', handle(async (req) => adminGuest(idParam(req.params.contactId, 'contactId'), req.query as Record<string, unknown>)));
+
+// PR F1: the bandit's numbers per step of a journey (the admin Journeys view).
+router.get('/admin/journeys/:key/bandit', handle(async (req) => journeyBanditNumbers(idParam(req.params.key, 'key'))));
 
 const replaySchema = z
   .object({ sendKey: z.string().min(1).max(64).optional(), eventId: z.string().min(1).max(200).optional(), lang: z.enum(['en', 'de']).optional() })

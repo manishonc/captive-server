@@ -170,6 +170,8 @@ export async function advance(
               ...(outcome.creditsShort ? { creditsShort: true } : {}),
               ...(outcome.creditsShort && outcome.creditsShortFor ? { creditsShortFor: outcome.creditsShortFor } : {}),
               ...(outcome.dispatchAttempts !== undefined ? { dispatchAttempts: outcome.dispatchAttempts } : {}),
+              ...(outcome.slotPick ? { slotPick: outcome.slotPick } : {}),
+              ...(outcome.variantPick ? { variantPick: outcome.variantPick } : {}),
             },
           };
           tasks.push(nodeTask(inst, 'send_due', sendNode, token, outcome.at));

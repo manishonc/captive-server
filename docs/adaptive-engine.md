@@ -128,6 +128,74 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
   seeded wording later: patch it at the end of `seed/definitions/variants.ts` and add an entry with the old text's
   hash (several entries for one wording are fine; a broken entry stops the seed before it writes anything).
 
+## The bandit (PR F1)
+
+- **Off by default.** `AdaptiveConfig/global.bandit { mode, accounts }` — global and per account, changed on
+  the admin launch card (turning it on needs "BANDIT ON"; off is one click and works on a stale card). Off is
+  exactly the rotation of PR B. A missing or malformed value reads as off.
+- **What it picks**, for marketing sends only, always inside every send rule: the wording — Thompson sampling
+  among the step's active wordings in the guest's language, without the last touch's text when the step's
+  `requireDiff` lists `variant` (one left: `forced:require_diff`, no draws, doesn't train) and without wordings
+  retired at this venue (one left: `forced:retired`, one draw, still trains) — and, at `slot` steps, the slot
+  (morning / afternoon / evening; the minute inside it stays repeatable). A pool with one wording: the
+  rotation decides, as before.
+- **Arms** (`CaptivePortal_BanditArms`; the send path reads them by id; the learner, the pool rebuild and the
+  admin numbers query them on `venueId`, `scope` and `journeyKey` — single-field equality, no composite index,
+  so the worker's start probes are unchanged): one doc per venue, journey and step (`ba_…`) with the data per
+  segment (`new`, `returning`, `stay`, `unknown`) and `all`; `pool_…` docs with every venue summed, rebuilt from
+  scratch daily, no tenant on them; `learn_{venueId}` holds the learner's marks and its `facts`: the journeys a
+  return visit was credited to (`visitCredits`, 30 days) and the sends that were clicked, rated, came back or
+  were unsubscribed from (`clicked`, `rated`, `visited`, `penalized`, 15 days: they wait for the send's close,
+  each counted by its event's own time); at most 3,000 entries per map (the oldest go first), so the doc stays
+  far under 1 MiB. A wording's arm is its content (`v:` + 12 hex of its hash, as loaded), so an edited text
+  starts a fresh arm.
+- **The draw:** prior (the pooled arm as 20 pseudo-sends once it has ≥ 200 finished sends; an arm the pool
+  doesn't know yet — a new or edited wording — starts at the mean of the wordings it is compared with, as 20
+  pseudo-sends: their data at this level (the segment's or the venue's, ≥ 30 finished sends), else the pool's
+  (≥ 200), so it gets a fair test against wordings with numbers; a flat 5 % only while there is no mean) + the
+  venue's data (its segment's once that has ≥ 100 finished sends at this step, else all segments'). The data is
+  finished sends only (see the learner). The method names the level: `bandit:segment`, `bandit:venue`,
+  `bandit:pool` or `bandit:prior`.
+- **Sticky per send:** while the bandit is on, a held send (quiet hours, credits, spacing, a provider retry)
+  keeps its wording and draws (`waiting.variantPick`, also for a pick without draws) unless that wording's
+  text was edited meanwhile (a new arm: drawn again); a slot draw rides in the wait to the send
+  (`waiting.slotPick`).
+- **The record:** `JourneySends.bandit` / `JourneyEvents.data.bandit` — the segment and, per part, the level,
+  the pick and every candidate's α, β and θ (`in`: the send went inside its slot). `DECISION_VERSION` 3.
+  Replay re-checks the pick from the stored θ, draws every θ again from the send key and checks the
+  decision's wording method and slot rule against the block (`banditChecked`); `REPLAY_VERSION` stays 1, so
+  older records replay as before. The block stays near 1 KB (past it the letters are dropped; the draws stay,
+  so a pool of more than about 12 wordings grows it a little).
+- **Unreadable arms** (a read error, or 1.5 s): the rotation stands in (`rotation:bandit_unavailable`) for 30
+  seconds. A send never waits on the bandit.
+- **The learner** (`bandit/learn.ts`; task `learn_arms` per venue and hour, armed with the rollup while the
+  bandit is on for the account and 7 days + 12 hours after each bandit send): the venue's log from its own mark
+  (the rollup's query and index) and the live sends older than 7 days + 12 hours (`JourneySends(venueId, mode,
+  createdAt)`), one transaction per page, exactly once; a venue's first run starts 15 days back; a run closes
+  only up to its task's due time (after an outage, the sends whose signals are still queued wait). A send's
+  whole reward lands when it finishes (its 7 days + 12 hours: a late signal is in), so the draw sees finished sends only — counting a
+  click the day it happens but "no click" a week later made any arm with young sends look good, and the bandit
+  locked onto whichever wording got the traffic; until then the learner counts what the admin numbers show and
+  remembers the send's `facts`. Rewards (the brief's DF1): click α+1; rating α+2 (any stars), once per send; a
+  return visit within 7 days α+4, once per journey, to that journey's last live marketing send (nothing when
+  that send has no draws); no click within 7 days β+1; an email unsubscribe or spam report β+10, once per send;
+  an SMS STOP β+10 when this send was the number's last live SMS; a hard bounce nothing. Sends close only once
+  the log is caught up. Test runs and info messages never train; a slot learns only from sends that went inside
+  it. Weekly per step: the data × 0.95, and a wording with ≥ 200 finished sends and under 1 % chance of being
+  best among today's texts at two weekly checks in a row retires at that venue, for good (never the last one;
+  slots never) — one check at 5 % retired a wording as good as the other at 4 venues in 10 within a quarter.
+  `learn_pool`, armed daily by the worker while the bandit is on anywhere, rebuilds the pools and deletes a pool
+  no venue has any more (a deleted account's share drops out within a day); the send path ignores a pool not
+  rebuilt for 48 hours.
+- **Screens:** the launch card's row; per-wording numbers in the admin Journeys view
+  (`GET /admin/journeys/:key/bandit`, with the venues where a wording retired); the draws in the admin guest
+  record's "Why?". Owners see a learning line only once it is on for their account and the account is live
+  (`overview.banditOn`).
+- **New wordings (F-D11):** review ask B, last reminder B and stay review B (GSM-7, en + de). With the bandit
+  off, the rotation sends B only as a follow-up (the review ask's and stay review's second message).
+- **Local:** `POST /dev/launch {"bandit":{"accounts":{"<tenant>":"on"}}}` and `POST /dev/learn
+  {"venueId"?, "pool"?}` (the learner now, and the pooled rebuild).
+
 ## Signals coming back
 
 | Source | Adaptive effect |
@@ -494,7 +562,13 @@ launches sending". When the account goes live, such a venue **waits for one clic
    `utility`, `dryRun`, `visits`, `stays`) are only read by doc id, so their indexes can be switched off the same way.
    PR C also exempts `CaptivePortal_StayFeeds` `url` (the calendar link, a secret) and `lastError`, never queried.
    PR D exempts `CaptivePortal_JourneySends` `replay` (the decision's replay inputs, never queried; without
-   the exemption every subfield of every send is indexed). The TTL entries for `CaptivePortal_AdaptiveAlerts`
+   the exemption every subfield of every send is indexed). PR F1 exempts `CaptivePortal_JourneySends`
+   `bandit`, `CaptivePortal_BanditArms` `segments` and `facts`, and `CaptivePortal_JourneyInstances`
+   `waiting.variantPick` and `waiting.slotPick` (the picks a held send keeps) the same way (never queried;
+   keep `venueId`, `scope`, `journeyKey` and `tenantUserId` indexed — the learner, the admin numbers and the
+   cms account delete query them — and the rest of `waiting`: `waiting.creditsShort` is queried), e.g.
+   `gcloud firestore indexes fields update bandit --collection-group=CaptivePortal_JourneySends --disable-indexes --project=$P`.
+   PR F1 adds no composite index. The TTL entries for `CaptivePortal_AdaptiveAlerts`
    and `signups` are now in the JSON too — for `signups`, check first that no other collection named
    `signups` in the project uses `expireAt`.
    Wait until every index shows **Enabled**.
