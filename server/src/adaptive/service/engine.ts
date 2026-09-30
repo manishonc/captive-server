@@ -117,7 +117,13 @@ export async function devClock(body: { advance?: string; reset?: boolean; at?: s
   return { now: new Date(now()).toISOString() };
 }
 
-export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<string, LaunchMode>; paused?: boolean; bandit?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null> } }) {
+export async function devLaunch(body: {
+  default?: LaunchMode;
+  accounts?: Record<string, LaunchMode>;
+  paused?: boolean;
+  bandit?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null> };
+  agents?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null>; monthlyBudgetUsd?: number };
+}) {
   requireSandbox();
   // The admin card's own function (PR D), so "live since" and the history are written the same
   // way locally — without the typed phrase and the worker check.
@@ -127,13 +133,15 @@ export async function devLaunch(body: { default?: LaunchMode; accounts?: Record<
   if (typeof body.paused === 'boolean') change.paused = body.paused;
   // PR F1: the bandit switch, like the admin card's (no phrase in the sandbox).
   if (body.bandit && typeof body.bandit === 'object') change.bandit = body.bandit;
+  // PR F2a: the AI agents' switch and budget, like the admin card's (no phrase in the sandbox).
+  if (body.agents && typeof body.agents === 'object') change.agents = body.agents;
   if (Object.keys(change).length) {
     const { applyLaunchChange } = await import('./launch');
     await applyLaunchChange({ change }, { actor: { uid: 'sandbox', kind: 'seed' }, sandbox: true });
   }
   clearEngineSettingsCache();
   const settings = await readEngineSettings();
-  return { launch: settings.launch, paused: settings.paused, bandit: settings.bandit ?? { mode: 'off', accounts: {} } };
+  return { launch: settings.launch, paused: settings.paused, bandit: settings.bandit ?? { mode: 'off', accounts: {} }, agents: settings.agents ?? { mode: 'off', accounts: {} } };
 }
 
 /** Everything the engine knows about one person — the local stand-in for the PR D guest timeline. */
@@ -421,4 +429,57 @@ export async function devFailTask(body: { taskId?: unknown }) {
   const { FieldValue } = await import('firebase-admin/firestore');
   await ref.update({ status: 'dead', lastError: 'failed by /dev/fail-task', leaseOwner: null, leaseUntil: null, doneAt: new Date(), attempts: 8, 'payload.guest': FieldValue.delete() });
   return { taskId, status: 'dead' };
+}
+
+// ── PR F2a: the fake model (sandbox only) ────────────────────────────────────
+
+const devAnswerSchema = z
+  .object({
+    agentKey: z.string().min(1).max(40),
+    answers: z
+      .array(
+        z
+          .object({
+            answer: z.unknown().optional(),
+            fault: z.enum(['refusal', 'max_tokens', 'bad_json', 'rate_limit', 'server_error', 'timeout', 'unauthorized', 'unknown_model', 'slow']).optional(),
+            ms: z.number().int().min(0).max(600_000).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(20),
+  })
+  .strict();
+
+/** Sandbox: queue the fake model's next answers for an agent (a JSON answer, raw text or a fault). */
+export async function devModelAnswer(body: unknown) {
+  requireSandbox();
+  const p = devAnswerSchema.parse(body ?? {});
+  const { jobFor } = await import('../brain/registry');
+  if (!jobFor(p.agentKey)) throw new ApiError('bad_request', `No agent “${p.agentKey}”`);
+  const { queueSandboxAnswers } = await import('../store/agents');
+  return { queued: await queueSandboxAnswers(p.agentKey, p.answers) };
+}
+
+/** Sandbox: the request packages the fake model received, newest first. */
+export async function devModelCalls(query: Record<string, unknown>) {
+  requireSandbox();
+  const limit = z.coerce.number().int().min(1).max(100).catch(20).parse(query?.limit);
+  const { listSandboxCalls } = await import('../store/agents');
+  return { calls: await listSandboxCalls(limit) };
+}
+
+/** Sandbox: queue an agent run now (trigger `dev`: runs while the AI switch is off); the worker runs it. */
+export async function devAgentRun(body: { agentKey?: unknown; params?: unknown }) {
+  requireSandbox();
+  const { jobFor } = await import('../brain/registry');
+  const agentKey = typeof body.agentKey === 'string' ? body.agentKey : 'ping';
+  const job = jobFor(agentKey);
+  if (!job) throw new ApiError('bad_request', `No agent “${agentKey}”`);
+  const params = body.params && typeof body.params === 'object' && !Array.isArray(body.params) ? (body.params as Record<string, unknown>) : {};
+  const { agentRunTask } = await import('../brain/tasks');
+  const { firestoreScheduler } = await import('../queue/firestoreQueue');
+  await refreshClock(true);
+  const taskId = await firestoreScheduler.schedule(agentRunTask({ agentKey: job.key, trigger: 'dev', dedupeKey: `dev:${agentKey}:${randomUUID()}`, dueAt: now(), params }));
+  return { taskId };
 }

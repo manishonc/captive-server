@@ -33,7 +33,9 @@ export type TaskKind =
   | 'stay_trigger'
   // The bandit (PR F1): a venue's learner run, and the daily rebuild of the pooled priors
   | 'learn_arms'
-  | 'learn_pool';
+  | 'learn_pool'
+  // The AI foundation (PR F2a): one agent run (brain/lane.ts runs it outside the claimed batch)
+  | 'agent_run';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;
@@ -247,4 +249,21 @@ export async function extendLease(taskId: string, workerId: string): Promise<voi
     .update({ leaseUntil: new Date(Date.now() + LEASE_MS) })
     .catch(() => undefined);
   void workerId;
+}
+
+/**
+ * PR F2a: renews a lease only while this worker still holds it (the AI lane): `lost` when the task
+ * was reclaimed, finished or taken by someone else — then the caller stops its work; `error` when
+ * Firestore couldn't be asked (the caller decides by how long ago it last held it).
+ */
+export async function renewLease(taskId: string, workerId: string): Promise<'held' | 'lost' | 'error'> {
+  return db
+    .runTransaction(async (tx) => {
+      const ref = col().doc(taskId);
+      const snap = await tx.get(ref);
+      if (!snap.exists || snap.get('status') !== 'leased' || snap.get('leaseOwner') !== workerId) return 'lost' as const;
+      tx.update(ref, { leaseUntil: new Date(Date.now() + LEASE_MS) });
+      return 'held' as const;
+    })
+    .catch(() => 'error' as const);
 }

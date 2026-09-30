@@ -8,11 +8,15 @@
  *  - expired leases put back every 60 s;
  *  - heartbeat to `AdaptiveConfig/engine_status` + a file for Docker's healthcheck;
  *  - a watchdog exits if the loop stalls, so Docker restarts the container;
- *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit;
+ *  - SIGTERM: stop taking tasks, finish the ones in hand (≤ 20 s), exit — an AI run in the lane
+ *    is aborted and waited for, so it records what happened (PR F2a);
  *  - after a task for a venue, that venue's 15-minute rollup is armed (rollups/rollup.ts);
  *  - Airbnb stays: `stay_poll` reads an owner's calendar link over outbound https (this is
  *    the only process that does, stays/fetch.ts), `stay_trigger` starts a stay journey at its
  *    moment; at start and then hourly a watchdog restarts calendar chains that stopped.
+ *  - AI agents (PR F2a): an `agent_run` task only starts in the AI lane (brain/lane.ts) — one
+ *    run at a time, outside the claimed batch, so due sends never wait for a model. This is the
+ *    only process that calls a model (through the cms relay).
  *
  * Identity-key guard (the key is derived from GUEST_OTP_PEPPER, see identity/key.ts).
  * The first connect task whose key (the API's, carried on the task) equals this
@@ -53,6 +57,8 @@ import { handleStayTrigger, type StayTriggerPayload } from '../stays/moments';
 import { learnVenue, rebuildPools } from '../bandit/learn';
 import { learnTask, poolTask } from '../bandit/tasks';
 import { firestoreScheduler } from '../queue/firestoreQueue';
+import { AiLane } from '../brain/lane';
+import { closeAbandonedRuns } from '../brain/run';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -64,6 +70,8 @@ const HEARTBEAT_FILE = '/tmp/adaptive-heartbeat';
 const WORKER_ENTRY_TTL_MS = 24 * 60 * 60_000;
 const STAY_WATCHDOG_MS = 60 * 60_000;
 const POOL_ARM_MS = 60 * 60_000;
+/** PR F2a: how often abandoned AI runs are looked for. */
+const ABANDONED_RUNS_MS = 10 * 60_000;
 
 type WorkerState = 'starting' | 'running' | 'idle_identity' | 'idle_indexes' | 'stopping';
 
@@ -81,6 +89,7 @@ export class AdaptiveWorker {
   private lastReclaimAt = 0;
   private lastStayWatchdogAt = 0;
   private lastPoolArmAt = 0;
+  private lastAbandonedRunsAt = 0;
   private settings: EngineSettings = SAFE_SETTINGS;
   private settingsAt = 0;
   private state: WorkerState = 'starting';
@@ -93,6 +102,8 @@ export class AdaptiveWorker {
   private tasksRun = 0;
   private errors = 0;
   private readonly startedAt = Date.now();
+  /** PR F2a: AI agent runs, one at a time, outside the claimed batch. */
+  private readonly aiLane = new AiLane(this.id);
 
   async start(): Promise<void> {
     this.running = true;
@@ -176,6 +187,13 @@ export class AdaptiveWorker {
       }
     }
 
+    // PR F2a: AI runs no attempt will close (the worker died on its task's last attempt) are
+    // closed and counted at their worst case, every 10 minutes.
+    if (Date.now() - this.lastAbandonedRunsAt > ABANDONED_RUNS_MS) {
+      this.lastAbandonedRunsAt = Date.now();
+      await closeAbandonedRuns(Date.now(), this.settings).catch((err) => console.warn('[ADAPTIVE WORKER] closing abandoned AI runs failed:', err?.message || err));
+    }
+
     const tasks = await claimDue(this.id, now(), BATCH);
     if (!tasks.length) {
       await sleep(anyAccountOn(this.settings) ? POLL_MS : IDLE_POLL_MS);
@@ -197,6 +215,8 @@ export class AdaptiveWorker {
       const tasks = await claimDue(this.id, now(), 50);
       if (!tasks.length) break;
       await runLimited(tasks, CONCURRENCY, (t) => this.runTask(t));
+      // PR F2a: an agent run started in this round finishes before the next (tests, the sandbox).
+      await this.aiLane.whenIdle();
       total += tasks.length;
     }
     return total;
@@ -298,6 +318,11 @@ export class AdaptiveWorker {
           // A linked guest's stay moment: re-checked now, then the journey starts (or not).
           await handleStayTrigger(task.payload as unknown as StayTriggerPayload, env);
           break;
+        case 'agent_run':
+          // PR F2a: started in the AI lane, which marks the task done (or failed) itself — this
+          // batch, due sends above all, never waits for a model.
+          await this.aiLane.take(task, env);
+          return;
         default:
           await releaseTask(task.id, this.id, 10 * 60_000, env.now); // a kind this build doesn't know yet
           return;
@@ -311,7 +336,7 @@ export class AdaptiveWorker {
       await failTask(task.id, this.id, message, env.now).catch(() => undefined);
     } finally {
       // Whatever this task wrote for the venue is counted by its next rollup.
-      if (task.kind !== 'rollup_venue' && task.kind !== 'learn_arms' && task.kind !== 'learn_pool') await ensureRollup(task.venueId, task.tenantUserId).catch((err) => console.warn('[ADAPTIVE WORKER] arming the rollup failed:', err?.message || err));
+      if (task.kind !== 'rollup_venue' && task.kind !== 'learn_arms' && task.kind !== 'learn_pool' && task.kind !== 'agent_run') await ensureRollup(task.venueId, task.tenantUserId).catch((err) => console.warn('[ADAPTIVE WORKER] arming the rollup failed:', err?.message || err));
       this.inflight -= 1;
     }
   }
@@ -340,6 +365,8 @@ export class AdaptiveWorker {
               keyWarning: this.keyWarning,
               tasksRun: this.tasksRun,
               errors: this.errors,
+              // PR F2a: the AI lane — busy, last run, and whether the relay env is set (booleans only).
+              ai: this.aiLane.status(),
             },
           },
           indexCheck: this.indexes ? { ok: this.indexes.ok, missing: this.indexes.missing, at: new Date() } : null,
@@ -416,8 +443,10 @@ export class AdaptiveWorker {
       console.log(`[ADAPTIVE WORKER] ${signal}: finishing tasks in hand`);
       this.running = false;
       this.state = 'stopping';
+      // PR F2a: stop a model call now, so its run is recorded (a next attempt then skips it).
+      this.aiLane.abortForShutdown();
       const deadline = Date.now() + 20_000;
-      while (this.inflight > 0 && Date.now() < deadline) await sleep(250);
+      while ((this.inflight > 0 || this.aiLane.busy) && Date.now() < deadline) await sleep(250);
       process.exit(0);
     };
     process.on('SIGTERM', () => void stop('SIGTERM'));

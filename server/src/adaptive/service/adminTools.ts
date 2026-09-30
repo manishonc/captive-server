@@ -135,6 +135,9 @@ export async function retryTask(taskId: string, actor: Actor) {
   if (!first.exists) throw notFound('No such task');
   if (first.get('status') !== 'dead') throw conflict('Only a dead task can be retried');
   const kind = String(first.get('kind'));
+  // PR F2a: an AI run is never handed out again — an attempt may already have called the model
+  // (and a retry restarts the attempt count the run's "never twice" check relies on).
+  if (kind === 'agent_run') throw conflict('An AI agent run is never retried, as it may already have called the model. Queue a new run (Test connection) instead.');
   const payload = (first.get('payload') ?? {}) as Record<string, unknown>;
   let warning: string | null = null;
   if (kind === 'signal' || kind === 'event_route') {

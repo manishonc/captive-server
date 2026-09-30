@@ -17,6 +17,11 @@
  *   POST /dev/stay-sync       sandbox only — { venueId } → poll the feed now (same lease as the worker)
  *   POST /dev/stay-check      sandbox only — { venueId, url } → "Check link" (fetch + parse, store nothing)
  *   POST /dev/fail-task       sandbox only — { taskId } → make a task dead (to try the admin retry)
+ *   POST /dev/model-answer    sandbox only — { agentKey, answers: [{ answer? | fault?, ms? }] } → queue
+ *                             the fake model's next answers (PR F2a; faults: refusal, max_tokens,
+ *                             bad_json, rate_limit, server_error, timeout, unauthorized, unknown_model, slow)
+ *   GET  /dev/model-calls     sandbox only — ?limit → the request packages the fake model received
+ *   POST /dev/agent-run       sandbox only — { agentKey?, params? } → queue an agent run now (the worker runs it)
  *   POST /ingest/click        the CMS: a counted click on a journey short link { shortCode }
  *   POST /ingest/rating       the CMS: a rating from a journey link { shortCode, stars, feedback? }
  *
@@ -56,6 +61,9 @@ router.post('/dev/launch', handle(async (req) => engine.devLaunch(req.body ?? {}
 router.post('/dev/provider-event', handle(async (req) => engine.devProviderEvent(req.body ?? {})));
 router.post('/dev/rollup', handle(async (req) => engine.devRollup(req.body ?? {})));
 router.post('/dev/learn', handle(async (req) => engine.devLearn(req.body ?? {})));
+router.post('/dev/model-answer', handle(async (req) => engine.devModelAnswer(req.body ?? {})));
+router.get('/dev/model-calls', handle(async (req) => engine.devModelCalls(req.query as Record<string, unknown>)));
+router.post('/dev/agent-run', handle(async (req) => engine.devAgentRun(req.body ?? {})));
 router.put('/dev/calendar/:name', handle(async (req) => engine.devPutCalendar(String(req.params.name ?? ''), req.body ?? {})));
 router.get('/dev/calendar/:name', async (req: Request, res: Response) => {
   try {

@@ -8,6 +8,11 @@
  *   guests/search       POST {email | phone}     (POST: addresses never land in URLs or logs)
  *   guests/:contactId   GET ?lang
  *   decisions/replay    POST {sendKey | eventId, lang?}
+ *   agents              GET                        (PR F2a: the "AI agents" tab)
+ *   agents/:key         PUT {change, baseVersion}
+ *   agents/test         POST                       (queues one Test connection run)
+ *   agent-runs          GET ?agentKey&limit&before
+ *   agent-runs/:runId   GET
  *
  * No catch-all here: a path nobody matches falls through to router.ts's JSON 404.
  */
@@ -19,6 +24,7 @@ import { checkLaunch, getLaunch, putLaunch } from '../service/launch';
 import { adminGuest, retryTask, searchGuests } from '../service/adminTools';
 import { replayDecision } from '../service/replay';
 import { journeyBanditNumbers } from '../service/banditAdmin';
+import { getAgentRun, getAgentsAdmin, listAgentRuns, putAgentSettings, testConnection } from '../service/agentsAdmin';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE ADMIN API');
@@ -54,6 +60,20 @@ router.get('/admin/guests/:contactId', handle(async (req) => adminGuest(idParam(
 
 // PR F1: the bandit's numbers per step of a journey (the admin Journeys view).
 router.get('/admin/journeys/:key/bandit', handle(async (req) => journeyBanditNumbers(idParam(req.params.key, 'key'))));
+
+// PR F2a: the AI agents (the switch and budget are on the launch route: `change.agents`).
+router.get('/admin/agents', handle(async () => getAgentsAdmin()));
+router.post('/admin/agents/test', handle(async (req) => testConnection(adminActorOf(req))));
+router.put(
+  '/admin/agents/:key',
+  handle(async (req) => {
+    const actor = adminActorOf(req);
+    const { actor: _a, ...body } = (req.body ?? {}) as Record<string, unknown>;
+    return putAgentSettings(idParam(req.params.key, 'key'), body, actor);
+  }),
+);
+router.get('/admin/agent-runs', handle(async (req) => listAgentRuns(req.query as Record<string, unknown>)));
+router.get('/admin/agent-runs/:runId', handle(async (req) => getAgentRun(idParam(req.params.runId, 'runId'))));
 
 const replaySchema = z
   .object({ sendKey: z.string().min(1).max(64).optional(), eventId: z.string().min(1).max(200).optional(), lang: z.enum(['en', 'de']).optional() })

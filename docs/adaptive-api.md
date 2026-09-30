@@ -242,6 +242,31 @@ The owner overview (`GET /tenants/:t/overview`) also returns `banditOn` (the ban
 for this account's live sends: on for the account and the account live). Sandbox: `POST /dev/launch` also takes `bandit`; `POST /dev/learn { venueId?, pool? }`
 runs the learner now (and the pooled rebuild) and returns the arms.
 
+PR F2a (the AI foundation, docs/adaptive-engine.md "The AI agents"): `GET /admin/launch` also returns
+`agents { mode, accounts, monthlyBudgetUsd, changedBy }`; `PUT /admin/launch` also takes
+`change.agents { mode?: 'off'|'on', accounts?: { tenant: 'off'|'on'|null }, monthlyBudgetUsd?: 0–10000 }` — turning
+the AI agents on (the default or an account) needs "AI ON", a higher budget "LOOSEN LIMITS"; off and a lower
+budget are the brake (one click). The admin UI is the "AI agents" card on Launch & health. New:
+
+| Route | Body / query | Answer | Audit |
+|---|---|---|---|
+| `GET /admin/agents` | — | `{ switch { mode, accounts, monthlyBudgetUsd, changedBy }, month { month, spentUsd, budgetUsd, pct, runs, byAgent }, agents: [{ key, label, description, scope, settings, defaults, promptVersions, today { runs, outcomes, costUsd } }], models: [{ id, label, inputUsdPerMTok, outputUsdPerMTok, cacheReadUsdPerMTok, cacheWriteUsdPerMTok }], workers: [{ id, alive, version, state, ai { busy, lastRunAt, lastOutcome, relayUrlSet, relaySecretSet } }], warnings[] }` — `state` is `running` or why the worker is idle (it then runs no task, agents included); `relayUrlSet` / `relaySecretSet` say only whether the worker has `CMS_INTERNAL_URL` / `INTERNAL_API_SECRET`, never their values | — |
+| `PUT /admin/agents/:key` | `{ change: { enabled?, model?, fallbackModel? (null = none), effort? low\|medium\|high, maxRunsPerDay? 0–1000, maxOutputTokens? 256–8000 (thinking included: what a model writes within one call's 200 s), promptVersion? }, baseVersion, actor }` | `{ settings }` — 409 on a stale `baseVersion`, 400 for a model not on the list or an unknown prompt version, 404 for an unknown agent | `adaptive.admin.agent` |
+| `POST /admin/agents/test` | `{ actor }` (HeidiFi only: 403 for owners) | `{ queued: true, taskId }` — one Test connection run (the `ping` agent) for the worker's AI lane; one task per real-clock minute (a double click within the same minute is one run). Runs while the AI switch is off; the budget and the agent's runs a day still apply. A task that waited over 10 minutes for a worker is skipped (`stale`). The result is in the run log | `adaptive.admin.agent_test` |
+| `GET /admin/agent-runs` | `?agentKey&limit (1–100, 30)&before (ISO)` | `{ runs: [{ runId, agentKey, trigger, status, interrupted, outcome, reason, model, modelUsed, fallbackUsed, summary, tenantUserId, venueId, usage, costUsd, latencyMs, createdAt, finishedAt }] }` newest first — no package, no answer | — |
+| `GET /admin/agent-runs/:runId` | — | `{ run }` in full: the package (JSON text; null when the privacy scan stopped it), the answer, the checks, `attempts [{ model, ms, error, status, detail, reachedRelay }]`, tokens, cost (`estimatedMicroUsd`: the worst case counted for a call that may have been billed without an answer — it timed out, was stopped or broke off after reaching the relay — or, for an `interrupted` run, a full answer on its model and its fallback), `modelReported`, `usageDocs`, `usageCounted`, price | — |
+
+`POST /admin/tasks/:taskId/retry` refuses a dead `agent_run` task (409: an attempt may already have called the
+model — queue a new run instead). In `GET /admin/agents`, `month.spentUsd` is null when the month's counter can't
+be read (every agent is then paused, and a warning says so), and an agent's `today.runs` is null when its day
+counter can't be read (that agent is paused for the day).
+
+Sandbox (404 in production): `POST /dev/launch` also takes `agents`; `POST /dev/model-answer { agentKey,
+answers: [{ answer? | fault?, ms? }] }` queues the fake model's next answers (faults: `refusal`, `max_tokens`,
+`bad_json`, `rate_limit`, `server_error`, `timeout`, `unauthorized`, `unknown_model`, `slow`); `GET /dev/model-calls?limit`
+lists the request packages it received; `POST /dev/agent-run { agentKey?, params? }` queues a run now (trigger
+`dev`, runs while the switch is off).
+
 Account names (`accountNames[…].name` on the launch card, `account.name` in guest search) come from
 the `Users` doc: `displayName`, then `display_name` (cms owner docs, PR E follow-up), `companyName`,
 `name` — the first that isn't empty; `null` when none.

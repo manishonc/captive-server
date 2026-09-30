@@ -187,6 +187,12 @@ Used by the CMS to trigger immediate marketing "Send test" messages via
 
 **`INTERNAL_API_SECRET`:** Generate with `openssl rand -hex 32`.
 
+**PR F2a (AI agents):** the `adaptive-worker` also uses `CMS_INTERNAL_URL` and `INTERNAL_API_SECRET` to call
+the cms model relay (`/api/captive-portal/internal/model-relay/v1/messages`), which checks the secret against its
+`CAPTIVE_SERVER_INTERNAL_SECRET` and adds the cms's AI Gateway credential. Without them the worker's agents fail
+with `relay_not_configured` (logged in the run log; nothing else is affected). No model key is set on the
+server or the worker.
+
 > The CMS side needs two matching vars set in the **CMS** deployment (not here):
 > `CAPTIVE_SERVER_URL` (this server's public URL, e.g. `https://api.heidifi.ai`) and
 > `CAPTIVE_SERVER_INTERNAL_SECRET` (= `INTERNAL_API_SECRET`).
