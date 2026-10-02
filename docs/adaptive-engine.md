@@ -196,6 +196,175 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
 - **Local:** `POST /dev/launch {"bandit":{"accounts":{"<tenant>":"on"}}}` and `POST /dev/learn
   {"venueId"?, "pool"?}` (the learner now, and the pooled rebuild).
 
+## The AI agents (PR F2a)
+
+The foundation every Claude call goes through; its only job so far is the admin's **Test connection**
+(`ping`). The copy writer comes with F2b. Nothing here sends a message, charges credits or waits on the
+sending pause.
+
+- **One way to a model:** `brain/run.ts` `runAgent()`, called only by the worker's AI lane. Only
+  `brain/modelClient.ts` imports the Anthropic SDK, and the API process never loads it
+  (`tests/adaptiveBrainBoundary.test.ts`); the AI code never reaches the send path or the wallet, and the
+  send path never reaches the AI code.
+- **The path:** worker → the cms model relay (`${CMS_INTERNAL_URL}/api/captive-portal/internal/model-relay/v1/messages`,
+  `x-internal-secret` = the worker's `INTERNAL_API_SECRET`) → the Vercel AI Gateway's Anthropic-compatible
+  Messages API with the cms's gateway credential. The worker holds no model key. The official
+  `@anthropic-ai/sdk` (pinned), loaded on the first run (never at boot: an SDK that fails to load fails AI
+  runs only), with `maxRetries: 0`, ≤ 210 s per call and its environment switches pinned (no
+  `ANTHROPIC_LOG` body logging, no `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` picked up); typed answers
+  through `output_config.format` (the job's Zod schema) and adaptive thinking at the agent's effort. Errors
+  keep the relay's / gateway's own words (capped), never the request. The real client refuses under
+  `FIRESTORE_EMULATOR_HOST`; in the sandbox the fake model answers instead (`brain/sandboxModel.ts`: every
+  request logged to `CaptivePortal_AdaptiveSandboxModelCalls`, faults queued through `POST /dev/model-answer`).
+- **The relay** (cms `app/api/captive-portal/internal/model-relay/v1/messages`): checks the secret in constant
+  time (503 when the cms has none, 401 when it differs), refuses under the emulator, checks the whole request
+  (plain text only, no tools, no streaming, no beta header, allowed models, at most 8,000 output tokens, 256 KB)
+  and forwards only that checked body with a pinned `anthropic-version`; gives the gateway 200 s (its 504 is a
+  timeout to the worker: costed at the worst case, like one of ours); at most 300
+  calls a day (UTC, `CaptivePortal_AgentUsage/relay-{yyyymmdd}`; over it a 429 `relay_daily_limit`, which the
+  worker treats as setup, not as a busy model).
+- **Models** (gateway ids, list prices per million tokens in/out): `anthropic/claude-opus-5.5` $4 / $20,
+  `anthropic/claude-sonnet-5.5` $2 / $10 (cache reads $0.20; 5-minute cache writes 1.25 × input). Each agent has a
+  model and a fallback, tried once after a 429, a 5xx, a dropped connection or a timeout — never a third call.
+- **A run** (`CaptivePortal_AgentRuns/{ar_…}`, one per task attempt, `expireAt` + 13 months): never twice —
+  an attempt of a task another attempt of which started is `already_called` (after closing that run if its
+  worker left it `running`), a Test connection that waited over 10 minutes for a worker is `stale` → gates → budget → the package (allowed fields only) and the
+  privacy scan (emails, phones and the job's secret values in strings and keys, and whole numbers as long as a
+  phone number; a finding stops the run and nothing of the package is stored; the finding names the path,
+  with any key that holds data replaced by `<key #n>`) → the request's size as sent → the record `running`
+  (with the usage docs it will count in) → the model → the checks: only a normal end (`end_turn`) is read,
+  then JSON, the job's schema (enums and ranges aren't enforced upstream), every number in the reasoning in
+  the input (values and keys), the prompt or the schema (rounding within one unit, percentages of fractions,
+  "percent" and decimal commas; a unit after a number or a currency before it is still a claim; small counts
+  free), the job's own checks → the record finished: `ok`, `rejected` (answered, failed a check — never
+  used), `failed` (no usable answer) or `skipped` (never called: `stale`, `already_called`, `agent_off`,
+  `agents_off`, `not_live`, `budget`, `daily_limit`) with the tokens, the cost at the model's list price, the
+  latency and the attempts. From the model call on nothing throws (a throw would hand the task out again and
+  call the model twice); a record deleted meanwhile (an account delete) is not written back.
+- **The switch and the budget:** `AdaptiveConfig/global.agents { mode, accounts, monthlyBudgetUsd }` on the admin
+  launch card: on needs "AI ON", a higher budget "LOOSEN LIMITS"; off and a lower budget are one click. Missing =
+  off and $100 a month; a budget that can't be read is 0 (every agent paused). A scheduled run needs its agent on
+  (`CaptivePortal_Agents/{key}.enabled`), the switch on (the account's override first) and, for an account's job,
+  the account live. The Test connection is one run a person asked for: it runs while the switch is off.
+- **Spend** (`CaptivePortal_AgentUsage`, real UTC dates, read by id): `month_{yyyymm}` (the platform's cost, per
+  agent and per account) and `{agent}_{yyyymmdd}` (runs, outcomes, tokens, cost). It is counted before the record
+  is finished; a call that timed out or was stopped after reaching the relay is counted at its worst case (the
+  request in, a full answer out — it may have been billed). Only runs that reached the relay count toward the
+  agent's runs a day. At 100 % of the month's budget every agent is skipped until the month ends or the budget
+  goes up; sends never notice. HeidiFi's alert email gets `agent_budget` at 80 % and 100 % (once each per month
+  and budget: a raised budget alerts again) and `agent_failing` for every failed run, once a day per agent and
+  cause, with what to check.
+- **The lane** (`brain/lane.ts`): the worker claims a batch and waits for all of it, so an `agent_run` task only
+  starts here and the batch moves on: one run at a time per worker (another `agent_run` is put back for a minute,
+  one for an agent this build doesn't know for ten; its own task, handed back to it after the lease ran out,
+  stays with the run). The lease is renewed as the run starts and every 30 s while the worker still holds it: a
+  lease lost before the start runs nothing, one lost during the run aborts the call (the next attempt then finds
+  the started run and skips). The call is aborted at the deadline (about 4 minutes, both calls included) and
+  the lane gives up 30 s later. The task is done whatever the outcome (a failed call is in the run log); only an
+  unexpected error fails it, and the queue hands it out again (`maxAttempts: 3`; a later attempt never calls the
+  model once an earlier one started). A renewal Firestore doesn't answer stops the run only once the last good
+  one is three intervals old. On SIGTERM the worker
+  aborts the run and waits for it to record what happened. The heartbeat's `ai` block says whether the worker
+  has `CMS_INTERNAL_URL` and `INTERNAL_API_SECRET` (booleans only) — the admin "AI agents" card shows it, and
+  warns when the only live worker is idle (it then runs no task, agents included).
+- **Never twice, round 2 (review):** the run record is written in one transaction with a check that the worker
+  still holds the task's lease (a claim by another worker lands before it — nothing written, nothing called — or
+  after it — the next attempt sees the record); every attempt checks the task's other attempts (1–4), so a run
+  left `running` by a worker that died mid-call is closed by the next attempt as `failed / interrupted` and counted
+  at its worst case (both models, a full answer); a dead `agent_run` task is never retried by the admin tools. An
+  agent's output limit is 8,000 tokens (thinking included), so an answer fits in one call's 200 s. After SIGTERM
+  the lane stops the run (recorded as `aborted`, "the worker was stopping", no alert) and hands any `agent_run` it
+  claims straight back to the queue. A spend counter that can't be read blocks every run and stays as it is (an
+  increment would reset it) until a person fixes it; the admin card says so. The budget and the runs a day are
+  checked before the call: with several workers they are soft limits (the relay's 300 a day is the hard one).
+- **Round 3 (review):** a run is counted once (`countedAt` on its record, set in the counting transaction), so a
+  run that counted and then stopped before finishing isn't counted again when the next attempt closes it; a
+  record that never reached the model call (no request recorded) is closed without a count or an alert; the
+  record is written with a nonce, so a transaction retried after a late commit knows its own write; a relay URL
+  that isn't a web address, or a secret a header can't carry, is refused before anything is sent (never quoted);
+  after a call that ran into its time limit the fallback needs 60 s left; a damaged day counter pauses that agent
+  for the day (the card says so). The privacy scan also reads URL escapes and "&#64;", "(at)"/"(dot)" emails,
+  Swiss numbers with mixed separators, short dates ("01.10.26", "03.10."), Swiss company numbers, IBANs (a valid
+  check, as their own kind), and matches secrets across "ß"/"ss", apostrophes, hyphens and a genitive "s" —
+  input builders pass a name's parts as secrets too. Rounds 4–5: an umlaut in a secret reads as "ae/oe/ue"
+  (never the plain vowel, which is often a word: "Schön"/"schon", "Bürger"/"Burger"), an umlaut in the text reads
+  both ways (a secret stored as "Muller" is found in "Müller"), and nothing is folded ("Mael" isn't "mal"); a
+  four-digit code also matches as "12 34" (never "1 234" or "17-22"), a longer one in any groups ("1234 5678");
+  "+41"/"0041" numbers with mixed separators, "(point)", "&#46;" and double URL escapes are read; lists of years,
+  map coordinates, "@2x" image names, "Infos @ www.sonne.ch" and long ids inside web links (unless the link has
+  "tel:", "wa.me/", "phone=" or a "+" number) are not personal data; a secret too long for a pattern is compared
+  squashed; long whitespace runs scan in linear time. Round 6: letters with strokes read as typed without them
+  ("Søren" = "Soren"); a phone behind an invisible character or glued to its label ("Tel079…") is found; a
+  four-digit code also matches digit by digit ("4 8 2 1"). Round 7 (each finding checked by an independent
+  skeptic): HTML character references are read ("&nbsp;", "&uuml;"); a name part of 3 letters is checked ("Tim");
+  a Swiss number glued to any word, and a "+"/"00" number glued to the next word, are found; a number glued to an
+  id by "_" isn't a phone; a code with its own punctuation matches as written ("01.10.2026"); two regexes that
+  took 30–60 s on 240 KB of adversarial text are linear. The numbers check reads times and dates in the input in
+  parts ("11.30" = 11, 30, 11.30; an ISO date as "17.10"), percent words in German, French and Italian, and "1 234"
+  when the input has 1234 — invented numbers are still caught.
+- **Round 4 (review):** closing an interrupted run and counting it is one transaction (a run that counted its own
+  spend before it stopped keeps that amount — `countedMicroUsd` — and isn't counted again, and if it still finishes
+  it writes its real result over the close; one closed at the worst case keeps the closed record, matching what was
+  counted, and its late answer is never applied); an error while closing fails the
+  task (nothing was called; it is tried again); every 10 minutes the worker closes runs still `running` after 30
+  minutes (a worker that died on the task's last attempt) and counts them the same way; a lease renewal is awaited
+  at most 10 s (one that lands later still counts) and the three-interval rule is checked on every tick, so a run
+  without a confirmed lease stops within about 100 s of the last good renewal's start, inside the 2-minute lease.
+- **Round 7 (review with skeptics):** the relay tells a gateway call that never went out (`api_error` 502: the
+  worker may try its second model) from one that broke off after it was sent (`relay_answer_lost` 502: maybe
+  billed — counted at the worst case, no second call); the worker reads its own connection errors the same way
+  (refused / unknown host / bad certificate = never sent, anything else = maybe sent, counted at the worst case).
+  A secret is removed from upstream text before the text is cut to length; the model call's secret header never
+  follows a redirect (one is `relay_not_configured`, not counted — round 8), and `CMS_INTERNAL_URL` must be
+  `https://` for it (plain http only to this machine). The worker's credit top-up trigger
+  (`services/autoRefillTrigger.ts`, older code) sends the same secret to the same address and does follow
+  redirects: set `CMS_INTERNAL_URL` to the final address (`https://portal.heidifi.ai`). A run whose count failed
+  is counted by its finish, in the same transaction (unless the count did land); a run another attempt closed,
+  or whose account is gone, never reports an outcome to use (`failed / interrupted`, `skipped / gone`). A shutdown
+  before the run is recorded records nothing and hands the task straight back (one while it is being recorded
+  ends `failed / aborted` before the call: nothing sent, $0); the next attempt closes every earlier run
+  left unfinished, not only the first. A failed SDK load is `sdk_unavailable` (not `bad_schema`).
+- **Round 8 (review with skeptics):** a run that ends before the model call no longer says its counters failed; a
+  redirect on the model call is `relay_not_configured` (not counted, no second model); the run's summary is scanned
+  whole as well as cut to 500 characters (one over 240,000 characters is replaced by the job's label). Privacy scan: bullets ("•", "∙", "・") read as "·" (year lists stay year
+  lists, a phone written with bullets is found); UUIDs are ids; a "00" number glued to a word counts only when it is
+  written with spaces; "Tel_079 …" is found; a URL escape inside a character reference ("&#37;40") is decoded, and
+  only real entity names are read. Secrets: a code with its own punctuation matches exactly as written ("12-34" —
+  never "12.34" or part of a longer number); a 3-letter name is a whole word with no genitive, and the text's accents
+  count ("Dan" is not "dans", "Gia" not "già"); a secret with under 4 letters and digits but 6+ characters is
+  checked exactly as written. Numbers check: the input's dates and times, read in parts, explain only numbers quoted
+  without "%" (a price's cents, a date's day or a time's minutes never explain a rate); "CHF 18.50" is a price, not
+  a time; "5 000" is one number (reported as written when the input doesn't have it); each quoted number is checked
+  against the input by binary search (30,000 against 30,000 in milliseconds).
+- **Round 9 (review with skeptics):** a run whose count failed and whose account is gone meanwhile is counted by its
+  finish, in the platform's totals; the admin card remembers which version a refused save was based on (a refusal
+  that arrives after the row moved on doesn't stick; settings recreated by hand at version 0 load with Reset).
+  Privacy scan: a "00" number glued to the next word is a phone again ("0049-7531-123456Wir"; only the start of a
+  UUID is an id); map coordinates go up to 180 degrees ("333.1234567" is a phone). Numbers check: the input's
+  "1 200" and "1.200" also give 1200 (an honest "1 200 Gäste" passes); a date's or a time's parts explain only the
+  same number ("17.10.2026" explains no "18", "18:30" no "19" — nor an invented "31" next to the ping's date;
+  a bare "17.10" is also the decimal 17.1, which does); seconds
+  are read; a list of rates ("5/10/20 %", "5/10/20 Prozent") is no date.
+- **Round 10 (review with skeptics):** after a refused save the admin card waits for a load before Reset takes the
+  server's values (never an older version than its own last save). Privacy scan: the start of a UUID is an id only
+  when its letters show it, in one case, with its third group ending there — so a "00" phone grouped
+  "00491511-2345-678" is found, also glued to a word ("…-678Bitte"), and so is a phone after such an id. Numbers
+  check: a "%" after a date with a 4-digit year, or a URL escape after it ("…17.10.2026%2018:00"), doesn't make the
+  date a rate list ("%25" is a percent sign); "v2.100" is a label, while "CHF1.200" / "Fr.1.200.–" give 1200.
+- **The privacy scan, round 2:** it scans the package as serialized (what is sent) and the run's summary; texts are
+  put in one form first (compatibility forms such as fullwidth digits and no-break spaces, every dash as "-",
+  invisible characters removed), and dates, times and two-decimal amounts are taken out before the phone check
+  (they neither count as digits nor hide a number next to them). Emails also as "%40", with a quoted name or a
+  non-Latin domain; secrets without case, accents or invisible characters — digits as whole numbers outside
+  dates, words as whole words (rounds 3–6 below refined this; `brain/privacy.ts`'s header is the full rule). Keys
+  that aren't plain field names (starting lower-case) are never written into a finding's path.
+- **No new composite index:** reads are by id or single-field — the admin run log orders by `createdAt`, the
+  worker's sweep of unfinished runs queries `status`, and the cms account delete queries `tenantUserId` and
+  `byTenant.<account>` (keep those fields indexed).
+- **Local:** `POST /dev/agent-run {"agentKey":"ping"}` queues a run; `POST /dev/model-answer
+  {"agentKey":"ping","answers":[{"fault":"rate_limit"}]}` makes the next answer fail; `GET /dev/model-calls` lists
+  what the fake model received.
+
 ## Signals coming back
 
 | Source | Adaptive effect |
@@ -472,6 +641,9 @@ again everywhere (the gate too), so a later splash tick grants it.
 | `safety.maxSendsPlatformPerDay` | 5000 | Circuit breaker for the platform |
 | `safety.staleAfterHours` | 6 | A send more than this late (e.g. the worker was stopped) is skipped |
 | `sms.allowedCountries` | CH, LI, DE, AT, FR, IT | SMS countries |
+| `bandit.mode`, `bandit.accounts.<tenantUserId>` | `off` | PR F1: learning (the bandit) |
+| `agents.mode`, `agents.accounts.<tenantUserId>` | `off` | PR F2a: scheduled AI agent runs (the admin's Test connection runs either way) |
+| `agents.monthlyBudgetUsd` | 100 | PR F2a: the AI budget a month (0, or unreadable = every agent paused) |
 
 - Launch mode only decides which **new** guests start journeys. A guest keeps the mode they started
   with, so a test-run guest never gets a real message.
@@ -571,6 +743,11 @@ launches sending". When the account goes live, such a venue **waits for one clic
    PR F1 adds no composite index. The TTL entries for `CaptivePortal_AdaptiveAlerts`
    and `signups` are now in the JSON too — for `signups`, check first that no other collection named
    `signups` in the project uses `expireAt`.
+   PR F2a adds no composite index. Its one entry is `CaptivePortal_AgentRuns` `expireAt`: a TTL policy (a run's
+   `expireAt` is 13 months after it started) with the field's own indexes off (`"indexes": []`, like the other
+   TTL fields) — both in the Firebase console (Firestore → TTL policies, and Indexes → Single field → exemption).
+   `CaptivePortal_Agents` and `CaptivePortal_AgentUsage` keep no `expireAt`. Don't exempt `AgentUsage`'s
+   `byTenant`: the cms account delete finds an account's leftover shares with `byTenant.<account> > 0`.
    Wait until every index shows **Enabled**.
 
 2. **Check** that `GUEST_OTP_PEPPER` is set on the `server` app. The identity key is derived from

@@ -11,6 +11,9 @@
  *    live keeps its date.
  *  - PR F1: the bandit switch (global + per account) lives here too. Turning it on is a loosening
  *    ("BANDIT ON"); off is the brake (one click).
+ *  - PR F2a: the AI agents' switch (global + per account) and the monthly AI budget, the same way:
+ *    on is "AI ON", a higher budget is a loosened limit ("LOOSEN LIMITS"); off and a lower budget
+ *    are one click.
  */
 
 export type Mode = 'off' | 'test' | 'live';
@@ -32,6 +35,8 @@ export interface LaunchState {
   alertsEmail: string | null;
   /** PR F1: the bandit (missing = off everywhere). */
   bandit?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch> };
+  /** PR F2a: the AI agents (missing = off everywhere) and the monthly budget in USD. */
+  agents?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch>; monthlyBudgetUsd: number };
 }
 
 export type BanditSwitch = 'off' | 'on';
@@ -46,6 +51,8 @@ export interface LaunchChange {
   alertsEmail?: string | null;
   /** PR F1: `null` removes an account's bandit override. */
   bandit?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null> };
+  /** PR F2a: `null` removes an account's AI override. */
+  agents?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null>; monthlyBudgetUsd?: number };
 }
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -74,7 +81,24 @@ export function applyChange(before: LaunchState, c: LaunchChange): LaunchState {
     smsCountries: c.smsCountries ?? before.smsCountries,
     alertsEmail: c.alertsEmail === undefined ? before.alertsEmail : c.alertsEmail,
     bandit: applyBandit(before.bandit, c.bandit),
+    ...(before.agents || c.agents ? { agents: applyAgents(before.agents, c.agents) } : {}),
   };
+}
+
+function applyAgents(before: LaunchState['agents'], c: LaunchChange['agents']): NonNullable<LaunchState['agents']> {
+  const a = before ?? { mode: 'off' as BanditSwitch, accounts: {}, monthlyBudgetUsd: 0 };
+  const accounts = { ...a.accounts };
+  for (const [t, m] of Object.entries(c?.accounts ?? {})) {
+    if (m === null) delete accounts[t];
+    else accounts[t] = m;
+  }
+  return { mode: c?.mode ?? a.mode, accounts, monthlyBudgetUsd: c?.monthlyBudgetUsd ?? a.monthlyBudgetUsd };
+}
+
+/** PR F2a: the AI agents for one account: its override, else the global switch. */
+export function agentsFor(s: Pick<LaunchState, 'agents'>, tenant: string): BanditSwitch {
+  const a = s.agents ?? { mode: 'off', accounts: {}, monthlyBudgetUsd: 0 };
+  return has(a.accounts, tenant) ? a.accounts[tenant] : a.mode;
 }
 
 function applyBandit(before: LaunchState['bandit'], c: LaunchChange['bandit']): NonNullable<LaunchState['bandit']> {
@@ -125,7 +149,7 @@ export function nextLiveSince(before: LaunchState, after: Pick<LaunchState, 'def
   return ls;
 }
 
-export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on';
+export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on' | 'agents_on';
 
 export interface ChangeSummary {
   /** Plain lines for the card: "tenant_x: test run → live". */
@@ -143,8 +167,9 @@ const PHRASES: Record<LooseningKind, string> = {
   release_pause: 'RELEASE PAUSE',
   loosen_limits: 'LOOSEN LIMITS',
   bandit_on: 'BANDIT ON',
+  agents_on: 'AI ON',
 };
-const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on'];
+const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on', 'agents_on'];
 const MODE_WORDS: Record<Mode, string> = { off: 'off', test: 'test run', live: 'live' };
 
 export function summarizeChange(before: LaunchState, after: LaunchState): ChangeSummary {
@@ -192,6 +217,26 @@ export function summarizeChange(before: LaunchState, after: LaunchState): Change
   }
   const tenantsB = new Set([...Object.keys(bb.accounts), ...Object.keys(ab.accounts)]);
   if ((bb.mode === 'off' && ab.mode === 'on') || [...tenantsB].some((t) => banditFor(before, t) === 'off' && banditFor(after, t) === 'on')) kinds.add('bandit_on');
+  // PR F2a: the AI agents' switch and budget ("AI agents" on the admin card).
+  if (before.agents || after.agents) {
+    const ba = before.agents ?? { mode: 'off' as BanditSwitch, accounts: {}, monthlyBudgetUsd: 0 };
+    const aa = after.agents ?? ba;
+    if (ba.mode !== aa.mode) lines.push(`AI agents (default): ${ba.mode} → ${aa.mode}`);
+    const tenantsA = [...new Set([...Object.keys(ba.accounts), ...Object.keys(aa.accounts)])].sort();
+    for (const t of tenantsA) {
+      const was = has(ba.accounts, t) ? ba.accounts[t] : null;
+      const will = has(aa.accounts, t) ? aa.accounts[t] : null;
+      if (was !== will) lines.push(`${t}: AI agents ${was ?? `default (${ba.mode})`} → ${will ?? `default (${aa.mode})`}`);
+    }
+    // Writing an account's own "on" asks for the phrase even while the default is on: that account
+    // then stays on through a later "off by default".
+    const ownOn = tenantsA.some((t) => aa.accounts[t] === 'on' && ba.accounts[t] !== 'on');
+    if ((ba.mode === 'off' && aa.mode === 'on') || ownOn || tenantsA.some((t) => agentsFor(before, t) === 'off' && agentsFor(after, t) === 'on')) kinds.add('agents_on');
+    if (ba.monthlyBudgetUsd !== aa.monthlyBudgetUsd) {
+      lines.push(`AI budget: $${ba.monthlyBudgetUsd} → $${aa.monthlyBudgetUsd} a month`);
+      if (aa.monthlyBudgetUsd > ba.monthlyBudgetUsd) kinds.add('loosen_limits');
+    }
+  }
   const loosening = ORDER.filter((k) => kinds.has(k));
   return { lines, loosening, confirmPhrase: loosening.length ? loosening.map((k) => PHRASES[k]).join(' AND ') : null, empty: lines.length === 0 };
 }

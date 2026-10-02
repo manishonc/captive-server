@@ -3,6 +3,8 @@
  * (default + per account), the pause, safety ceilings, the SMS country list and
  * the alert address.
  *
+ * PR F2a adds `agents` (the AI master switch, per account, and the monthly AI budget).
+ *
  * Read raw — PR 1's `getAdaptiveConfig()` parses a fixed shape and drops these
  * keys. Anything missing or malformed reads as the SAFE value: launch `off`,
  * sending paused. So a bad write can only ever stop the engine, never loosen it.
@@ -61,7 +63,20 @@ const settingsSchema = z.object({
       changedBy: z.string().nullable().optional(),
     })
     .catch({ mode: 'off', accounts: {} }),
+  // PR F2a: the AI agents — off unless HeidiFi turns them on; the budget is USD a month. A missing
+  // budget is the default (100); one that can't be read is 0 (every agent pauses, sends go on).
+  agents: z
+    .object({
+      mode: banditModeSchema.catch('off'),
+      accounts: z.record(z.string(), banditModeSchema.catch('off')).catch({}),
+      monthlyBudgetUsd: z.number().min(0).max(100_000).catch(0),
+      changedBy: z.string().nullable().optional(),
+    })
+    .catch({ mode: 'off', accounts: {}, monthlyBudgetUsd: 0 }),
 });
+
+/** PR F2a: the monthly AI budget when none was ever set (F-D5). */
+export const DEFAULT_AI_BUDGET_USD = 100;
 
 export interface EngineSettings {
   launch: {
@@ -77,7 +92,12 @@ export interface EngineSettings {
   paused: boolean;
   /** PR F1: `off` = exactly the rotation of PR B; `on` = the bandit picks wording and slot. */
   bandit?: { mode: BanditMode; accounts: Record<string, BanditMode>; changedBy: string | null };
+  /** PR F2a: the AI agents' master switch (global + per account) and the monthly budget in USD. */
+  agents?: { mode: AgentsMode; accounts: Record<string, AgentsMode>; monthlyBudgetUsd: number; changedBy: string | null };
 }
+
+/** PR F2a: `on` lets scheduled AI jobs run for an account (the admin's Test connection runs either way). */
+export type AgentsMode = 'off' | 'on';
 
 export const SAFE_SETTINGS: EngineSettings = {
   launch: { default: 'off', accounts: {}, changedBy: null, liveSince: { default: null, accounts: {} } },
@@ -86,6 +106,7 @@ export const SAFE_SETTINGS: EngineSettings = {
   alerts: { email: null },
   paused: true,
   bandit: { mode: 'off', accounts: {}, changedBy: null },
+  agents: { mode: 'off', accounts: {}, monthlyBudgetUsd: 0, changedBy: null },
 };
 
 export function parseEngineSettings(data: Record<string, unknown> | undefined): EngineSettings {
@@ -97,6 +118,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     alerts: data.alerts ?? {},
     killSwitch: data.killSwitch ?? {},
     bandit: data.bandit ?? {},
+    agents: agentsInput(data.agents),
   });
   return {
     launch: {
@@ -110,8 +132,18 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     alerts: { email: p.alerts.email ?? null },
     paused: p.killSwitch.sendingPaused,
     bandit: { mode: p.bandit.mode, accounts: p.bandit.accounts, changedBy: p.bandit.changedBy ?? null },
+    agents: { mode: p.agents.mode, accounts: p.agents.accounts, monthlyBudgetUsd: p.agents.monthlyBudgetUsd, changedBy: p.agents.changedBy ?? null },
   };
 }
+
+/** A missing `agents` block, or one without a budget, gets the default budget; anything else is parsed as is. */
+function agentsInput(raw: unknown): unknown {
+  if (raw === undefined || raw === null) return { monthlyBudgetUsd: DEFAULT_AI_BUDGET_USD };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const o = raw as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(o, 'monthlyBudgetUsd') ? o : { ...o, monthlyBudgetUsd: DEFAULT_AI_BUDGET_USD };
+}
+
 
 /** PR F1: the bandit for one account — its override, else the global mode (missing = off). */
 export function banditModeFor(settings: EngineSettings, tenantUserId: string | null | undefined): BanditMode {

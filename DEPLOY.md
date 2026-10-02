@@ -243,6 +243,27 @@ Copies of the `server` app's existing values; no new variables:
   it — the worker probes the owner screens' queries too. Going live on the admin launch card is refused
   until a worker runs the same code with the same `GUEST_OTP_PEPPER`, so deploy `server` and the worker
   first. Then redeploy the separate `mcp` app (its Adaptive read tools call the new server routes).
+- **PR F2a (the AI agents):**
+  - The worker now also uses `CMS_INTERNAL_URL` = the cms **portal** domain (`https://portal.heidifi.ai`; the
+    visitor host answers `/api` with 404) and `INTERNAL_API_SECRET` (the server's value, which the cms has as
+    `CAPTIVE_SERVER_INTERNAL_SECRET`) to reach the cms model relay. Both are already in the compose file: set
+    them on the worker as runtime variables (not "Build variable") **before** its deploy, so no extra build
+    is needed. Use the final address (no redirect): the model call refuses a redirect (the run fails with
+    `relay_not_configured`); the top-up hint below follows one.
+  - Side effect: with both set, the worker's credit debits (live Adaptive sends) also send the auto top-up
+    hint to the cms, as the server's debits do. The cms re-checks the wallet, threshold and monthly cap
+    before charging. The cms checks the worker's `INTERNAL_API_SECRET` twice over: the model relay against
+    the cms's `CAPTIVE_SERVER_INTERNAL_SECRET`, the top-up route against the cms's own `INTERNAL_API_SECRET`
+    (as for the server today) — both cms values must equal it.
+  - Before the first Test connection: the cms release with the relay is live; the cms has an AI Gateway
+    credential (`AI_GATEWAY_API_KEY`, or the Vercel OIDC token the relay reads on its own) and the Vercel team
+    has AI Gateway credits (a free-tier key can't use Claude models); the alert email is set on the launch
+    card (budget and failure alerts go there).
+  - The admin "AI agents" card (Launch & health) shows whether the running worker has the two values (yes/no
+    only) and whether it is idle. Add the TTL policy and the index exemption on `CaptivePortal_AgentRuns`
+    `expireAt` in the consoles (guide: https://claude.ai/artifact/BtqZkXSuPChbM8wsza8iR7). The AI switch
+    starts off; the Test connection is one small real call (a second only if the first model is busy, down
+    or slow), on Manish's OK.
 
 ---
 

@@ -37,6 +37,14 @@ export const COL = {
   sandboxCalendars: 'CaptivePortal_AdaptiveSandboxCalendars',
   // The bandit (PR F1): arms per venue, journey and step; pooled priors; the learner's state
   banditArms: 'CaptivePortal_BanditArms',
+  // The AI foundation (PR F2a): per-agent settings, the run log, the spend counters
+  agents: 'CaptivePortal_Agents',
+  agentRuns: 'CaptivePortal_AgentRuns',
+  agentUsage: 'CaptivePortal_AgentUsage',
+  /** Local sandbox only: every request package the fake model received (tests prove no personal data left). */
+  sandboxModelCalls: 'CaptivePortal_AdaptiveSandboxModelCalls',
+  /** Local sandbox only: answers queued for the fake model per agent (faults for the checks). */
+  sandboxModelAnswers: 'CaptivePortal_AdaptiveSandboxModelAnswers',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',

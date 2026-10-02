@@ -33,7 +33,11 @@ export type AlertKind =
   // bookings vanishing at once (HeidiFi, D-C35), two bookings overlapping (owner, D-C10)
   | 'stay_feed_failing'
   | 'stay_feed_suspect'
-  | 'stay_overlap';
+  | 'stay_overlap'
+  // The AI agents (PR F2a): the month's AI budget at 80 % / used up (HeidiFi), and a failed agent
+  // run (HeidiFi, once a day per agent and cause; not for a run stopped by a worker's shutdown)
+  | 'agent_budget'
+  | 'agent_failing';
 
 export interface AlertInput {
   kind: AlertKind;

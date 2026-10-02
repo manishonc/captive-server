@@ -14,6 +14,7 @@
  *    worker doesn't know Start sending, and would send and charge at every held venue at once.
  *  - `launch.liveSince` is stamped here (core/runtime/launch.ts). The sandbox's /dev/launch uses
  *    the same function, so local runs exercise it too.
+ *  - PR F2a: the AI agents' switch and monthly budget (`agents`) go through here as well.
  */
 
 import { FieldPath, FieldValue } from 'firebase-admin/firestore';
@@ -61,6 +62,16 @@ export const launchChangeSchema = z
       .object({ mode: z.enum(['off', 'on']).optional(), accounts: z.record(tenantKey, z.enum(['off', 'on']).nullable()).optional() })
       .strict()
       .optional(),
+    // PR F2a: the AI agents, globally and per account (`null` = follow the global switch again),
+    // and the monthly AI budget in USD (0 pauses every agent).
+    agents: z
+      .object({
+        mode: z.enum(['off', 'on']).optional(),
+        accounts: z.record(tenantKey, z.enum(['off', 'on']).nullable()).optional(),
+        monthlyBudgetUsd: z.number().min(0).max(10_000).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -82,6 +93,7 @@ function stateOf(s: EngineSettings): LaunchState {
     smsCountries: s.sms.allowedCountries,
     alertsEmail: s.alerts.email,
     bandit: { mode: s.bandit?.mode ?? 'off', accounts: s.bandit?.accounts ?? {} },
+    agents: { mode: s.agents?.mode ?? 'off', accounts: s.agents?.accounts ?? {}, monthlyBudgetUsd: s.agents?.monthlyBudgetUsd ?? 0 },
   };
 }
 
@@ -168,7 +180,12 @@ export async function getLaunch() {
   ]);
   // Names for every account the card shows: the overrides and the ones with venues waiting
   // (an account that follows a live default has no override).
-  const names = await accountNames([...Object.keys(settings.launch.accounts), ...Object.keys(waiting), ...Object.keys(settings.bandit?.accounts ?? {})]).catch(() => {
+  const names = await accountNames([
+    ...Object.keys(settings.launch.accounts),
+    ...Object.keys(waiting),
+    ...Object.keys(settings.bandit?.accounts ?? {}),
+    ...Object.keys(settings.agents?.accounts ?? {}),
+  ]).catch(() => {
     warnings.push('Could not read the account names');
     return {} as Record<string, { name: string | null; email: string | null }>;
   });
@@ -205,6 +222,13 @@ export async function getLaunch() {
     alerts: { email: settings.alerts.email },
     // PR F1: the bandit switch (off = the rotation of PR B).
     bandit: { mode: settings.bandit?.mode ?? 'off', accounts: settings.bandit?.accounts ?? {}, changedBy: settings.bandit?.changedBy ?? null },
+    // PR F2a: the AI agents' switch and monthly budget (the admin "AI agents" tab shows them too).
+    agents: {
+      mode: settings.agents?.mode ?? 'off',
+      accounts: settings.agents?.accounts ?? {},
+      monthlyBudgetUsd: settings.agents?.monthlyBudgetUsd ?? 0,
+      changedBy: settings.agents?.changedBy ?? null,
+    },
     accountNames: names,
     waitingForStartSending: waiting,
     warnings,
@@ -294,6 +318,14 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
       for (const [t, m] of Object.entries(input.change.bandit.accounts ?? {})) set(['bandit', 'accounts', t], m === null ? FieldValue.delete() : m);
       set(['bandit', 'changedBy'], by);
     }
+    if (input.change.agents) {
+      if (input.change.agents.mode !== undefined && after.agents?.mode !== before.agents?.mode) set(['agents', 'mode'], after.agents!.mode);
+      for (const [t, m] of Object.entries(input.change.agents.accounts ?? {})) set(['agents', 'accounts', t], m === null ? FieldValue.delete() : m);
+      // Always the budget as it reads now (or as changed): a stored `agents` that isn't a map reads as
+      // $0, and a write of one field would otherwise turn it into a map with no budget ($100).
+      set(['agents', 'monthlyBudgetUsd'], after.agents!.monthlyBudgetUsd);
+      set(['agents', 'changedBy'], by);
+    }
     set(['version'], next);
     set(['updatedAt'], new Date(realNow));
     set(['updatedBy'], by);
@@ -318,6 +350,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         smsCountries: before.smsCountries,
         alertsEmail: before.alertsEmail,
         bandit: before.bandit ?? null,
+        agents: before.agents ?? null,
       },
       after: {
         default: after.default,
@@ -330,6 +363,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         smsCountries: after.smsCountries,
         alertsEmail: after.alertsEmail,
         bandit: after.bandit ?? null,
+        agents: after.agents ?? null,
       },
     });
     return { changed: true as const, summary, version: next };

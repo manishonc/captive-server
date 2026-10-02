@@ -38,6 +38,7 @@ services:
       - VISITOR_BASE_URL=${VISITOR_BASE_URL}
       - UNSUBSCRIBE_SIGNING_SECRET=${UNSUBSCRIBE_SIGNING_SECRET}
       # Auto top-up hint after a debit (services/autoRefillTrigger.ts).
+      # PR F2a: also the AI agents' model relay in the cms (brain/modelClient.ts) — the worker has no model key.
       - CMS_INTERNAL_URL=${CMS_INTERNAL_URL}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
     healthcheck:
