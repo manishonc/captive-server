@@ -448,12 +448,20 @@ export async function raiseNextNumbers(next: Record<string, number>): Promise<vo
   });
 }
 
-/** Clears "a webhook named a template we don't have" — only a mark older than the list that was just read. */
-export async function clearHintUnknownIfBefore(listStartedMs: number): Promise<void> {
+/**
+ * Webhook notices within this time of a template's (or the account's) mark don't write it again, so
+ * a burst — or a forger — costs at most one write per doc in this time. In exchange a sync clears
+ * only marks older than its list's start minus this time: a list that started later covers every
+ * notice the mark stood for.
+ */
+export const HINT_COALESCE_MS = 30_000;
+
+/** Clears "a webhook named a template we don't have" — only a mark older than `beforeMs` (the list's start minus HINT_COALESCE_MS). */
+export async function clearHintUnknownIfBefore(beforeMs: number): Promise<void> {
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(opsRef());
     const at = tsMs(snap.get('hintUnknownAt'));
-    if (at !== null && at < listStartedMs) tx.set(opsRef(), { hintUnknownAt: null }, { merge: true });
+    if (at !== null && at < beforeMs) tx.set(opsRef(), { hintUnknownAt: null }, { merge: true });
   });
 }
 

@@ -52,7 +52,7 @@ import { submitTemplate } from '../whatsapp/submit';
 import { reconcile, runWhatsAppTemplateTick } from '../whatsapp/sync';
 import { noteTemplateHint } from '../whatsapp/hints';
 import { SANDBOX_FAULTS, SANDBOX_WABA_ID, queueSandboxFaults, sandboxDecide, type SandboxDecision } from '../whatsapp/sandbox';
-import { checkContext, loadPools, poolFor, templateView, visitorBaseUrl } from '../whatsapp/context';
+import { checkContext, loadPools, poolFor, templateView, unhandledParts, visitorBaseUrl } from '../whatsapp/context';
 import { staleTemplate } from '../whatsapp/store';
 import {
   adminActor,
@@ -80,7 +80,7 @@ export function templateIdParam(value: unknown): string {
 
 const managerUrl = (wabaId: string | null) => (wabaId ? `https://business.facebook.com/wa/manage/message-templates/?waba_id=${encodeURIComponent(wabaId)}` : null);
 
-const RANK: Record<string, number> = { approved: 1, in_review: 2, submitting: 3, ready: 4, needs_fix: 5, rejected: 6, paused: 7, disabled: 8, blocked: 9, attention: 10, deleted: 11 };
+const RANK: Record<string, number> = { approved: 1, in_review: 2, submitting: 3, ready: 4, needs_fix: 5, rejected: 6, paused: 7, disabled: 8, blocked: 9, attention: 10, archived: 11, deleted: 12 };
 const WAITING: ReadonlySet<WaDisplay> = new Set(['ready', 'needs_fix']);
 const WITH_META: ReadonlySet<WaDisplay> = new Set(['in_review', 'submitting']);
 const PROBLEMS: ReadonlySet<WaDisplay> = new Set(['rejected', 'paused', 'disabled', 'blocked', 'archived', 'attention']);
@@ -396,10 +396,11 @@ export async function linkWhatsAppTemplate(id: string, body: unknown, actor: Act
     const order = [...new Set(vars)];
     if (order.some((n, i) => n !== i + 1)) throw conflict('Its fields aren’t numbered in reading order ({{1}} first): it can’t be linked; write it again as a new template');
     const body = sourceFromPositional(cur.meta.bodyText, input.map);
-    if (cur.meta.headerText || cur.meta.otherComponents.length) throw new ApiError('bad_request', 'This template has a header or media this tab doesn’t handle: it can’t be linked (write it again here without them)');
     const urlButton = cur.meta.buttons.find((b) => b.type === 'URL');
     // A link button with a variable needs our link, or every send fails at Meta (132000).
     if (urlButton && /\{\{\s*1\s*\}\}/.test(urlButton.url ?? '') && !input.buttonField) throw new ApiError('bad_request', 'Its button has a link to fill in: say which page it opens');
+    const unhandled = unhandledParts(cur.meta, Boolean(input.buttonField && urlButton));
+    if (unhandled.length) throw new ApiError('bad_request', `This template has parts this tab doesn’t handle (${unhandled.join(', ')}): it can’t be linked (write it again here without them)`);
     const source: WaSource = {
       body,
       footer: cur.meta.footerText,

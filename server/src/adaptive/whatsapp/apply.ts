@@ -8,7 +8,7 @@ import type { MetaTemplateFacts } from '../core/whatsapp/template';
 import { contentKey, parseOurName, type WaUse } from '../core/whatsapp/template';
 import { alertsForChange, displayStatus, rejectionWords, type AlertView, type WaDisplay } from '../core/whatsapp/status';
 import type { PoolRow } from '../core/whatsapp/pools';
-import { META, type StoredTemplate, type TemplateChange, type WaLogLevel, type WaMetaState, type WaTemplateDoc } from './store';
+import { HINT_COALESCE_MS, META, type StoredTemplate, type TemplateChange, type WaLogLevel, type WaMetaState, type WaTemplateDoc } from './store';
 import { poolFor } from './context';
 import { tsMs } from '../store/time';
 
@@ -85,6 +85,8 @@ function statusSentence(label: string, after: WaDisplay, f: { rejectedReason: st
       return `Meta disabled ${label}`;
     case 'deleted':
       return `${label} no longer exists at Meta`;
+    case 'archived':
+      return `Meta archived ${label} (unused for a long time): unarchive it in WhatsApp Manager within 28 days, or Meta deletes it`;
     default:
       return `Meta reports an unusual state for ${label}`;
   }
@@ -118,7 +120,8 @@ export function decideFromMeta(
     : facts;
   // A notice that came after the list was read is about something this list can't show yet: keep it.
   const hintAt = tsMs(cur.hint?.at) ?? 0;
-  const clearHint = Boolean(cur.hint) && (opts.listStartedMs === undefined || hintAt < opts.listStartedMs);
+  // (A notice within HINT_COALESCE_MS of the mark doesn't move it: only a list started that long after the mark covers it.)
+  const clearHint = Boolean(cur.hint) && (opts.listStartedMs === undefined || hintAt < opts.listStartedMs - HINT_COALESCE_MS);
   const wabaSet = opts.wabaId && cur.wabaId !== opts.wabaId ? { wabaId: opts.wabaId } : {};
   const statusChanged = up(m?.status) !== up(f.status);
   const categoryChanged = (m?.category ?? null) !== f.category;
