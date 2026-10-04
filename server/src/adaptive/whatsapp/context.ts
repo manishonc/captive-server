@@ -38,6 +38,35 @@ function driftKey(c: WaCompiled, meta: { bodyText: string | null; footerText: st
   return contentKey({ bodyText: meta.bodyText, footerText: meta.footerText, buttons: c.button && url ? [{ text: url.text, url: url.url }] : c.button ? [{ text: null, url: null }] : [] });
 }
 
+/** Buttons that never need a value at send time (besides a link without a variable). */
+const PLAIN_BUTTONS = new Set(['QUICK_REPLY', 'PHONE_NUMBER']);
+
+/**
+ * The parts of Meta's template we don't fill or keep: a header, media or a carousel, and any button
+ * that needs a value at send time other than our link button — a second link with a variable, a
+ * coupon code, a flow, a catalog. A send would miss them (Meta refuses it, 132000) and an edit would
+ * drop them. `ourButton`: we fill Meta's first link button (a linked or our own template with a
+ * button; for a template not linked yet, the link would).
+ */
+export function unhandledParts(meta: { headerText: string | null; otherComponents: string[]; buttons: Array<{ type: string; url: string | null }> }, ourButton: boolean): string[] {
+  const out: string[] = [];
+  if (meta.headerText) out.push('a header');
+  // Meta's own names (HEADER:IMAGE, CAROUSEL…) in words.
+  out.push(...meta.otherComponents.map((c) => (c.startsWith('HEADER:') ? `a header with ${c.slice(7).toLowerCase() || 'media'}` : `a ${c.toLowerCase().replace(/_/g, ' ')}`)));
+  const firstUrl = meta.buttons.findIndex((b) => b.type === 'URL');
+  meta.buttons.forEach((b, i) => {
+    if (PLAIN_BUTTONS.has(b.type)) return;
+    if (b.type === 'URL') {
+      if (!/\{\{\s*\d+\s*\}\}/.test(b.url ?? '')) return; // a fixed link: nothing to fill
+      if (ourButton && i === firstUrl) return; // the one we fill
+      out.push('a link button with a value we don’t fill');
+      return;
+    }
+    out.push(`a ${b.type ? b.type.toLowerCase().replace(/_/g, ' ') : 'unknown'} button`);
+  });
+  return [...new Set(out)];
+}
+
 export const visitorBaseUrl = () => VISITOR_BASE_URL.replace(/\/+$/, '');
 
 /** Every Adaptive message that can go by WhatsApp, from the live journey definitions. */
@@ -110,22 +139,22 @@ export function reportFor(d: StoredTemplate, ctx: CheckContext): ValidationRepor
   const atMeta = checkImportedTemplate({ name: d.name, buttons: d.meta?.buttons ?? [], use: d.use }, { visitorBaseUrl: ctx.visitorBaseUrl });
   if (!draft) return atMeta;
   const ours = checkWhatsAppTemplate(draft, ctx);
-  // A template Meta has: its registered button counts too (a linked legacy template may carry a broken one).
-  const metaButton = d.stage !== 'draft' && d.meta ? atMeta.issues.filter((i) => i.code === 'T12' && i.severity === 'error') : [];
-  // T23: what Meta holds must be what we compiled — the send (W3) fills Meta's text with our field map.
-  // Only what we compile is compared (body, footer, our link button); a rejected or paused template
-  // being edited is ours to send again, so its new text is not "drift".
+  // A rejected or paused template being edited is ours to send again: its new text (and button) is
+  // what Meta gets, so neither Meta's old button nor its old text counts against it.
   const status = String(d.meta?.status ?? '').toUpperCase();
   const editPending = status === 'REJECTED' || status === 'PAUSED';
+  // A template Meta has: its registered button counts too (a linked legacy template may carry a broken one).
+  const metaButton = d.stage !== 'draft' && d.meta && !editPending ? atMeta.issues.filter((i) => i.code === 'T12' && i.severity === 'error') : [];
+  // T23: what Meta holds must be what we compiled — the send (W3) fills Meta's text with our field map.
+  // Only what we compile is compared (body, footer, our link button); other parts are T24.
   const drift =
     d.stage === 'submitted' && d.meta && d.compiled && d.meta.bodyText !== null && !editPending && driftKey(d.compiled, d.meta, true) !== driftKey(d.compiled, d.meta, false)
       ? [error('T23', 'Meta holds different text than ours (changed in WhatsApp Manager, or an older version): it isn’t used until they match — link it again or write it anew')]
       : [];
-  // T24: parts we don't fill (a header, media, a carousel) — a send would miss them, an edit would drop them.
-  const unmodelled =
-    d.source && d.meta && (d.meta.headerText || d.meta.otherComponents.length)
-      ? [error('T24', `Meta’s template has parts this tab doesn’t handle (${[d.meta.headerText ? 'a header' : '', ...d.meta.otherComponents].filter(Boolean).join(', ')}): it isn’t used, and it can’t be edited here`)]
-      : [];
+  // T24: parts we don't fill (a header, media, a carousel, a button needing a value) — a send would
+  // miss them, an edit would drop them.
+  const parts = d.source && d.meta ? unhandledParts(d.meta, Boolean(d.compiled?.button)) : [];
+  const unmodelled = parts.length ? [error('T24', `Meta’s template has parts this tab doesn’t handle (${parts.join(', ')}): it isn’t used, and it can’t be edited here`)] : [];
   const extra = [...metaButton, ...drift, ...unmodelled];
   return extra.length ? makeReport([...ours.issues, ...extra]) : ours;
 }
@@ -214,6 +243,8 @@ export function templateView(d: StoredTemplate, pools: PoolRow[], ctx: CheckCont
     source: d.source,
     compiled: d.compiled ? { bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, button: d.compiled.button, params: d.compiled.params, components: d.compiled.components } : null,
     meta: d.meta ? toJson({ ...d.meta }) : null,
+    /** What this tab can't handle in Meta's template (empty: everything): no link, no edit. */
+    unhandled: d.meta ? unhandledParts(d.meta, d.compiled ? Boolean(d.compiled.button) : true) : [],
     submit: d.submit ? toJson(d.submit) : null,
     allowedFields: pool?.allowedFields ?? null,
     linkField: pool?.linkField ?? null,

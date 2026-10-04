@@ -6,17 +6,19 @@
  * template we don't have, the account (`hintUnknownAt`) — and the next tick (≤ 2 minutes) re-reads
  * it from Meta. Never calls Meta, never alerts. A hint for another account is ignored.
  *
- * Every notice moves the mark (a sync clears only marks older than the list it read, so a notice
- * that comes while a sync runs is never lost). The log line is limited separately — at most one per
- * template (`hintLoggedAt`) or for all unknown names (`hintUnknownLoggedAt`) every 10 minutes — and
- * says the notice is unverified, as anyone could have sent it.
+ * A notice moves the mark unless the mark is younger than HINT_COALESCE_MS (then a sync clears it only
+ * once its list started that long after the mark, so a notice that comes while a sync runs is never
+ * lost) — at most one write per template, and one on the account, in that time. The log line is
+ * limited separately — at most one per template (`hintLoggedAt`) or for all unknown names
+ * (`hintUnknownLoggedAt`) every 10 minutes — and says the notice is unverified, as anyone could have
+ * sent it.
  */
 
 import { db } from '../../firebase';
 import { COL, WHATSAPP_DOC_ID } from '../store/collections';
 import { tsMs } from '../store/time';
 import { whatsappTemplateIdFor } from '../core/runtime/ids';
-import { SYSTEM, logInTx, readOps } from './store';
+import { HINT_COALESCE_MS, SYSTEM, logInTx, readOps } from './store';
 
 export const TEMPLATE_FIELDS = ['message_template_status_update', 'template_category_update', 'message_template_quality_update'] as const;
 
@@ -62,6 +64,8 @@ export async function noteTemplateHint(entryId: string, field: string, value: Re
     const stage = snap.get('stage');
     const status = String(snap.get('meta.status') ?? '').toUpperCase();
     if ((stage !== 'submitted' && stage !== 'submitting') || status === 'DELETED') return false;
+    const markedAt = tsMs(snap.get('hint.at'));
+    if (markedAt !== null && Date.now() - markedAt < HINT_COALESCE_MS) return true; // already marked just now
     const loggedAt = tsMs(snap.get('hintLoggedAt'));
     const log = loggedAt === null || Date.now() - loggedAt >= LOG_EVERY_MS;
     tx.update(ref, { hint: { at: new Date(), field, event }, ...(log ? { hintLoggedAt: new Date() } : {}) });
@@ -82,7 +86,10 @@ export async function noteTemplateHint(entryId: string, field: string, value: Re
   // mark always moves; one log line (for all such names) every 10 minutes.
   await db.runTransaction(async (tx) => {
     const opsRef = db.collection(COL.config).doc(WHATSAPP_DOC_ID);
-    const loggedAt = tsMs((await tx.get(opsRef)).get('hintUnknownLoggedAt'));
+    const snap = await tx.get(opsRef);
+    const markedAt = tsMs(snap.get('hintUnknownAt'));
+    if (markedAt !== null && Date.now() - markedAt < HINT_COALESCE_MS) return; // already marked just now
+    const loggedAt = tsMs(snap.get('hintUnknownLoggedAt'));
     const log = loggedAt === null || Date.now() - loggedAt >= LOG_EVERY_MS;
     tx.set(opsRef, { hintUnknownAt: new Date(), ...(log ? { hintUnknownLoggedAt: new Date() } : {}) }, { merge: true });
     if (log) {
