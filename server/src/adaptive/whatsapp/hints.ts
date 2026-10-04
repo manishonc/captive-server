@@ -5,15 +5,23 @@
  * server), so its body is never trusted: a hint only marks the template (`hint.at`) — or, for a
  * template we don't have, the account (`hintUnknownAt`) — and the next tick (≤ 2 minutes) re-reads
  * it from Meta. Never calls Meta, never alerts. A hint for another account is ignored.
+ *
+ * Every notice moves the mark (a sync clears only marks older than the list it read, so a notice
+ * that comes while a sync runs is never lost). The log line is limited separately — at most one per
+ * template (`hintLoggedAt`) or for all unknown names (`hintUnknownLoggedAt`) every 10 minutes — and
+ * says the notice is unverified, as anyone could have sent it.
  */
 
 import { db } from '../../firebase';
 import { COL, WHATSAPP_DOC_ID } from '../store/collections';
 import { tsMs } from '../store/time';
 import { whatsappTemplateIdFor } from '../core/runtime/ids';
-import { META, logInTx, readOps, writeLog } from './store';
+import { SYSTEM, logInTx, readOps } from './store';
 
 export const TEMPLATE_FIELDS = ['message_template_status_update', 'template_category_update', 'message_template_quality_update'] as const;
+
+/** At most one log line per template (and one for all unknown names) in this time. */
+const LOG_EVERY_MS = 10 * 60_000;
 
 let wabaCache: { id: string | null; at: number } | null = null;
 
@@ -54,38 +62,76 @@ export async function noteTemplateHint(entryId: string, field: string, value: Re
     const stage = snap.get('stage');
     const status = String(snap.get('meta.status') ?? '').toUpperCase();
     if ((stage !== 'submitted' && stage !== 'submitting') || status === 'DELETED') return false;
-    const prev = snap.get('hint') as { at?: unknown; event?: string | null } | null | undefined;
-    // A burst of notices costs one read each: the mark moves at most every 30 s (so a notice that
-    // comes after a sync has read the list still marks it again), the log line at most every 10 min.
-    const age = prev ? Date.now() - (tsMs(prev.at) ?? 0) : Infinity;
-    if (age < 30_000) return true;
-    tx.update(ref, { hint: { at: new Date(), field, event } });
-    if (age >= 10 * 60_000) {
+    const loggedAt = tsMs(snap.get('hintLoggedAt'));
+    const log = loggedAt === null || Date.now() - loggedAt >= LOG_EVERY_MS;
+    tx.update(ref, { hint: { at: new Date(), field, event }, ...(log ? { hintLoggedAt: new Date() } : {}) });
+    if (log) {
       logInTx(tx, {
         kind: 'webhook.hint',
         level: 'info',
-        actor: META,
-        summary: `Meta sent a notice for ${name} (${language})${event ? `: ${event.toLowerCase()}` : ''} — re-reading it from Meta`,
-        detail: { field, event },
+        actor: SYSTEM,
+        summary: `A webhook notice (unverified) named ${name} (${language})${event ? `: ${event.toLowerCase()}` : ''} — re-reading it from Meta`,
+        detail: { field, event, verified: false },
       }, { templateId: id, name, language });
     }
     return true;
   });
   if (marked) return 'marked';
 
-  // A template we don't have (made in WhatsApp Manager, or a race with a submit): sync soon —
-  // one mark (and one log line) at a time, decided in a transaction.
-  const first = await db.runTransaction(async (tx) => {
+  // A template we don't have (made in WhatsApp Manager, or a race with a submit): sync soon. The
+  // mark always moves; one log line (for all such names) every 10 minutes.
+  await db.runTransaction(async (tx) => {
     const opsRef = db.collection(COL.config).doc(WHATSAPP_DOC_ID);
-    const at = tsMs((await tx.get(opsRef)).get('hintUnknownAt'));
-    if (at !== null && Date.now() - at < 10 * 60_000) return false;
-    tx.set(opsRef, { hintUnknownAt: new Date() }, { merge: true });
-    return true;
+    const loggedAt = tsMs((await tx.get(opsRef)).get('hintUnknownLoggedAt'));
+    const log = loggedAt === null || Date.now() - loggedAt >= LOG_EVERY_MS;
+    tx.set(opsRef, { hintUnknownAt: new Date(), ...(log ? { hintUnknownLoggedAt: new Date() } : {}) }, { merge: true });
+    if (log) {
+      logInTx(tx, {
+        kind: 'webhook.hint',
+        level: 'info',
+        actor: SYSTEM,
+        summary: `A webhook notice (unverified) named ${name} (${language}), which isn’t one we can re-read yet — syncing`,
+        detail: { field, event, verified: false },
+      }, { name, language });
+    }
   });
-  if (first) {
-    await writeLog({ kind: 'webhook.hint', level: 'info', actor: META, summary: `Meta sent a notice for ${name} (${language}), which isn’t one we can re-read yet — syncing`, detail: { field, event } }, { name, language });
-  }
   return 'unknown_template';
+}
+
+export interface TemplateHintInput {
+  entryId: string;
+  field: string;
+  value: Record<string, unknown>;
+}
+
+/** The most template notices one webhook body may act on (the rest are dropped: the sync reads them all anyway). */
+export const MAX_HINTS_PER_BODY = 10;
+
+/**
+ * Every template notice of one webhook body, one after another: a notice repeated for the same
+ * account, name and language counts once, and at most 10 are acted on — one body can't start a
+ * burst of transactions. Returns how many were acted on. Never throws.
+ */
+export async function noteTemplateHints(items: TemplateHintInput[]): Promise<number> {
+  const seen = new Set<string>();
+  let n = 0;
+  for (const it of items) {
+    const v = it.value ?? {};
+    const key = [it.entryId, v.message_template_name, v.message_template_language].map((x) => String(x ?? '').slice(0, 600)).join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (n >= MAX_HINTS_PER_BODY) {
+      console.warn('[WA TEMPLATES] webhook body named more templates than are acted on: the rest wait for the sync');
+      break;
+    }
+    n += 1;
+    try {
+      await noteTemplateHint(it.entryId, it.field, v);
+    } catch (err) {
+      console.error('[WA TEMPLATES] webhook hint failed', (err as Error)?.name ?? 'Error');
+    }
+  }
+  return n;
 }
 
 /** Tests only. */

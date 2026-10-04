@@ -16,7 +16,6 @@
  *     - any other refusal → back where it was, with Meta's words (`lastSubmitError`).
  */
 
-import { checkWhatsAppTemplate } from '../core/whatsapp/checks';
 import { parseMetaTemplate } from '../core/whatsapp/template';
 import { META_CREATES_PER_HOUR } from '../core/whatsapp/checks';
 import { conflict, validationFailed } from '../api/errors';
@@ -25,7 +24,7 @@ import { now as engineNow, refreshClock } from '../engine/clock';
 import { raiseAlert, dayKey } from '../engine/alerts';
 import { MetaError } from './metaError';
 import { metaClient } from './source';
-import { checkContext, draftForCheck, loadPools } from './context';
+import { checkContext, draftForCheck, loadPools, reportFor } from './context';
 import { decideFromMeta } from './apply';
 import {
   beginSubmit,
@@ -34,6 +33,7 @@ import {
   HttpLikeTooMany,
   listTemplates,
   readOps,
+  updateOps,
   writeLog,
   type StoredTemplate,
   type WaActor,
@@ -67,7 +67,8 @@ export async function submitTemplate(id: string, baseVersion: number, by: WaActo
   const draft = draftForCheck(doc);
   if (!draft) throw conflict('This template has no text of ours to send (link it to a message first)');
   const [pools, docs] = await Promise.all([loadPools(), listTemplates()]);
-  const report = checkWhatsAppTemplate(draft, checkContext(pools, docs, ops, doc.use));
+  // The same report the tab shows (our checks, Meta's registered button, drift, parts we don't handle).
+  const report = reportFor(doc, checkContext(pools, docs, ops, doc.use));
   if (!report.ok) {
     await writeLog(
       {
@@ -96,19 +97,36 @@ export async function submitTemplate(id: string, baseVersion: number, by: WaActo
   // meanwhile, and editing an approved template would pull it back into review).
   if (begun.kind === 'edit') {
     let now: ReturnType<typeof parseMetaTemplate> = null;
+    let readError: MetaError | null = null;
+    let gone = false;
     try {
-      now = parseMetaTemplate(await client.getTemplate(cur.meta!.id!));
-    } catch {
-      now = null;
+      const raw = await client.getTemplate(cur.meta!.id!);
+      gone = raw === null;
+      now = parseMetaTemplate(raw);
+    } catch (err) {
+      readError = err instanceof MetaError ? err : new MetaError('unavailable', 'Meta couldn’t be asked for its current state');
+      if (readError.kind === 'rate_limited') await updateOps({ backoffUntilMs: Date.now() + (readError.info.retryAfterMs ?? 5 * 60_000) });
     }
     const st = String(now?.status ?? '').toUpperCase();
     if (!now || (st !== 'REJECTED' && st !== 'PAUSED')) {
-      const reverted = await revert(id, new MetaError('invalid', now ? `Meta holds it as ${st.toLowerCase() || 'unknown'} now` : 'Meta couldn’t be asked for its current state'), by, 'submit.failed', 'meta_changed');
+      // Three different stories: Meta couldn't be asked, Meta no longer has it, or Meta's copy changed.
+      const why = readError ?? new MetaError(gone ? 'not_found' : 'invalid', gone ? 'Meta no longer has this template' : `Meta holds it as ${st.toLowerCase() || 'unknown'} now`);
+      const reverted = await revert(id, why, by, 'submit.failed', readError ? undefined : gone ? 'meta_gone' : 'meta_changed');
       if (now) {
         const pools0 = await loadPools();
         await changeTemplate(id, (d) => (d && d.stage === 'submitted' ? decideFromMeta(d, now!, pools0, new Date(), 'sync', { wabaId }) : null));
       }
-      return { outcome: 'refused', doc: (await getTemplate(id)) ?? reverted, error: { kind: 'invalid', message: now ? `Meta holds it as ${st.toLowerCase()} now — nothing was sent; check it` : 'Meta couldn’t be asked for its current state — try again', code: null, subcode: null, fbtraceId: null } };
+      return {
+        outcome: 'refused',
+        doc: (await getTemplate(id)) ?? reverted,
+        error: {
+          kind: why.kind,
+          message: now ? `Meta holds it as ${st.toLowerCase()} now — nothing was sent; check it` : gone ? 'Meta no longer has this template — nothing was sent' : `Meta couldn’t be asked for its current state — try again (${why.userMsg})`,
+          code: why.info.code ?? null,
+          subcode: why.info.subcode ?? null,
+          fbtraceId: why.info.fbtraceId ?? null,
+        },
+      };
     }
   }
 
@@ -211,14 +229,18 @@ async function adoptOrLock(id: string, wabaId: string, cur: StoredTemplate, e: M
 }
 
 /** Back where it was before the submit, with Meta's words. */
-export async function revert(id: string, e: MetaError, by: WaActor, kind: string, code?: string): Promise<StoredTemplate | null> {
+export async function revert(id: string, e: MetaError, by: WaActor, kind: string, code?: string, onlyIfStartedAtMs?: number): Promise<StoredTemplate | null> {
   const res = await changeTemplate(id, (d) => {
     if (!d || d.stage !== 'submitting' || !d.submit) return null;
+    // The repair puts back only the submit it looked at (never one started since).
+    if (onlyIfStartedAtMs !== undefined && d.submit.startedAtMs !== onlyIfStartedAtMs) return null;
     const words =
       code === 'name_locked'
         ? 'Meta is still deleting a template with this name and language (about 30 days): copy it to a new name'
         : code === 'meta_changed'
           ? 'Meta’s copy changed meanwhile: nothing was sent'
+          : code === 'meta_gone'
+            ? 'Meta no longer has this template: nothing was sent'
           : code === 'unknown_outcome'
             ? 'Meta never confirmed it'
             : ERR_WORDS[e.kind] ?? 'Meta refused it';

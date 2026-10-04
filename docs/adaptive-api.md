@@ -299,7 +299,8 @@ in the log with who did it. Code: `adaptive/core/whatsapp/*` (pure), `adaptive/w
 
 **How a template moves.** Stored: our `stage` (`draft` → `submitting` → `submitted`) and Meta's raw
 status; shown: needs fix · ready · sending · in review · approved · **blocked** (approved, but Meta files
-a service message as MARKETING) · rejected · paused · disabled · deleted · needs attention · dismissed.
+a service message as MARKETING) · rejected · paused · disabled · deleted · **archived** (Meta archived it; unarchive
+in WhatsApp Manager within 28 days) · needs attention · dismissed.
 `version` counts content edits (`baseVersion`); Meta's changes bump only `seq` (the timeline's ids).
 Submit: checks again → one transaction to `submitting` (two clicks: one 409) → Meta create (a draft) or
 edit (rejected/paused) → a read for Meta's real status and category. No answer (timeout, 5xx) stays
@@ -313,7 +314,11 @@ transaction, "deleted" only after a complete list and a not-found read. Sync at 
 hint, every 15 minutes while something is with Meta, else every 6 hours. Then alerts are emailed and the
 08:00 (Zurich) summary goes out (skipped when empty). The webhook (`/webhook/whatsapp`, fields
 `message_template_status_update`, `template_category_update`, `message_template_quality_update`) only
-marks the template; the body is never trusted.
+marks the template; the body is never trusted. Every notice moves the mark (a sync clears only marks older
+than the list it read); one body acts on at most 10 templates (repeats once); the log row says
+"unverified" and comes at most once per template (and once for all unknown names) every 10 minutes.
+Stuck submits are looked up within the tick's time, stop when Meta is unreachable or slows us down
+(a rate limit sets the backoff), and never touch a submit started since.
 
 **Alerts** (HeidiFi's alert email): `whatsapp_template` at once — rejected, paused, disabled, deleted
 while in use, blocked by its category, quality RED; the login-code template (urgent) not approved in a
@@ -329,7 +334,7 @@ Reads are by id, the whole small registry, or newest first by one field: no comp
 
 | Where | Codes |
 |---|---|
-| WhatsApp template (PR W1; errors block Send to Meta, warnings are shown) | T01 name · T02 language · T03 category asked · T04 the message's rule · T05 one category per name · T06 length (warn: worst case) · T07 footer length · T08 fields allowed, once, well formed · T09 not first/last/side by side · T10 words per field (warn under 3) · T11 defaults + date formats · T12 the button link (also Meta's registered one) · T13 names the venue · T14 no links/emails/phones · T15 STOP in the footer · T16 template limit · T17 name locked · T18 duplicate text · T19 utility: no offer fields (warn: promotional words, emoji) · T20 STOP footer on marketing (warn on utility) · T21 formatting · T22 creates this hour |
+| WhatsApp template (PR W1; errors block Send to Meta, warnings are shown) | T01 name · T02 language · T03 category asked · T04 the message's rule · T05 one category per name · T06 length (warn: worst case) · T07 footer length · T08 fields allowed, once, well formed · T09 not first/last/side by side · T10 words per field (warn under 3) · T11 defaults + date formats · T12 the button link (also Meta's registered one) · T13 names the venue · T14 no links/emails/phones · T15 STOP in the footer · T16 template limit · T17 name locked · T18 duplicate text · T19 utility: no offer fields (warn: promotional words, emoji) · T20 STOP footer on marketing (warn on utility) · T21 formatting · T22 creates this hour · T23 Meta's text differs from ours (body, footer, our link button; not while a rejected/paused template is being edited) · T24 Meta's template has a header or media this tab doesn't handle (linking refused) |
 | Playbook (admin Check / publish) | K01 shape · K02 kind locked · P01 name · P02 journeys · P03 required ⇒ on · P04 newest pin (warn) · P05 questions (warn) · P06 pinned version exists · P07 coming soon ⇒ off · V04 offers & defaults · V07 wording (warn) · V09 venue types · V10 same trigger (warn) · V14 info playbook |
 | Journey template (seed / CI) | V01 graph · V02 pools · V03 caps · V04 offer blanks · V05 high value · V06 trigger config · V08 channel diff · V14 info journey · V16 registry |
 | Owner setup (save / turn on) | S01 venue · S02 journeys on/off · S03 blanks · S04 playbook offered · F01 time zone · F02 account active · F03 overlap acknowledged · W01 WhatsApp later (info) · W02 stay calendar (warn) |

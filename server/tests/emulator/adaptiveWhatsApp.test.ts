@@ -39,9 +39,11 @@ import {
 import { ADMIN_ACTOR, OWNER_ACTOR, captureLogs, mountApi } from './ownerApiHelpers';
 import { CONFIG_DOC_ID, WHATSAPP_DOC_ID } from '../../src/adaptive/store/collections';
 import { runWhatsAppTemplateTick } from '../../src/adaptive/whatsapp/sync';
-import { __clearHintCache, noteTemplateHint } from '../../src/adaptive/whatsapp/hints';
+import { __clearHintCache, noteTemplateHint, noteTemplateHints } from '../../src/adaptive/whatsapp/hints';
+import { revert } from '../../src/adaptive/whatsapp/submit';
+import { MetaError } from '../../src/adaptive/whatsapp/metaError';
 import { queueSandboxFaults, SANDBOX_WABA_ID } from '../../src/adaptive/whatsapp/sandbox';
-import { hourKey } from '../../src/adaptive/whatsapp/store';
+import { SYSTEM, hourKey } from '../../src/adaptive/whatsapp/store';
 import { STOP_LINES } from '../../src/adaptive/send/compose';
 
 let api: Awaited<ReturnType<typeof mountApi>>;
@@ -244,6 +246,8 @@ await test('a rejection alerts once; edited, resubmitted and rejected again it a
   assertEqual((await alertsOf('whatsapp_template')).length, 1, 'not again');
   const edited = await put(`/admin/whatsapp/templates/${d.id}`, { change: { source: { ...DE_LAST, body: DE_LAST.body.replace('Wir freuen uns!', 'Bis bald!') } }, baseVersion: v.template.version });
   assertEqual(edited.status, 200, edited.text);
+  // Our new text differs from Meta's rejected copy: that is the edit, not drift (no T23 to block Send again).
+  assert(!edited.body.template.checks.issues.some((i: any) => i.code === 'T23'), JSON.stringify(edited.body.template.checks.issues));
   const s = await submit(d.id, edited.body.template.version);
   assertEqual([s.status, s.body.outcome, s.body.template?.display], [200, 'submitted', 'in_review'], `resubmit ${s.text}`);
   assertEqual((await sandboxTemplates(d.name)).length, 1, 'edited, not a second template');
@@ -511,6 +515,124 @@ await test('review fixes: "already exists" with a failing lookup stays sending (
   const r = await submit(d.id, d.version);
   assertEqual([r.body.outcome, r.body.template.display], ['unknown', 'submitting'], r.text);
   assert(!r.body.template.checks.issues.some((i: any) => i.code === 'T17'), 'not locked');
+});
+
+await test('review round 2: every notice moves the mark (none lost while a sync reads); one unverified log line per 10 minutes, even after a sync cleared the mark', async () => {
+  await fresh();
+  await connectAndSync();
+  const v = { event: 'APPROVED', message_template_name: 'restaurant_feedback_request', message_template_language: 'en' };
+  const id = (await get('/admin/whatsapp')).body.templates.find((t: any) => t.name === 'restaurant_feedback_request').id;
+  const ref = db.collection(COL.whatsappTemplates).doc(id);
+  assertEqual(await noteTemplateHint(SANDBOX_WABA_ID, 'message_template_status_update', v), 'marked', 'first');
+  // As if the first notice came 5 s ago and a sync had started reading the list since.
+  const earlier = new Date(Date.now() - 5_000);
+  await ref.update({ 'hint.at': earlier });
+  assertEqual(await noteTemplateHint(SANDBOX_WABA_ID, 'template_category_update', { ...v, new_category: 'UTILITY' }), 'marked', 'second');
+  assert((ref ? (await ref.get()).get('hint.at').toDate().getTime() : 0) > earlier.getTime(), 'the second notice moved the mark');
+  await runWhatsAppTemplateTick();
+  assertEqual((await ref.get()).get('hint'), null, 're-read, mark cleared');
+  assertEqual(await noteTemplateHint(SANDBOX_WABA_ID, 'message_template_status_update', v), 'marked', 'after the sync');
+  const rows = await logRows('webhook.hint');
+  assertEqual(rows.length, 1, 'one log line in 10 minutes, though the sync cleared the mark');
+  assert(rows[0].actor.kind === 'system' && rows[0].detail.verified === false && /unverified/.test(rows[0].summary), JSON.stringify(rows[0]));
+
+  const opsRef = db.collection(COL.config).doc(WHATSAPP_DOC_ID);
+  assertEqual(await noteTemplateHint(SANDBOX_WABA_ID, 'message_template_status_update', { ...v, message_template_name: 'made_in_manager' }), 'unknown_template', 'unknown');
+  await opsRef.update({ hintUnknownAt: earlier });
+  await noteTemplateHint(SANDBOX_WABA_ID, 'message_template_status_update', { ...v, message_template_name: 'made_elsewhere' });
+  assert((await opsRef.get()).get('hintUnknownAt').toDate().getTime() > earlier.getTime(), 'the unknown mark moved too');
+  assertEqual((await logRows('webhook.hint')).length, 2, 'one line for all unknown names');
+});
+
+await test('review round 2: one webhook body — a repeated notice counts once, at most 10 are acted on', async () => {
+  await fresh();
+  await connectAndSync();
+  const item = (name: string) => ({ entryId: SANDBOX_WABA_ID, field: 'message_template_status_update', value: { event: 'APPROVED', message_template_name: name, message_template_language: 'en' } });
+  const repeats = Array.from({ length: 3 }, () => item('restaurant_feedback_request'));
+  assertEqual(await noteTemplateHints(repeats), 1, 'repeats once');
+  assertEqual(await noteTemplateHints([...repeats, ...Array.from({ length: 15 }, (_, i) => item(`made_in_manager_${i}`))]), 10, 'capped at 10');
+});
+
+await test('review round 2: a header (or media) Meta holds — linking refused; on a linked template it is unusable (T24)', async () => {
+  await fresh();
+  await connectAndSync();
+  await db.collection(COL.sandboxWhatsAppTemplates).doc('sbx_header_1').set({
+    name: 'promo_with_header',
+    language: 'en',
+    status: 'APPROVED',
+    category: 'MARKETING',
+    componentsJson: JSON.stringify([
+      { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['h'] } },
+      { type: 'BODY', text: 'Hi {{1}}, a new season starts at {{2}} this week, with a table waiting for you.', example: { body_text: [['Anna', 'Café Bellevue']] } },
+      { type: 'FOOTER', text: 'Reply STOP to opt out.' },
+    ]),
+    wabaId: SANDBOX_WABA_ID,
+    quality: 'GREEN',
+    createdAt: new Date(),
+  });
+  await post('/admin/whatsapp/sync');
+  const promo = (await get('/admin/whatsapp')).body.templates.find((t: any) => t.name === 'promo_with_header');
+  const refused = await put(`/admin/whatsapp/templates/${promo.id}/link`, {
+    use: { journeyKey: 'welcome_second_visit', poolKey: 'welcome_offer' },
+    map: [{ n: 1, field: 'contact.firstName', fallback: 'there' }, { n: 2, field: 'venue.name' }],
+    buttonField: null,
+    baseVersion: promo.version,
+  });
+  assertEqual(refused.status, 400, refused.text);
+  assert(/header or media/.test(refused.text), refused.text);
+
+  // A template linked before, given a header at Meta since: it isn't used.
+  const visit = (await get('/admin/whatsapp')).body.templates.find((t: any) => t.name === 'restaurant_feedback_request');
+  const linked = await put(`/admin/whatsapp/templates/${visit.id}/link`, {
+    use: { journeyKey: 'review_ask', poolKey: 'review_ask' },
+    map: [{ n: 1, field: 'contact.firstName', fallback: 'there' }, { n: 2, field: 'venue.name' }],
+    buttonField: 'link.rating',
+    baseVersion: visit.version,
+  });
+  assertEqual(linked.status, 200, linked.text);
+  const sbx = (await sandboxTemplates('restaurant_feedback_request'))[0];
+  await db.collection(COL.sandboxWhatsAppTemplates).doc(sbx.id).update({ componentsJson: JSON.stringify([{ type: 'HEADER', format: 'TEXT', text: 'Thanks!' }, ...JSON.parse(sbx.componentsJson)]) });
+  await post('/admin/whatsapp/sync');
+  const after = await view(visit.id);
+  assert(after.template.usable === false && after.template.checks.issues.some((i: any) => i.code === 'T24' && i.severity === 'error'), JSON.stringify(after.template.checks.issues));
+});
+
+await test('review round 2: Meta’s other buttons (a quick reply) are not drift; only our link button counts', async () => {
+  await fresh();
+  await connectAndSync();
+  const d = await offerDraft();
+  await submit(d.id, d.version);
+  await review(d.id, 'APPROVED');
+  await runWhatsAppTemplateTick();
+  const sbx = (await sandboxTemplates(d.name))[0];
+  const comps = JSON.parse(sbx.componentsJson);
+  const buttons = comps.find((c: any) => c.type === 'BUTTONS');
+  buttons.buttons.push({ type: 'QUICK_REPLY', text: 'Stop promotions' });
+  await db.collection(COL.sandboxWhatsAppTemplates).doc(sbx.id).update({ componentsJson: JSON.stringify(comps) });
+  await post('/admin/whatsapp/sync');
+  const v = await view(d.id);
+  assert(v.template.usable === true && !v.template.checks.issues.some((i: any) => i.code === 'T23'), JSON.stringify(v.template.checks.issues));
+});
+
+await test('review round 2: stuck submits — Meta slowing us down stops the repair (backoff); the repair never puts back a newer submit', async () => {
+  await fresh();
+  await connectAndSync();
+  const d = await offerDraft();
+  await queueSandboxFaults([{ op: 'create', fault: 'timeout_lost' }]);
+  await submit(d.id, d.version);
+  await advance(11 * 60_000);
+  await queueSandboxFaults([{ op: 'find', fault: 'rate_limit' }]);
+  await runWhatsAppTemplateTick();
+  assertEqual((await view(d.id)).template.display, 'submitting', 'left for later');
+  const ops = (await db.collection(COL.config).doc(WHATSAPP_DOC_ID).get()).data()!;
+  assert(typeof ops.backoffUntilMs === 'number' && ops.backoffUntilMs > Date.now(), 'backoff set');
+
+  const started = (await db.collection(COL.whatsappTemplates).doc(d.id).get()).get('submit.startedAtMs') as number;
+  assertEqual((await revert(d.id, new MetaError('unknown', 'x'), SYSTEM, 'submit.reverted', 'unknown_outcome', started - 1))?.stage, 'submitting', 'another submit: untouched');
+  await db.collection(COL.config).doc(WHATSAPP_DOC_ID).update({ backoffUntilMs: null });
+  await runWhatsAppTemplateTick();
+  const v = await view(d.id);
+  assertEqual([v.template.display, v.template.lastSubmitError?.code], ['ready', 'unknown_outcome'], 'put back once Meta answers');
 });
 
 await test('no secret in any console line', async () => {

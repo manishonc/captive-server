@@ -29,7 +29,8 @@ export function metaStateFrom(f: MetaTemplateFacts, prev: WaMetaState | null, no
     footerText: f.footerText,
     buttons: f.buttons,
     otherComponents: f.otherComponents,
-    approvedAt: up(f.status) === 'APPROVED' ? (up(prev?.status) === 'APPROVED' ? prev?.approvedAt ?? now : now) : prev?.approvedAt ?? null,
+    // Approved before (also an import we never saw approved, null): unchanged; newly approved: now.
+    approvedAt: up(f.status) === 'APPROVED' ? (up(prev?.status) === 'APPROVED' ? prev?.approvedAt ?? null : now) : prev?.approvedAt ?? null,
     lastChangedAt: now,
   };
 }
@@ -66,7 +67,7 @@ function viewOf(d: Pick<WaTemplateDoc, 'stage' | 'meta' | 'dismissed' | 'use' | 
   };
 }
 
-const PROBLEM: ReadonlySet<WaDisplay> = new Set(['rejected', 'paused', 'disabled', 'deleted', 'blocked', 'attention']);
+const PROBLEM: ReadonlySet<WaDisplay> = new Set(['rejected', 'paused', 'disabled', 'deleted', 'archived', 'blocked', 'attention']);
 
 function statusSentence(label: string, after: WaDisplay, f: { rejectedReason: string | null; category: string | null }): string {
   switch (after) {
@@ -123,7 +124,9 @@ export function decideFromMeta(
   const categoryChanged = (m?.category ?? null) !== f.category;
   const qualityChanged = (m?.quality ?? null) !== f.quality && !(m?.quality == null && (f.quality === 'UNKNOWN' || f.quality === null));
   const reasonChanged = (m?.rejectedReason ?? null) !== f.rejectedReason && up(f.status) === 'REJECTED';
-  const contentChanged = Boolean(m) && contentKey({ bodyText: m!.bodyText, footerText: m!.footerText, buttons: m!.buttons }) !== contentKey(f);
+  // A header or media added (or removed) at Meta counts too: T24 depends on it.
+  const partsChanged = Boolean(m) && ((m!.headerText ?? null) !== (f.headerText ?? null) || JSON.stringify(m!.otherComponents ?? []) !== JSON.stringify(f.otherComponents ?? []));
+  const contentChanged = Boolean(m) && (contentKey({ bodyText: m!.bodyText, footerText: m!.footerText, buttons: m!.buttons }) !== contentKey(f) || partsChanged);
   const idChanged = (m?.id ?? null) !== f.id;
   if (!adopting && !statusChanged && !categoryChanged && !qualityChanged && !reasonChanged && !contentChanged && !idChanged) {
     if (!clearHint) return null;
