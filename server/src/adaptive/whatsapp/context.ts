@@ -153,7 +153,9 @@ export function reportFor(d: StoredTemplate, ctx: CheckContext): ValidationRepor
       : [];
   // T24: parts we don't fill (a header, media, a carousel, a button needing a value) — a send would
   // miss them, an edit would drop them.
-  const parts = d.source && d.meta ? unhandledParts(d.meta, Boolean(d.compiled?.button)) : [];
+  // Meta's first link button is ours to fill — or, while a rejected/paused template is edited, ours to
+  // replace or drop (the edit sends our buttons), so removing our button never locks the template.
+  const parts = d.source && d.meta ? unhandledParts(d.meta, editPending || Boolean(d.compiled?.button)) : [];
   const unmodelled = parts.length ? [error('T24', `Meta’s template has parts this tab doesn’t handle (${parts.join(', ')}): it isn’t used, and it can’t be edited here`)] : [];
   const extra = [...metaButton, ...drift, ...unmodelled];
   return extra.length ? makeReport([...ours.issues, ...extra]) : ours;
@@ -243,8 +245,12 @@ export function templateView(d: StoredTemplate, pools: PoolRow[], ctx: CheckCont
     source: d.source,
     compiled: d.compiled ? { bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, button: d.compiled.button, params: d.compiled.params, components: d.compiled.components } : null,
     meta: d.meta ? toJson({ ...d.meta }) : null,
-    /** What this tab can't handle in Meta's template (empty: everything): no link, no edit. */
-    unhandled: d.meta ? unhandledParts(d.meta, d.compiled ? Boolean(d.compiled.button) : true) : [],
+    /**
+     * What neither a link nor an edit here can handle in Meta's template (empty: everything): the cms
+     * offers no Link, Edit or Send. Meta's first link button is never listed — linking (again) or an
+     * edit fills it; a template that has it but no button of ours shows T24 in its checks instead.
+     */
+    unhandled: d.meta ? unhandledParts(d.meta, true) : [],
     submit: d.submit ? toJson(d.submit) : null,
     allowedFields: pool?.allowedFields ?? null,
     linkField: pool?.linkField ?? null,

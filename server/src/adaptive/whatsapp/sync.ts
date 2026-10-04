@@ -323,6 +323,8 @@ export async function repairStuckSubmits(
     }
     const startedAtMs = d.submit!.startedAtMs;
     try {
+      // A webhook mark newer than this read (less the coalescing window) is kept for the next sync.
+      const readAt = Date.now();
       const found = await client.findByName(wabaId, d.name);
       const f = found.map(parseMetaTemplate).find((x) => x && x.language === d.language) ?? null;
       // A lost edit: the template existed before, so "found" proves nothing — take it over only when
@@ -331,7 +333,7 @@ export async function repairStuckSubmits(
         d.submit?.kind !== 'edit' ||
         Boolean(f && (WITH_META.has(String(f.status ?? '').toUpperCase()) || (d.compiled && contentKey({ bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, buttons: d.compiled.button ? [{ text: d.compiled.button.text, url: d.compiled.button.url }] : [] }) === contentKey(f))));
       if (f && editArrived) {
-        const res = await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitting' && cur.submit?.startedAtMs === startedAtMs ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId }) : null));
+        const res = await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitting' && cur.submit?.startedAtMs === startedAtMs ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId, listStartedMs: readAt }) : null));
         if (res.changed) out.repaired += 1;
       } else {
         const back = await revert(d.id, new MetaError('unknown', f ? 'Meta still holds the earlier version: send it again' : 'It isn’t at Meta: send it again'), SYSTEM, 'submit.reverted', 'unknown_outcome', startedAtMs);
@@ -339,7 +341,7 @@ export async function repairStuckSubmits(
           out.repaired += 1;
           // The edit never arrived, but Meta's state may have moved meanwhile (a pause lifted, a template
           // disabled): applied now, as the sync skipped it while it was sending.
-          if (f) await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitted' ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId }) : null));
+          if (f) await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitted' ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId, listStartedMs: readAt }) : null));
         }
       }
     } catch (err) {

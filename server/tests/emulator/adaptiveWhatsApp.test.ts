@@ -736,6 +736,30 @@ await test('review round 3: Meta’s old broken button doesn’t block sending a
   assertEqual(atMeta.find((c: any) => c.type === 'BUTTONS').buttons[0].url, 'https://visit.askheidi.app/{{1}}', 'the edit fixed Meta’s link');
 });
 
+await test('review round 3: removing the link button from a rejected template can be sent (the edit drops Meta’s button), and the window keeps Edit', async () => {
+  await fresh();
+  await connectAndSync();
+  const d = await offerDraft();
+  await submit(d.id, d.version);
+  await review(d.id, 'REJECTED', { reason: 'INVALID_FORMAT' });
+  await runWhatsAppTemplateTick();
+  const rejected = await view(d.id);
+  const edited = await put(`/admin/whatsapp/templates/${d.id}`, { change: { source: { ...DE_OFFER, button: null } }, baseVersion: rejected.template.version });
+  assertEqual(edited.status, 200, edited.text);
+  const after = await view(d.id);
+  assert(!after.template.checks.issues.some((i: any) => i.code === 'T24'), JSON.stringify(after.template.checks.issues));
+  assertEqual(after.template.unhandled, [], 'nothing hides Edit/Send');
+  const r = await submit(d.id, edited.body.template.version);
+  assertEqual([r.status, r.body.outcome], [200, 'submitted'], r.text);
+  const atMeta = JSON.parse((await sandboxTemplates(d.name))[0].componentsJson);
+  assert(!atMeta.some((c: any) => c.type === 'BUTTONS'), JSON.stringify(atMeta));
+  // Approved again without a button of ours while Meta still had one would be T24 — not the case here.
+  await review(d.id, 'APPROVED');
+  await ageHints();
+  await runWhatsAppTemplateTick();
+  assertEqual((await view(d.id)).template.usable, true, 'usable without a button');
+});
+
 await test('review round 3: an edit Meta never got is put back with Meta’s current state (a pause lifted meanwhile shows as approved)', async () => {
   await fresh();
   await connectAndSync();

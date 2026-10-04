@@ -248,7 +248,7 @@ export async function revert(id: string, e: MetaError, by: WaActor, kind: string
       set: {
         stage: d.submit.prevStage,
         submit: null,
-        hint: null,
+        // A webhook mark stays: nothing here re-read Meta, so the next sync does (and clears it).
         lastSubmitError: { code: code ?? e.kind, message: `${words}${e.userMsg ? ` — Meta: “${e.userMsg}”` : ''}`, metaCode: e.info.code ?? null, metaSubcode: e.info.subcode ?? null, fbtraceId: e.info.fbtraceId ?? null, at: new Date() },
         updatedBy: by.uid ?? by.kind,
       },
