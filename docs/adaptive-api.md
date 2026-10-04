@@ -271,10 +271,65 @@ Account names (`accountNames[…].name` on the launch card, `account.name` in gu
 the `Users` doc: `displayName`, then `display_name` (cms owner docs, PR E follow-up), `companyName`,
 `name` — the first that isn't empty; `null` when none.
 
+## WhatsApp templates — `/admin/whatsapp…` (PR W1, SUPER_ADMIN)
+
+A registry of every WhatsApp template of HeidiFi's WhatsApp Business Account, kept equal to Meta, with
+drafts, checks, one-click submit, alerts and an activity log. Templates are platform-wide (one account;
+the venue name and the link are variables). Writes need `actor.kind: 'super_admin'`; every write lands
+in the log with who did it. Code: `adaptive/core/whatsapp/*` (pure), `adaptive/whatsapp/*`,
+`service/whatsappAdmin.ts`, `api/whatsappRoutes.ts`, `jobs/whatsappTemplates.ts`.
+
+| Method | Path | Body / query → answer |
+|---|---|---|
+| GET | `admin/whatsapp` | → `{connection, wabaId, configured, lastSync, templateCount, templateLimit, createsThisHour, managerUrl, alertsEmailSet, messages[] (coverage: message × en/de/fr/it cells), templates[], counts, badge}` |
+| GET | `admin/whatsapp/templates/:id` | → `{template (text, compiled params and components, checks, preview, Meta's state), history[], managerUrl}` |
+| GET | `admin/whatsapp/log` | `?templateId&before&limit&routine=1` → `{log[]}` newest first (a template: its timeline) |
+| GET | `admin/whatsapp/prefill` | `?journeyKey&poolKey&lang` → `{source, category}` from the message's SMS wording |
+| POST | `admin/whatsapp/templates/check` | `{use, lang, category, source, name?, id?}` → `{checks, compiled}`; nothing saved |
+| POST | `admin/whatsapp/templates` | `{use: {journeyKey, poolKey}, lang, category, source: {body, footer, button: {text, field}}, name?}` → a draft (`hf_<pool>_<n>`, or a new language of `name`) |
+| PUT | `admin/whatsapp/templates/:id` | `{change: {source?, category?}, baseVersion}` — a draft, or a template Meta rejected/paused (then submit again); 409 when stale |
+| POST | `admin/whatsapp/templates/:id/submit` | `{baseVersion}` → `{outcome: submitted\|adopted\|refused\|locked\|unknown, error, template}`; 422 with the failed checks |
+| POST | `admin/whatsapp/templates/:id/dismiss` · `…/restore` | hide / bring back (never the OTP template) |
+| PUT | `admin/whatsapp/templates/:id/link` | `{use, map: [{n, field, fallback?, date?}], buttonField, baseVersion}` — an imported template gets named fields |
+| POST | `admin/whatsapp/templates/:id/use` | `{enabled}` — pause / resume our use (the brake: never refused) |
+| POST | `admin/whatsapp/connection/check` | → `{connection}` (token scopes, account, phone number, quality, problems) |
+| PUT | `admin/whatsapp/connection` | `{wabaId}` — set the account by hand; 422 unless it owns our phone number |
+| POST | `admin/whatsapp/sync` | → `{running: true}` while the tick holds the lease, else `{sync}` |
+| POST | `dev/whatsapp/review` · `dev/whatsapp/fault` · `dev/whatsapp/tick` | sandbox only: Meta decides `{templateId \| name+language, decision, reason?, category?, quality?, hint?}`; queue faults `{items: [{op, fault}]}`; a tick now |
+
+**How a template moves.** Stored: our `stage` (`draft` → `submitting` → `submitted`) and Meta's raw
+status; shown: needs fix · ready · sending · in review · approved · **blocked** (approved, but Meta files
+a service message as MARKETING) · rejected · paused · disabled · deleted · needs attention · dismissed.
+`version` counts content edits (`baseVersion`); Meta's changes bump only `seq` (the timeline's ids).
+Submit: checks again → one transaction to `submitting` (two clicks: one 409) → Meta create (a draft) or
+edit (rejected/paused) → a read for Meta's real status and category. No answer (timeout, 5xx) stays
+`submitting`, never retried: the tick looks it up after 10 minutes and takes it over or puts it back.
+"Already exists" is taken over; "being deleted" is T17 (copy to a new name).
+
+**Sync and the tick** (API server, every 2 minutes, one at a time by a lease on
+`AdaptiveConfig/whatsapp`, idle until Check connection): a full paged list (cursor paging) — new ones
+imported (OTP, legacy, or ours by name), changes applied with their log row and alerts in one
+transaction, "deleted" only after a complete list and a not-found read. Sync at once after a webhook
+hint, every 15 minutes while something is with Meta, else every 6 hours. Then alerts are emailed and the
+08:00 (Zurich) summary goes out (skipped when empty). The webhook (`/webhook/whatsapp`, fields
+`message_template_status_update`, `template_category_update`, `message_template_quality_update`) only
+marks the template; the body is never trusted.
+
+**Alerts** (HeidiFi's alert email): `whatsapp_template` at once — rejected, paused, disabled, deleted
+while in use, blocked by its category, quality RED; the login-code template (urgent) not approved in a
+language the portal sends; `whatsapp_digest` daily; `whatsapp_connection` when a working connection
+fails (once a day per cause).
+
+**Firestore:** `CaptivePortal_WhatsAppTemplates/{wt_…}` (+ `history/{seq}`),
+`CaptivePortal_WhatsAppLog/{auto}` (`expireAt` +13 months, no TTL needed yet),
+`CaptivePortal_AdaptiveConfig/whatsapp`; sandbox: `CaptivePortal_AdaptiveSandboxWhatsAppTemplates`.
+Reads are by id, the whole small registry, or newest first by one field: no composite index.
+
 ## Check codes
 
 | Where | Codes |
 |---|---|
+| WhatsApp template (PR W1; errors block Send to Meta, warnings are shown) | T01 name · T02 language · T03 category asked · T04 the message's rule · T05 one category per name · T06 length (warn: worst case) · T07 footer length · T08 fields allowed, once, well formed · T09 not first/last/side by side · T10 words per field (warn under 3) · T11 defaults + date formats · T12 the button link (also Meta's registered one) · T13 names the venue · T14 no links/emails/phones · T15 STOP in the footer · T16 template limit · T17 name locked · T18 duplicate text · T19 utility: no offer fields (warn: promotional words, emoji) · T20 STOP footer on marketing (warn on utility) · T21 formatting · T22 creates this hour |
 | Playbook (admin Check / publish) | K01 shape · K02 kind locked · P01 name · P02 journeys · P03 required ⇒ on · P04 newest pin (warn) · P05 questions (warn) · P06 pinned version exists · P07 coming soon ⇒ off · V04 offers & defaults · V07 wording (warn) · V09 venue types · V10 same trigger (warn) · V14 info playbook |
 | Journey template (seed / CI) | V01 graph · V02 pools · V03 caps · V04 offer blanks · V05 high value · V06 trigger config · V08 channel diff · V14 info journey · V16 registry |
 | Owner setup (save / turn on) | S01 venue · S02 journeys on/off · S03 blanks · S04 playbook offered · F01 time zone · F02 account active · F03 overlap acknowledged · W01 WhatsApp later (info) · W02 stay calendar (warn) |

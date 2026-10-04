@@ -150,6 +150,25 @@ The temporary token on the API Setup page expires — use a System User token in
 3. Set **Verify Token** to the same value as `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (any secret string you choose)
 4. Click **Verify and Save**
 5. Under **Webhook Fields**, subscribe to **`messages`**
+6. For the WhatsApp templates tab of Adaptive Campaigns (PR W1), also subscribe to
+   **`message_template_status_update`**, **`template_category_update`** and
+   **`message_template_quality_update`**. Optional: the server re-reads Meta every 15 minutes while a
+   template is in review (every 6 hours otherwise); with these fields a decision shows within ~2 minutes.
+   The notice is only a hint — the server never trusts its body and re-reads the template from Meta.
+
+### 4b. WhatsApp templates in Adaptive Campaigns (PR W1)
+
+Admin → Captive Portal → **Adaptive Campaigns → WhatsApp**. No new environment variable:
+
+- **Check connection** reads the existing `WHATSAPP_ACCESS_TOKEN` with Meta's `debug_token`: it must be
+  valid and carry **`whatsapp_business_management`** (step 3). It finds the WhatsApp Business Account
+  that owns `WHATSAPP_PHONE_NUMBER_ID` and stores its id in `CaptivePortal_AdaptiveConfig/whatsapp` (or
+  you type the account id there when the token doesn't name it). Nothing in the tab runs before this.
+- The tab then lists every template of the account (imported, synced every 15 min / 6 h by the API
+  server's tick), drafts and checks new ones (T01–T22, docs/adaptive-api.md), sends them to Meta with
+  one click and logs every step. It never deletes at Meta.
+- The template calls use Graph **v25.0** (`adaptive/whatsapp/meta.ts`); the old sender
+  (`services/whatsapp.ts`, v19.0) is untouched until PR W3.
 
 ### 5. Create Message Templates
 

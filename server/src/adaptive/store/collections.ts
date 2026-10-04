@@ -45,6 +45,12 @@ export const COL = {
   sandboxModelCalls: 'CaptivePortal_AdaptiveSandboxModelCalls',
   /** Local sandbox only: answers queued for the fake model per agent (faults for the checks). */
   sandboxModelAnswers: 'CaptivePortal_AdaptiveSandboxModelAnswers',
+  // WhatsApp templates (PR W1): the registry synced with Meta (one doc per name and language, its
+  // timeline under `history/`), and the activity log of everything that happens to them
+  whatsappTemplates: 'CaptivePortal_WhatsAppTemplates',
+  whatsappLog: 'CaptivePortal_WhatsAppLog',
+  /** Local sandbox only: the fake Meta's templates (and its queued faults, doc `__faults`). */
+  sandboxWhatsAppTemplates: 'CaptivePortal_AdaptiveSandboxWhatsAppTemplates',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',
@@ -68,6 +74,8 @@ export const venuePlaybookId = (venueId: string, playbookKey: string) => `${venu
 export const ENGINE_STATUS_DOC_ID = 'engine_status';
 /** `AdaptiveConfig/dev_clock`: the sandbox's fake clock offset (local emulator only). */
 export const DEV_CLOCK_DOC_ID = 'dev_clock';
+/** `AdaptiveConfig/whatsapp` (PR W1): the Meta connection (WABA id), sync state, limits, the tick's lease. */
+export const WHATSAPP_DOC_ID = 'whatsapp';
 export const contactVenueId = (contactId: string, venueId: string) => `${contactId}_${venueId}`;
 export const guestInfoId = (venueId: string) => `venue_${venueId}`;
 /** One calendar feed per venue, by construction (D-C34): a second save updates the same doc. */

@@ -24,6 +24,7 @@ import { accountCodeSubsystemReady } from './services/accountCode';
 import { adoptionCodeStorageReady } from './services/adoptionCodes';
 import adaptiveRoutes from './adaptive/api/router';
 import { startAdaptiveSeed } from './adaptive/seed/ensureSeed';
+import { startWhatsAppTemplateJob } from './jobs/whatsappTemplates';
 
 const app = express();
 const PORT = 4000;
@@ -104,4 +105,5 @@ app.listen(PORT, () => {
   startCampaignScheduler();
   startSubscriptionExpirySweep();
   startAdaptiveSeed();
+  startWhatsAppTemplateJob();
 });
