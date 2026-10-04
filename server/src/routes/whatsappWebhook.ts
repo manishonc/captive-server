@@ -17,6 +17,8 @@ import { recordDeliveryStatus } from '../services/campaignTracking';
 import { shouldAdvanceStatus } from '../services/deliveryStatus';
 import { classifyInbound, setChannelOptOut } from '../services/optOut';
 import { sendWhatsAppText } from '../services/whatsapp';
+import { runAdaptiveHook } from '../adaptive/ingest/hook';
+import { TEMPLATE_FIELDS, noteTemplateHint } from '../adaptive/whatsapp/hints';
 
 const router = Router();
 
@@ -58,6 +60,15 @@ router.post('/', async (req: Request, res: Response) => {
       for (const change of changes) {
         const value = change?.value as Record<string, unknown>;
         if (!value) continue;
+
+        // ── Template status / category / quality (PR W1): a hint only — Adaptive re-reads the
+        //    template from Meta on its next tick; this body is never trusted (no signature check).
+        const field = String(change?.field ?? '');
+        if ((TEMPLATE_FIELDS as readonly string[]).includes(field)) {
+          const wabaId = String(entry?.id ?? '');
+          runAdaptiveHook('whatsapp template', () => noteTemplateHint(wabaId, field, value));
+          continue;
+        }
 
         // ── Delivery / read status updates ───────────────────────────────────
         const statuses = value?.statuses as Array<Record<string, unknown>>;

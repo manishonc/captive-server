@@ -25,6 +25,9 @@ export const banditArmsIdFor = (venueId: string, journeyKey: string, nodeId: str
 export const banditPoolIdFor = (journeyKey: string, nodeId: string) => hashId('pool', `${journeyKey}:${nodeId}`);
 export const banditLearnIdFor = (venueId: string) => `learn_${venueId}`;
 
+/** PR W1: one WhatsApp template (name × Meta language) — an import and a submit always land on the same doc. */
+export const whatsappTemplateIdFor = (name: string, language: string) => hashId('wt', `${name}:${language}`);
+
 /** Tasks are spread over 16 shards so several workers can split the queue later. */
 export const SHARDS = 16;
 

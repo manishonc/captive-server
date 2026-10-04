@@ -37,7 +37,13 @@ export type AlertKind =
   // The AI agents (PR F2a): the month's AI budget at 80 % / used up (HeidiFi), and a failed agent
   // run (HeidiFi, once a day per agent and cause; not for a run stopped by a worker's shutdown)
   | 'agent_budget'
-  | 'agent_failing';
+  | 'agent_failing'
+  // WhatsApp templates (PR W1, HeidiFi): a problem with one template (rejected, paused, disabled,
+  // deleted, blocked by its category, low quality — at once), the 08:00 summary, and the Meta
+  // connection failing (once a day per cause, only after it once worked)
+  | 'whatsapp_template'
+  | 'whatsapp_digest'
+  | 'whatsapp_connection';
 
 export interface AlertInput {
   kind: AlertKind;

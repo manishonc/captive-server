@@ -24,6 +24,7 @@ import engineRoutes from './engineRoutes';
 import ownerRoutes from './ownerRoutes';
 import publicRoutes from './publicRoutes';
 import adminRoutes from './adminRoutes';
+import whatsappRoutes from './whatsappRoutes';
 
 const router = Router();
 
@@ -154,6 +155,8 @@ router.use(engineRoutes);
 router.use(ownerRoutes);
 router.use(publicRoutes);
 router.use(adminRoutes);
+// PR W1: WhatsApp templates (admin) and their sandbox helpers.
+router.use(whatsappRoutes);
 
 // Anything else under /internal/adaptive is a JSON 404, not Express's HTML page.
 router.use((_req: Request, res: Response) => {
