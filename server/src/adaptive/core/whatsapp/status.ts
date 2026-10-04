@@ -20,11 +20,13 @@ export type WaDisplay =
   | 'paused'
   | 'disabled'
   | 'deleted'
+  /** Meta archived it (unused for months): it can be unarchived in WhatsApp Manager for 28 days. */
+  | 'archived'
   | 'attention'
   | 'dismissed';
 
 const IN_REVIEW = new Set(['PENDING', 'IN_REVIEW', 'PENDING_REVIEW', 'IN_APPEAL', 'APPEAL_REQUESTED']);
-const DELETED = new Set(['PENDING_DELETION', 'DELETED', 'ARCHIVED']);
+const DELETED = new Set(['PENDING_DELETION', 'DELETED']);
 
 export interface StatusFacts {
   stage: WaStage;
@@ -56,6 +58,7 @@ export function displayStatus(f: StatusFacts): WaDisplay {
   if (s === 'PAUSED') return 'paused';
   if (s === 'DISABLED') return 'disabled';
   if (DELETED.has(s)) return 'deleted';
+  if (s === 'ARCHIVED') return 'archived';
   return 'attention';
 }
 
@@ -138,6 +141,9 @@ export function alertsForChange(before: AlertView | null, after: AlertView, key:
   }
   if (entered('deleted') && (before.display === 'approved' || before.display === 'in_review' || before.display === 'blocked' || after.otp)) {
     push(after.otp, `${after.otp ? 'URGENT: ' : ''}WhatsApp template deleted at Meta: ${label}`, `${label} no longer exists at Meta (it was ${before.display}).`);
+  }
+  if (entered('archived') && (before.display === 'approved' || before.display === 'in_review' || before.display === 'blocked')) {
+    push(after.otp, `WhatsApp template archived by Meta: ${label}`, `Meta archived ${label} (unused for a long time). Unarchive it in WhatsApp Manager within 28 days, or Meta deletes it.`);
   }
   if (entered('blocked')) {
     push(false, `WhatsApp template can't be used: ${label}`, `Meta files ${label} as ${after.metaCategory ?? 'another category'}, which doesn't fit this service message. It isn't used. Write plainer wording under a new name, or appeal in WhatsApp Manager within 60 days.`);

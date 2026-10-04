@@ -425,6 +425,7 @@ test('display status: our stage first, then Meta’s status; unknown values need
     ['PAUSED', 'paused'],
     ['DISABLED', 'disabled'],
     ['PENDING_DELETION', 'deleted'],
+    ['ARCHIVED', 'archived'],
     ['LIMIT_EXCEEDED', 'attention'],
     ['SOMETHING_NEW', 'attention'],
   ];
@@ -463,6 +464,9 @@ test('alerts: entering rejected / paused / blocked / attention / RED quality / d
   assertEqual(alertsForChange(view('approved'), view('approved', { quality: 'RED' }), 'k').length, 1, 'red');
   assertEqual(alertsForChange(view('approved'), view('deleted'), 'k').length, 1, 'deleted while approved');
   assertEqual(alertsForChange(view('rejected'), view('deleted'), 'k').length, 0, 'deleted after rejected');
+  const archived = alertsForChange(view('approved'), view('archived'), 'k');
+  assert(archived.length === 1 && /archived/.test(archived[0].subject) && /28 days/.test(archived[0].text), JSON.stringify(archived));
+  assertEqual(alertsForChange(view('rejected'), view('archived'), 'k').length, 0, 'archived after rejected');
 });
 
 test('alerts: keys are per change; the OTP template is urgent, also on first import when not approved', () => {

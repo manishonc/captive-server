@@ -285,8 +285,9 @@ export function createMetaClient(deps: MetaClientDeps = {}): MetaClient {
       const json = await call('GET', `/${encodeURIComponent(wabaId)}/message_templates`, 'message_templates_by_name', {
         query: { name, fields: TEMPLATE_FIELDS, limit: '100' },
       });
-      const rows = Array.isArray(json.data) ? (json.data as Array<Record<string, unknown>>) : [];
-      return rows.filter((r) => r.name === name);
+      // A 2xx without a list is "couldn't ask", never "no such template".
+      if (!Array.isArray(json.data)) throw new MetaError('unavailable', 'Meta’s answer had no template list');
+      return (json.data as Array<Record<string, unknown>>).filter((r) => r.name === name);
     },
     async createTemplate(wabaId, body) {
       const json = await call('POST', `/${encodeURIComponent(wabaId)}/message_templates`, 'create_template', { body });

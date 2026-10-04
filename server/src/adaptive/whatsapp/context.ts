@@ -15,17 +15,28 @@ import { renderText } from '../core/render';
 import { error, makeReport } from '../core/issues';
 import { contentKey } from '../core/whatsapp/template';
 import type { WaCompiled } from '../core/whatsapp/template';
-
-/** Our compiled parts in Meta's shape (for comparing with what Meta holds). */
-export function compiledParts(c: WaCompiled) {
-  return { bodyText: c.bodyText, footerText: c.footerText, buttons: c.button ? [{ text: c.button.text, url: c.button.url }] : [] };
-}
 import { VISITOR_BASE_URL } from '../../services/shortlinks';
 import { STOP_KEYWORDS } from '../../services/optOut';
 import { STOP_LINES } from '../send/compose';
 import { toJson } from '../store/serialize';
 import { createsThisHour, type StoredTemplate, type WaOps } from './store';
 import type { Lang } from '../core/constants';
+
+/** Our compiled parts in Meta's shape (for comparing with what Meta holds). */
+export function compiledParts(c: WaCompiled) {
+  return { bodyText: c.bodyText, footerText: c.footerText, buttons: c.button ? [{ text: c.button.text, url: c.button.url }] : [] };
+}
+
+/**
+ * The parts we compile, from ours (`mine`) or from Meta's copy: the body, the footer, and — only when
+ * we compile one — the link button (Meta's first URL button). Other buttons (a fixed link, "Stop
+ * promotions", a phone number) are Meta's own and never count as drift.
+ */
+function driftKey(c: WaCompiled, meta: { bodyText: string | null; footerText: string | null; buttons: Array<{ type: string; text: string | null; url: string | null }> }, mine: boolean): string {
+  if (mine) return contentKey(compiledParts(c));
+  const url = meta.buttons.find((b) => b.type === 'URL');
+  return contentKey({ bodyText: meta.bodyText, footerText: meta.footerText, buttons: c.button && url ? [{ text: url.text, url: url.url }] : c.button ? [{ text: null, url: null }] : [] });
+}
 
 export const visitorBaseUrl = () => VISITOR_BASE_URL.replace(/\/+$/, '');
 
@@ -61,7 +72,7 @@ export function siblingsOf(docs: StoredTemplate[]): SiblingInfo[] {
     active:
       d.stage === 'draft'
         ? d.lastSubmitError?.code !== 'name_locked'
-        : !['PENDING_DELETION', 'DELETED', 'ARCHIVED'].includes(String(d.meta?.status ?? '').toUpperCase()),
+        : !['PENDING_DELETION', 'DELETED'].includes(String(d.meta?.status ?? '').toUpperCase()),
   }));
 }
 
@@ -102,11 +113,20 @@ export function reportFor(d: StoredTemplate, ctx: CheckContext): ValidationRepor
   // A template Meta has: its registered button counts too (a linked legacy template may carry a broken one).
   const metaButton = d.stage !== 'draft' && d.meta ? atMeta.issues.filter((i) => i.code === 'T12' && i.severity === 'error') : [];
   // T23: what Meta holds must be what we compiled — the send (W3) fills Meta's text with our field map.
+  // Only what we compile is compared (body, footer, our link button); a rejected or paused template
+  // being edited is ours to send again, so its new text is not "drift".
+  const status = String(d.meta?.status ?? '').toUpperCase();
+  const editPending = status === 'REJECTED' || status === 'PAUSED';
   const drift =
-    d.stage === 'submitted' && d.meta && d.compiled && d.meta.bodyText !== null && contentKey(compiledParts(d.compiled)) !== contentKey(d.meta)
+    d.stage === 'submitted' && d.meta && d.compiled && d.meta.bodyText !== null && !editPending && driftKey(d.compiled, d.meta, true) !== driftKey(d.compiled, d.meta, false)
       ? [error('T23', 'Meta holds different text than ours (changed in WhatsApp Manager, or an older version): it isn’t used until they match — link it again or write it anew')]
       : [];
-  const extra = [...metaButton, ...drift];
+  // T24: parts we don't fill (a header, media, a carousel) — a send would miss them, an edit would drop them.
+  const unmodelled =
+    d.source && d.meta && (d.meta.headerText || d.meta.otherComponents.length)
+      ? [error('T24', `Meta’s template has parts this tab doesn’t handle (${[d.meta.headerText ? 'a header' : '', ...d.meta.otherComponents].filter(Boolean).join(', ')}): it isn’t used, and it can’t be edited here`)]
+      : [];
+  const extra = [...metaButton, ...drift, ...unmodelled];
   return extra.length ? makeReport([...ours.issues, ...extra]) : ours;
 }
 

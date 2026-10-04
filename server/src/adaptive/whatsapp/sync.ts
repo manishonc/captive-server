@@ -252,12 +252,19 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
   const started = Date.now();
   const out: TickResult = { ran: true, repaired: 0, synced: false, alerts: 0, digest: false };
   try {
+    // The registry is read once here; again only after a sync changed it (for the alerts it brought).
+    let docs = await listTemplates();
     // Meta asked us to slow down: alerts and the summary still go out, Meta isn't called.
-    const backoff = ops0.backoffUntilMs !== null && ops0.backoffUntilMs > Date.now();
-    if (!backoff) out.repaired = await repairStuckSubmits(ops0.wabaId);
+    let backoff = ops0.backoffUntilMs !== null && ops0.backoffUntilMs > Date.now();
+    if (!backoff) {
+      const repair = await repairStuckSubmits(ops0.wabaId, { docs, deadlineMs: started + TICK_BUDGET_MS / 2, renew: () => renewLease(owner, LEASE_MS) });
+      out.repaired = repair.repaired;
+      if (repair.lostLease) return { ...out, reason: 'lease_lost' };
+      if (repair.repaired) docs = await listTemplates();
+    }
 
     const ops = await readOps();
-    const docs = await listTemplates();
+    backoff = ops.backoffUntilMs !== null && ops.backoffUntilMs > Date.now();
     const at = engineNow();
     const last = ops.lastSync?.engineAtMs ?? null;
     const hinted = docs.some((d) => d.hint) || ops.hintUnknownAtMs !== null;
@@ -267,10 +274,11 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
       if (!(await renewLease(owner, LEASE_MS))) return { ...out, reason: 'lease_lost' };
       const res = await reconcile({ by: SYSTEM, budgetMs: Math.max(30_000, TICK_BUDGET_MS - (Date.now() - started) - 30_000), reason: hinted ? 'hint' : 'tick' });
       out.synced = res.ok;
+      docs = await listTemplates();
     }
 
     if (!(await renewLease(owner, LEASE_MS))) return { ...out, reason: 'lease_lost' };
-    out.alerts = await flushAlerts();
+    out.alerts = await flushAlerts(docs);
     out.digest = await maybeDigest();
   } catch (err) {
     await writeLog({ kind: 'tick.error', level: 'error', actor: SYSTEM, summary: `The template tick failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null, code: (err as { code?: unknown })?.code ?? null } });
@@ -280,15 +288,39 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
   return out;
 }
 
-/** A submit Meta never answered (10 minutes): found at Meta → taken over; not found → put back. */
-export async function repairStuckSubmits(wabaId: string): Promise<number> {
-  const docs = (await listTemplates()).filter((d) => d.stage === 'submitting' && d.submit && engineNow() - d.submit.startedAtMs >= STUCK_AFTER_MS);
-  if (!docs.length) return 0;
+export interface RepairResult {
+  repaired: number;
+  /** Stopped early: out of time, or Meta unreachable / asking us to slow down (the next tick goes on). */
+  stopped: 'deadline' | 'meta' | null;
+  lostLease: boolean;
+}
+
+/**
+ * A submit Meta never answered (10 minutes): found at Meta → taken over; not found → put back.
+ * One Meta read per stuck template, within the tick's time (`deadlineMs`, the lease renewed before
+ * each); Meta unreachable or asking us to slow down stops it (a rate limit also sets the backoff).
+ * Only the submit it looked at is changed — never one started since.
+ */
+export async function repairStuckSubmits(
+  wabaId: string,
+  opts: { docs?: StoredTemplate[]; deadlineMs?: number; renew?: () => Promise<boolean> } = {},
+): Promise<RepairResult> {
+  const out: RepairResult = { repaired: 0, stopped: null, lostLease: false };
+  const docs = (opts.docs ?? (await listTemplates())).filter((d) => d.stage === 'submitting' && d.submit && engineNow() - d.submit.startedAtMs >= STUCK_AFTER_MS);
+  if (!docs.length) return out;
   const client = metaClient();
-  if (!client.ready()) return 0;
+  if (!client.ready()) return out;
   const pools = await loadPools();
-  let n = 0;
   for (const d of docs) {
+    if (opts.deadlineMs !== undefined && Date.now() >= opts.deadlineMs) {
+      out.stopped = 'deadline';
+      break;
+    }
+    if (opts.renew && !(await opts.renew())) {
+      out.lostLease = true;
+      break;
+    }
+    const startedAtMs = d.submit!.startedAtMs;
     try {
       const found = await client.findByName(wabaId, d.name);
       const f = found.map(parseMetaTemplate).find((x) => x && x.language === d.language) ?? null;
@@ -298,22 +330,28 @@ export async function repairStuckSubmits(wabaId: string): Promise<number> {
         d.submit?.kind !== 'edit' ||
         Boolean(f && (WITH_META.has(String(f.status ?? '').toUpperCase()) || (d.compiled && contentKey({ bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, buttons: d.compiled.button ? [{ text: d.compiled.button.text, url: d.compiled.button.url }] : [] }) === contentKey(f))));
       if (f && editArrived) {
-        const res = await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitting' ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId }) : null));
-        if (res.changed) n += 1;
+        const res = await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitting' && cur.submit?.startedAtMs === startedAtMs ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId }) : null));
+        if (res.changed) out.repaired += 1;
       } else {
-        await revert(d.id, new MetaError('unknown', f ? 'Meta still holds the earlier version: send it again' : 'It isn’t at Meta: send it again'), SYSTEM, 'submit.reverted', 'unknown_outcome');
-        n += 1;
+        const back = await revert(d.id, new MetaError('unknown', f ? 'Meta still holds the earlier version: send it again' : 'It isn’t at Meta: send it again'), SYSTEM, 'submit.reverted', 'unknown_outcome', startedAtMs);
+        if (back && back.stage !== 'submitting') out.repaired += 1;
       }
-    } catch {
-      // Meta unreachable: try again on the next tick.
+    } catch (err) {
+      // Meta unreachable or slowing us down: stop here, the next tick goes on.
+      if (err instanceof MetaError && (err.kind === 'rate_limited' || err.kind === 'unavailable')) {
+        if (err.kind === 'rate_limited') await updateOps({ backoffUntilMs: Date.now() + (err.info.retryAfterMs ?? 5 * MINUTE) });
+        out.stopped = 'meta';
+        break;
+      }
+      // Anything else (one odd template): the next one is tried, this one again on the next tick.
     }
   }
-  return n;
+  return out;
 }
 
 /** Emails the alerts waiting on templates (each key once — `raiseAlert` records it before sending). */
-export async function flushAlerts(): Promise<number> {
-  const docs = (await listTemplates()).filter((d) => (d.pendingAlerts ?? []).length);
+export async function flushAlerts(registry?: StoredTemplate[]): Promise<number> {
+  const docs = (registry ?? (await listTemplates())).filter((d) => (d.pendingAlerts ?? []).length);
   let n = 0;
   for (const d of docs) {
     const sent: string[] = [];
@@ -357,7 +395,7 @@ export async function maybeDigest(): Promise<boolean> {
     else if (display === 'in_review' || display === 'submitting') {
       const since48 = tsMs(d.meta?.lastChangedAt) ?? 0;
       inReview.push({ label: label(d), note: since48 && Date.now() - since48 > 48 * HOUR ? 'over 48 hours' : undefined });
-    } else if (['rejected', 'paused', 'disabled', 'blocked', 'attention'].includes(display)) {
+    } else if (['rejected', 'paused', 'disabled', 'blocked', 'archived', 'attention'].includes(display)) {
       problems.push({ label: label(d), note: display === 'rejected' ? rejectionWords(d.meta?.rejectedReason) : display });
     }
   }

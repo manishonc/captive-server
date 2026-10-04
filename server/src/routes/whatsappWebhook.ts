@@ -18,7 +18,7 @@ import { shouldAdvanceStatus } from '../services/deliveryStatus';
 import { classifyInbound, setChannelOptOut } from '../services/optOut';
 import { sendWhatsAppText } from '../services/whatsapp';
 import { runAdaptiveHook } from '../adaptive/ingest/hook';
-import { TEMPLATE_FIELDS, noteTemplateHint } from '../adaptive/whatsapp/hints';
+import { TEMPLATE_FIELDS, noteTemplateHints, type TemplateHintInput } from '../adaptive/whatsapp/hints';
 
 const router = Router();
 
@@ -53,6 +53,7 @@ router.post('/', async (req: Request, res: Response) => {
     const entries = body?.entry as Array<Record<string, unknown>>;
     if (!entries?.length) return;
 
+    const templateHints: TemplateHintInput[] = [];
     for (const entry of entries) {
       const changes = entry?.changes as Array<Record<string, unknown>>;
       if (!changes?.length) continue;
@@ -65,8 +66,7 @@ router.post('/', async (req: Request, res: Response) => {
         //    template from Meta on its next tick; this body is never trusted (no signature check).
         const field = String(change?.field ?? '');
         if ((TEMPLATE_FIELDS as readonly string[]).includes(field)) {
-          const wabaId = String(entry?.id ?? '');
-          runAdaptiveHook('whatsapp template', () => noteTemplateHint(wabaId, field, value));
+          templateHints.push({ entryId: String(entry?.id ?? ''), field, value });
           continue;
         }
 
@@ -166,6 +166,8 @@ router.post('/', async (req: Request, res: Response) => {
         }
       }
     }
+    // Template notices (PR W1): one hook for the whole body — repeats dropped, at most 10, one at a time.
+    if (templateHints.length) runAdaptiveHook('whatsapp template', () => noteTemplateHints(templateHints));
   } catch (err) {
     console.error('[WHATSAPP WEBHOOK ERROR]', err);
   }
