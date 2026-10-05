@@ -26,13 +26,19 @@ import { MetaError } from './metaError';
 import { metaClient } from './source';
 import { checkContext, draftForCheck, loadPools, reportFor } from './context';
 import { decideFromMeta } from './apply';
+import { ACCOUNT_SUBMIT_ERRORS, autoMaySend, autoWaitWords, AUTO_CREATES_PER_HOUR, TRANSIENT_SUBMIT_ERRORS } from '../core/whatsapp/auto';
+import { autoViewsFor, wantedFor } from './autoViews';
 import {
+  aiInfoOf,
+  autoDayOf,
+  AutoRefused,
   beginSubmit,
   changeTemplate,
   getTemplate,
   HttpLikeTooMany,
   listTemplates,
   readOps,
+  refundAutoSend,
   updateOps,
   writeLog,
   type StoredTemplate,
@@ -55,10 +61,21 @@ const ERR_WORDS: Record<string, string> = {
   unavailable: 'Meta could not be reached',
 };
 
-export async function submitTemplate(id: string, baseVersion: number, by: WaActor): Promise<SubmitResult> {
+/**
+ * PR W2b, `opts`: Auto's send (`auto`: the day and its cap; the send must pass Auto's rules on fresh
+ * reads, and Meta's slow-down stops it) and `requireNoWarnings` (a template with a warning isn't
+ * sent: Auto never sends one). The button's path passes neither.
+ */
+export async function submitTemplate(
+  id: string,
+  baseVersion: number,
+  by: WaActor,
+  opts: { requireNoWarnings?: boolean; auto?: { day: string; maxPerDay: number } } = {},
+): Promise<SubmitResult> {
   await refreshClock();
   const ops = await readOps();
   if (!ops.wabaId || !ops.connection?.ok) throw conflict('Check the Meta connection first (WhatsApp tab → Check connection)');
+  if (opts.auto && ops.backoffUntilMs !== null && ops.backoffUntilMs > Date.now()) throw new HttpError(429, 'rate_limited', 'Meta asked us to slow down');
   const client = metaClient();
   if (!client.ready()) throw unavailable('WhatsApp is not configured on this server');
 
@@ -69,25 +86,47 @@ export async function submitTemplate(id: string, baseVersion: number, by: WaActo
   const [pools, docs] = await Promise.all([loadPools(), listTemplates()]);
   // The same report the tab shows (our checks, Meta's registered button, drift, parts we don't handle).
   const report = reportFor(doc, checkContext(pools, docs, ops, doc.use));
-  if (!report.ok) {
+  const warned = Boolean(opts.requireNoWarnings) && report.warnings > 0;
+  if (!report.ok || warned) {
+    const bad = report.issues.filter((i) => i.severity === (report.ok ? 'warning' : 'error'));
     await writeLog(
       {
         kind: 'submit.blocked',
         level: 'warn',
         actor: by,
-        summary: `Not sent to Meta: ${report.errors} check${report.errors === 1 ? '' : 's'} failed (${report.issues.filter((i) => i.severity === 'error').map((i) => i.code).join(', ')})`,
+        summary: report.ok
+          ? `Not sent to Meta: ${report.warnings} check${report.warnings === 1 ? '' : 's'} warn (${bad.map((i) => i.code).join(', ')}) — only templates without warnings go by themselves`
+          : `Not sent to Meta: ${report.errors} check${report.errors === 1 ? '' : 's'} failed (${bad.map((i) => i.code).join(', ')})`,
         detail: { issues: report.issues },
       },
       { templateId: id, name: doc.name, language: doc.language },
     );
-    throw validationFailed('Fix the failed checks before sending it to Meta', report.issues);
+    throw validationFailed(report.ok ? 'Only templates without warnings are sent by themselves' : 'Fix the failed checks before sending it to Meta', report.issues);
+  }
+  // Auto: its rules again, on these fresh reads (the tick decided a moment ago).
+  if (opts.auto && doc.use?.kind === 'adaptive') {
+    const use = doc.use;
+    const views = autoViewsFor(docs, pools, ops, (d) => d.use?.kind === 'adaptive' && d.use.journeyKey === use.journeyKey && d.use.poolKey === use.poolKey);
+    const may = autoMaySend(id, views, wantedFor(pools));
+    if (!may.ok) throw new HttpError(409, 'not_eligible', `Auto leaves it: ${autoWaitWords(may.reason)}`, { reason: may.reason });
+  } else if (opts.auto) {
+    throw new HttpError(409, 'not_eligible', 'Auto sends only templates of an Adaptive message');
   }
 
   let begun: Awaited<ReturnType<typeof beginSubmit>>;
   try {
-    begun = await beginSubmit(id, { baseVersion, by, engineNow: engineNow(), realNow: Date.now(), maxCreatesPerHour: META_CREATES_PER_HOUR });
+    begun = await beginSubmit(id, {
+      baseVersion,
+      by,
+      engineNow: engineNow(),
+      realNow: Date.now(),
+      // Auto leaves room under Meta's 100 an hour for people.
+      maxCreatesPerHour: opts.auto ? AUTO_CREATES_PER_HOUR : META_CREATES_PER_HOUR,
+      ...(opts.auto ? { auto: opts.auto } : {}),
+    });
   } catch (err) {
-    if (err instanceof HttpLikeTooMany) throw new HttpError(429, 'rate_limited', err.message);
+    if (err instanceof HttpLikeTooMany) throw new HttpError(429, opts.auto ? 'creates_hour' : 'rate_limited', err.message);
+    if (err instanceof AutoRefused) throw new HttpError(err.code === 'auto_cap' || err.code === 'template_limit' ? 429 : 409, err.code, err.message);
     throw err;
   }
   const cur = begun.doc;
@@ -156,6 +195,8 @@ export async function submitTemplate(id: string, baseVersion: number, by: WaActo
       );
       return { outcome: 'unknown', doc: await getTemplate(id), error: errorOut(e) };
     }
+    // Meta asked us to slow down: nothing (Auto, the sync, the repair) calls it again before then.
+    if (e.kind === 'rate_limited') await updateOps({ backoffUntilMs: Date.now() + (e.info.retryAfterMs ?? 5 * 60_000) }).catch(() => undefined);
     const reverted = await revert(id, e, by, 'submit.failed');
     if ((e.kind === 'setup' || e.kind === 'permission') && ops.everWorked) await connectionAlert(e);
     return { outcome: 'refused', doc: reverted, error: errorOut(e) };
@@ -228,10 +269,28 @@ async function adoptOrLock(id: string, wabaId: string, cur: StoredTemplate, e: M
   return { outcome: 'locked', doc: reverted, error: errorOut(locked) };
 }
 
+/** PR W2b: refusals that mean the text never reached Meta (or Meta never judged it). */
+const NOT_SENT: ReadonlySet<string> = new Set([...TRANSIENT_SUBMIT_ERRORS, ...ACCOUNT_SUBMIT_ERRORS, 'meta_changed', 'meta_gone']);
+
 /** Back where it was before the submit, with Meta's words. */
 export async function revert(id: string, e: MetaError, by: WaActor, kind: string, code?: string, onlyIfStartedAtMs?: number): Promise<StoredTemplate | null> {
+  const errCode = code ?? e.kind;
+  let autoRefund: { day: string; create: boolean } | null = null;
   const res = await changeTemplate(id, (d) => {
     if (!d || d.stage !== 'submitting' || !d.submit) return null;
+    // PR W2b: the text never reached Meta — the AI's "sent" version goes back (a fix stays unsent),
+    // and an Auto send gives back its place in the day (and, for an account error, its try).
+    const ai = aiInfoOf(d);
+    let aiPatch: Record<string, unknown> | null = null;
+    if (ai && NOT_SENT.has(errCode)) {
+      const fromAuto = d.submit.by?.kind === 'auto' && ai.autoSubmittedVersion === d.version;
+      aiPatch = {
+        ...(d.ai as Record<string, unknown>),
+        sentVersion: null,
+        ...(fromAuto && ACCOUNT_SUBMIT_ERRORS.has(errCode) ? { autoAttempts: Math.max(0, (ai.autoAttempts ?? 1) - 1) } : {}),
+      };
+      if (fromAuto && ai.autoSubmittedAt) autoRefund = { day: autoDayOf(Date.parse(ai.autoSubmittedAt)), create: d.submit.kind === 'create' };
+    }
     // The repair puts back only the submit it looked at (never one started since).
     if (onlyIfStartedAtMs !== undefined && d.submit.startedAtMs !== onlyIfStartedAtMs) return null;
     const words =
@@ -251,6 +310,7 @@ export async function revert(id: string, e: MetaError, by: WaActor, kind: string
         // A webhook mark stays: nothing here re-read Meta, so the next sync does (and clears it).
         lastSubmitError: { code: code ?? e.kind, message: `${words}${e.userMsg ? ` — Meta: “${e.userMsg}”` : ''}`, metaCode: e.info.code ?? null, metaSubcode: e.info.subcode ?? null, fbtraceId: e.info.fbtraceId ?? null, at: new Date() },
         updatedBy: by.uid ?? by.kind,
+        ...(aiPatch ? { ai: aiPatch } : {}),
       },
       log: {
         kind,
@@ -263,6 +323,8 @@ export async function revert(id: string, e: MetaError, by: WaActor, kind: string
       },
     };
   });
+  const refund = autoRefund as { day: string; create: boolean } | null;
+  if (res.doc && refund) await refundAutoSend(refund.day, refund.create).catch(() => undefined);
   return res.doc;
 }
 

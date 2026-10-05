@@ -97,8 +97,8 @@ const META = src('adaptive/whatsapp/meta.ts');
 const SANDBOX = src('adaptive/whatsapp/sandbox.ts');
 const SOURCE = src('adaptive/whatsapp/source.ts');
 const OLD_SENDER = src('services/whatsapp.ts');
-const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts', 'aiBrief.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
-const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts', 'aiDrafts.ts', 'aiRequests.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
+const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts', 'aiBrief.ts', 'auto.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
+const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts', 'aiDrafts.ts', 'aiRequests.ts', 'autoViews.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
 /** The code that calls a model (only the worker loads it): never reached from the template code. */
 const MODEL_CODE = ['run.ts', 'lane.ts', 'modelClient.ts', 'sandboxModel.ts'].map((f) => src(`adaptive/brain/${f}`));
 

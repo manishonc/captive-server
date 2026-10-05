@@ -123,6 +123,7 @@ export async function devLaunch(body: {
   paused?: boolean;
   bandit?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null> };
   agents?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null>; monthlyBudgetUsd?: number };
+  whatsappTemplates?: { autoSubmit?: 'off' | 'on'; maxPerDay?: number };
 }) {
   requireSandbox();
   // The admin card's own function (PR D), so "live since" and the history are written the same
@@ -135,13 +136,21 @@ export async function devLaunch(body: {
   if (body.bandit && typeof body.bandit === 'object') change.bandit = body.bandit;
   // PR F2a: the AI agents' switch and budget, like the admin card's (no phrase in the sandbox).
   if (body.agents && typeof body.agents === 'object') change.agents = body.agents;
+  // PR W2b: WhatsApp Auto and its cap, like the admin card's (no phrase in the sandbox).
+  if (body.whatsappTemplates && typeof body.whatsappTemplates === 'object') change.whatsappTemplates = body.whatsappTemplates;
   if (Object.keys(change).length) {
     const { applyLaunchChange } = await import('./launch');
     await applyLaunchChange({ change }, { actor: { uid: 'sandbox', kind: 'seed' }, sandbox: true });
   }
   clearEngineSettingsCache();
   const settings = await readEngineSettings();
-  return { launch: settings.launch, paused: settings.paused, bandit: settings.bandit ?? { mode: 'off', accounts: {} }, agents: settings.agents ?? { mode: 'off', accounts: {} } };
+  return {
+    launch: settings.launch,
+    paused: settings.paused,
+    bandit: settings.bandit ?? { mode: 'off', accounts: {} },
+    agents: settings.agents ?? { mode: 'off', accounts: {} },
+    whatsappTemplates: settings.whatsappTemplates ?? { autoSubmit: 'off', maxPerDay: 0, changedBy: null },
+  };
 }
 
 /** Everything the engine knows about one person — the local stand-in for the PR D guest timeline. */

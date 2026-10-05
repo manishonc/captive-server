@@ -45,7 +45,11 @@ import { whatsappTemplateIdFor } from '../core/runtime/ids';
 import { ApiError, conflict, notFound, validationFailed } from '../api/errors';
 import { HttpError } from '../api/http';
 import { cellKeyOf, suggestOptionsFor, wantedCategory, WRITER_KINDS } from '../core/whatsapp/aiBrief';
-import { cachedEngineSettings } from '../store/engineSettings';
+import { cachedEngineSettings, waAutoOf } from '../store/engineSettings';
+import { autoQueue, AUTO_CREATES_PER_HOUR } from '../core/whatsapp/auto';
+import { autoViewOf, wantedFor } from '../whatsapp/autoViews';
+import { autoBlocked } from '../whatsapp/auto';
+import { autoDayOf, autoSubmitsToday } from '../whatsapp/store';
 import { toJson } from '../store/serialize';
 import { refreshClock, sandboxEnabled } from '../engine/clock';
 import { loadCatalogue } from './catalogue';
@@ -58,7 +62,7 @@ import { noteTemplateHint } from '../whatsapp/hints';
 import { SANDBOX_FAULTS, SANDBOX_WABA_ID, queueSandboxFaults, sandboxDecide, type SandboxDecision } from '../whatsapp/sandbox';
 import { checkContext, loadPools, poolFor, templateView, unhandledParts, visitorBaseUrl } from '../whatsapp/context';
 import { staleTemplate, writeLog } from '../whatsapp/store';
-import { livePendingCells, queueWriterRun, snapshotOf, templatesOfMessage, writerBlockedWords, writerRefusalWords, writerRequestFor, writerStatus, type WriterStatus } from '../whatsapp/aiRequests';
+import { livePendingCells, queueWriterRun, SUGGEST_RESERVE, snapshotOf, templatesOfMessage, writerBlockedWords, writerRefusalWords, writerRequestFor, writerStatus, type WriterStatus } from '../whatsapp/aiRequests';
 import {
   adminActor,
   changeTemplate,
@@ -172,7 +176,45 @@ export async function getWhatsAppOverview() {
     },
     badge: waiting.length + problems.length,
     ai: ai ? { ...ai, pendingCells: Object.keys(pending).length } : null,
+    auto: autoBlock(),
   };
+
+  /** PR W2b: Auto — on/off, the day's cap and sends, why it can't act, what it would send and what it leaves. */
+  function autoBlock() {
+    const wa = waAutoOf(settings);
+    const autoViews = docs.map((d, i) =>
+      autoViewOf(d, { ok: views[i].checks.ok, errors: views[i].checks.errors, warnings: views[i].checks.warnings, issues: [], validatorVersion: '' }, views[i].display),
+    );
+    const q = autoQueue(autoViews, wantedFor(pools));
+    const drafts = q.send.some((v) => v.stage === 'draft');
+    // What stops all of it first; then what stops only new drafts (resends of AI fixes still go).
+    const blocked =
+      wa.autoSubmit !== 'on'
+        ? null
+        : autoBlocked(ops, wa.maxPerDay, realNow, client.ready()) ??
+          (drafts && ops.templateCount === null ? 'template_count_unknown' : drafts && createsThisHour(ops, realNow) >= AUTO_CREATES_PER_HOUR ? 'hour_limit' : null);
+    return {
+      on: wa.autoSubmit === 'on',
+      maxPerDay: wa.maxPerDay,
+      sentToday: autoSubmitsToday(ops, autoDayOf(realNow)),
+      /** Why Auto can't send now (null: it can, or it is off). */
+      blocked,
+      /** Why it can't ask the AI for fixes now (null: it can). */
+      fixesBlocked: !ai
+        ? 'unknown'
+        : !ai.aiOn
+          ? 'ai_off'
+          : !ai.scheduledOn
+            ? 'writer_scheduled_off'
+            : !ai.budgetOk
+              ? 'budget'
+              : ai.runsLeft - SUGGEST_RESERVE <= 0
+                ? 'daily_limit'
+                : null,
+      ready: q.send.map((v) => v.id),
+      waiting: q.waiting.map((w) => ({ templateId: w.id, reason: w.reason })),
+    };
+  }
 }
 
 export async function getWhatsAppTemplate(id: string) {

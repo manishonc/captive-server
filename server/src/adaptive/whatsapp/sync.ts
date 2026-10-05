@@ -17,7 +17,10 @@
  *     else every 6 hours;
  *  3. alerts waiting on templates → emailed (each once: `raiseAlert` keys them);
  *  4. the 08:00 (Zurich) summary, once a day, skipped when there is nothing to tell;
- *  5. a token that expires within 14 days (as the last Check connection saw it): one alert a day.
+ *  5. a token that expires within 14 days (as the last Check connection saw it): one alert a day;
+ *  6. PR W2b, while Auto is on: AI templates its rules allow → Meta, and the AI fixes it asks for
+ *     (whatsapp/auto.ts) — on its own, after the alerts and the summary;
+ *  7. PR W2: the daily AI gap-fill, after a complete sync.
  */
 
 import { randomUUID } from 'crypto';
@@ -35,8 +38,13 @@ import { checkContext, displayOf, loadPools, reportFor } from './context';
 import { decideDeleted, decideFromMeta, importedDoc, inferUse, viewOf } from './apply';
 import { connectionAlert, metaErrorDetail, revert } from './submit';
 import { planGapFill } from './aiRequests';
+import { runAuto } from './auto';
+import { readEngineSettings, waAutoOf } from '../store/engineSettings';
+import { MAX_AI_FIXES } from '../core/whatsapp/aiBrief';
 import {
+  aiInfoOf,
   alertRecorded,
+  AUTO_ACTOR,
   changeTemplate,
   claimLease,
   clearHintUnknownIfBefore,
@@ -242,6 +250,8 @@ export interface TickResult {
   ran: boolean;
   /** PR W2: writer runs the daily gap-fill queued. */
   aiQueued?: number;
+  /** PR W2b: Auto — templates sent to Meta, AI fixes asked for, why it stopped. */
+  auto?: { sent: number; fixes: number; stopped: string | null };
   reason?: string;
   repaired?: number;
   synced?: boolean;
@@ -289,6 +299,18 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
     out.alerts = await flushAlerts(docs);
     out.digest = await maybeDigest();
     await tokenExpiryCheck(ops);
+    // PR W2b: Auto, on its own (an error here never keeps the alerts, the summary or the gap-fill
+    // from running). Fresh settings: a brake applies at the next tick.
+    const wa = waAutoOf(await readEngineSettings());
+    if (wa.autoSubmit === 'on' && (await renewLease(owner, LEASE_MS))) {
+      try {
+        const r = await runAuto({ maxPerDay: wa.maxPerDay, deadlineMs: started + TICK_BUDGET_MS, renew: () => renewLease(owner, LEASE_MS) });
+        out.auto = { sent: r.sent, fixes: r.fixes, stopped: r.stopped };
+        if (r.lostLease) return { ...out, reason: 'lease_lost' };
+      } catch (err) {
+        await writeLog({ kind: 'auto.error', level: 'error', actor: AUTO_ACTOR, summary: `Auto failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null } });
+      }
+    }
     // PR W2: the daily gap-fill, right after a complete sync — on its own, so an error here never
     // keeps W1's alerts, summary or token reminder from going out (they ran above).
     if (syncedComplete && (await renewLease(owner, LEASE_MS))) {
@@ -438,8 +460,16 @@ export async function maybeDigest(): Promise<boolean> {
   const waiting: DigestItem[] = [];
   const inReview: DigestItem[] = [];
   const problems: DigestItem[] = [];
+  // PR W2b: what the AI wrote and what Auto sent since the last summary (also when listed above).
+  const aiWritten: DigestItem[] = [];
+  const autoSent: DigestItem[] = [];
   for (const d of docs) {
     if (d.dismissed) continue;
+    const ai = aiInfoOf(d);
+    if (ai && Date.parse(ai.at) > since) {
+      aiWritten.push({ label: label(d), note: ai.kind === 'fix' ? `AI fix ${ai.fixes} of ${MAX_AI_FIXES}` : ai.kind === 'translation' ? 'a translation' : ai.kind === 'alternative' ? 'another version (send it yourself)' : 'a first draft' });
+    }
+    if (ai?.autoSubmittedAt && Date.parse(ai.autoSubmittedAt) > since) autoSent.push({ label: label(d), note: d.lastSubmitError ? `Meta refused it: ${d.lastSubmitError.message}` : undefined });
     const report = reportFor(d, ctxBase(d));
     const display = displayOf(d, report, pools);
     const approvedAt = tsMs(d.meta?.approvedAt) ?? 0;
@@ -452,11 +482,11 @@ export async function maybeDigest(): Promise<boolean> {
       problems.push({ label: label(d), note: display === 'rejected' ? rejectionWords(d.meta?.rejectedReason) : display });
     }
   }
-  const digest = digestText({ approved, waiting, inReview, problems });
+  const digest = digestText({ approved, waiting, inReview, problems, aiWritten, autoSent });
   if (digest) {
     await raiseAlert({ kind: 'whatsapp_digest', dedupeKey: `wa_digest:${day}`, audience: 'heidifi', subject: digest.subject, text: digest.text });
     if (!(await alertRecorded(`wa_digest:${day}`))) return false; // the next tick tries again
-    await writeLog({ kind: 'digest.sent', level: 'info', actor: SYSTEM, summary: `Daily summary emailed: ${digest.subject.replace(/^WhatsApp templates: /, '')}`, detail: { approved: approved.length, waiting: waiting.length, inReview: inReview.length, problems: problems.length } });
+    await writeLog({ kind: 'digest.sent', level: 'info', actor: SYSTEM, summary: `Daily summary emailed: ${digest.subject.replace(/^WhatsApp templates: /, '')}`, detail: { approved: approved.length, waiting: waiting.length, inReview: inReview.length, problems: problems.length, aiWritten: aiWritten.length, autoSent: autoSent.length } });
   }
   await updateOps({ digest: { lastDay: day, lastAtMs: Date.now() } });
   return Boolean(digest);
