@@ -16,7 +16,8 @@
  *  2. a sync when due — at once after a webhook hint, every 15 minutes while anything is with Meta,
  *     else every 6 hours;
  *  3. alerts waiting on templates → emailed (each once: `raiseAlert` keys them);
- *  4. the 08:00 (Zurich) summary, once a day, skipped when there is nothing to tell.
+ *  4. the 08:00 (Zurich) summary, once a day, skipped when there is nothing to tell;
+ *  5. a token that expires within 14 days (as the last Check connection saw it): one alert a day.
  */
 
 import { randomUUID } from 'crypto';
@@ -50,6 +51,7 @@ import {
   writeLog,
   type StoredTemplate,
   type WaActor,
+  type WaOps,
 } from './store';
 
 const MINUTE = 60_000;
@@ -281,12 +283,41 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
     if (!(await renewLease(owner, LEASE_MS))) return { ...out, reason: 'lease_lost' };
     out.alerts = await flushAlerts(docs);
     out.digest = await maybeDigest();
+    await tokenExpiryCheck(ops);
   } catch (err) {
     await writeLog({ kind: 'tick.error', level: 'error', actor: SYSTEM, summary: `The template tick failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null, code: (err as { code?: unknown })?.code ?? null } });
   } finally {
     await releaseLease(owner);
   }
   return out;
+}
+
+const TOKEN_WARN_MS = 14 * 24 * HOUR;
+
+/**
+ * The token's expiry as the last Check connection saw it (null: never expires — a "Never" System User
+ * token). Within 14 days, or past it: one alert a day (`whatsapp_connection`) and one log row.
+ */
+export async function tokenExpiryCheck(ops: WaOps): Promise<boolean> {
+  const exp = ops.connection?.tokenExpiresAt;
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) return false;
+  const left = exp - Date.now();
+  if (left > TOKEN_WARN_MS) return false;
+  const key = `wa_token_expiry:${dayKey(engineNow(), TZ)}`;
+  if (await alertRecorded(key)) return false;
+  const days = Math.max(0, Math.ceil(left / (24 * HOUR)));
+  const when = new Date(exp).toISOString().slice(0, 10);
+  const subject = left <= 0 ? 'URGENT: the WhatsApp access token has expired' : `WhatsApp access token expires in ${days} day${days === 1 ? '' : 's'}`;
+  await raiseAlert({
+    kind: 'whatsapp_connection',
+    dedupeKey: key,
+    audience: 'heidifi',
+    subject,
+    text: `${left <= 0 ? `The WhatsApp access token expired on ${when}` : `The WhatsApp access token expires on ${when}`}. Guest login codes by WhatsApp and the template tab stop working with it.\n\nMake a new System User token (expiration: Never) in Meta Business Suite → Settings → Users → System users, put it into WHATSAPP_ACCESS_TOKEN on the server and redeploy, then press Check connection on Adaptive Campaigns → WhatsApp. If that is done already, press Check connection: this reminder uses what the last check saw.`,
+  });
+  if (!(await alertRecorded(key))) return false;
+  await writeLog({ kind: 'connection.token_expiring', level: left <= 0 ? 'error' : 'warn', actor: SYSTEM, summary: subject, detail: { expiresAt: new Date(exp).toISOString() } });
+  return true;
 }
 
 export interface RepairResult {

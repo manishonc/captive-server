@@ -42,7 +42,7 @@ import { runWhatsAppTemplateTick } from '../../src/adaptive/whatsapp/sync';
 import { __clearHintCache, noteTemplateHint, noteTemplateHints } from '../../src/adaptive/whatsapp/hints';
 import { revert } from '../../src/adaptive/whatsapp/submit';
 import { MetaError } from '../../src/adaptive/whatsapp/metaError';
-import { queueSandboxFaults, SANDBOX_WABA_ID } from '../../src/adaptive/whatsapp/sandbox';
+import { queueSandboxFaults, SANDBOX_APP_ID, SANDBOX_WABA_ID } from '../../src/adaptive/whatsapp/sandbox';
 import { HINT_COALESCE_MS, SYSTEM, hourKey } from '../../src/adaptive/whatsapp/store';
 import { STOP_LINES } from '../../src/adaptive/send/compose';
 
@@ -802,6 +802,87 @@ await test('review round 3: Meta archiving a template — shown as archived, the
   assertEqual(alerts.length, 1, 'one alert');
   const overview = (await get('/admin/whatsapp')).body;
   assert(overview.badge >= 1, `counted as a problem: ${JSON.stringify(overview.counts)}`);
+});
+
+await test('notices: Check connection reads whether the app is subscribed (off at first); Turn on notices subscribes once, logs it, and a second press changes nothing', async () => {
+  await fresh();
+  const early = await post('/admin/whatsapp/connection/notices');
+  assertEqual(early.status, 409, `before the connection works: ${early.text}`);
+  await connectAndSync();
+  let o = (await get('/admin/whatsapp')).body;
+  assertEqual([o.connection.notices, o.connection.appId, o.connection.appName, o.connection.otherApps], ['off', SANDBOX_APP_ID, 'HeidiFi (sandbox)', []], 'off at first');
+  assertEqual(o.managerUrl, 'https://business.facebook.com/latest/whatsapp_manager/message_templates/', 'Meta’s current templates address');
+  const on = await post('/admin/whatsapp/connection/notices');
+  assertEqual([on.status, on.body.on, on.body.changed, on.body.error, on.body.connection.notices], [200, true, true, null, 'on'], on.text);
+  const rows = await logRows('connection.notices');
+  assert(rows.length === 1 && rows[0].level === 'info' && rows[0].actor.kind === 'admin' && rows[0].to === 'on', JSON.stringify(rows));
+  const again = await post('/admin/whatsapp/connection/notices');
+  assertEqual([again.body.on, again.body.changed], [true, false], 'already on');
+  assertEqual((await logRows('connection.notices')).length, 1, 'nothing new to log');
+  o = (await get('/admin/whatsapp')).body;
+  assertEqual(o.connection.notices, 'on', 'the strip shows it');
+});
+
+await test('notices: Meta refusing is logged with its words and leaves it off; an override (message webhooks elsewhere) counts as on and is never touched', async () => {
+  await fresh();
+  await connectAndSync();
+  await queueSandboxFaults([{ op: 'subscriptions', fault: 'permission' }]);
+  const denied = await post('/admin/whatsapp/connection/notices');
+  assertEqual([denied.status, denied.body.on, denied.body.error?.kind, denied.body.connection.notices], [200, false, 'permission', 'off'], denied.text);
+  const row = (await logRows('connection.notices'))[0];
+  assert(row.level === 'error' && /not turned on/.test(row.summary), JSON.stringify(row));
+
+  // Template notices always go to the app's own callback (Meta allows no override for them); an
+  // override only moves message webhooks — shown, and never removed (a POST without a body would).
+  await db.collection(COL.sandboxWhatsAppTemplates).doc('__faults').set({ subscribed: [SANDBOX_APP_ID], overrides: [SANDBOX_APP_ID] }, { merge: true });
+  const check = await post('/admin/whatsapp/connection/check');
+  assertEqual([check.body.connection.notices, check.body.connection.messagesOverride], ['on', true], 'on, with the override shown');
+  const again = await post('/admin/whatsapp/connection/notices');
+  assertEqual([again.body.on, again.body.changed, again.body.error], [true, false, null], again.text);
+  const state = (await db.collection(COL.sandboxWhatsAppTemplates).doc('__faults').get()).data()!;
+  assertEqual([state.subscribed, state.overrides], [[SANDBOX_APP_ID], [SANDBOX_APP_ID]], 'nothing posted');
+});
+
+await test('notices: the app subscribed is the current token’s, asked from Meta at the click (never an old check’s)', async () => {
+  await fresh();
+  await connectAndSync();
+  // As if the token had been swapped for another app's since the last Check connection.
+  await db.collection(COL.config).doc(WHATSAPP_DOC_ID).update({ 'connection.appId': '555' });
+  const on = await post('/admin/whatsapp/connection/notices');
+  assertEqual([on.body.on, on.body.changed], [true, true], on.text);
+  const row = (await logRows('connection.notices'))[0];
+  assertEqual(row.detail.appId, SANDBOX_APP_ID, 'the current token’s app');
+  assertEqual((await db.collection(COL.sandboxWhatsAppTemplates).doc('__faults').get()).get('subscribed'), [SANDBOX_APP_ID], 'only it');
+});
+
+await test('token expiry: Meta not describing the token keeps the last known expiry (and its reminder), shown as unknown', async () => {
+  await fresh();
+  await connectAndSync();
+  const opsRef = db.collection(COL.config).doc(WHATSAPP_DOC_ID);
+  const exp = Date.now() + 5 * 24 * 3_600_000;
+  await opsRef.update({ 'connection.tokenExpiresAt': exp });
+  await queueSandboxFaults([{ op: 'debug', fault: 'server_error' }]);
+  const check = await post('/admin/whatsapp/connection/check');
+  assertEqual([check.body.connection.tokenDescribed, check.body.connection.tokenExpiresAt, check.body.connection.ok], [false, exp, true], check.text);
+  await runWhatsAppTemplateTick();
+  assertEqual((await alertsOf('whatsapp_connection')).length, 1, 'the reminder still goes out');
+});
+
+await test('token expiry: within 14 days one alert a day (and a log row); a never-expiring token none', async () => {
+  await fresh();
+  await connectAndSync();
+  await runWhatsAppTemplateTick();
+  assertEqual((await alertsOf('whatsapp_connection')).length, 0, 'never expires: no alert');
+  const opsRef = db.collection(COL.config).doc(WHATSAPP_DOC_ID);
+  await opsRef.update({ 'connection.tokenExpiresAt': Date.now() + 5 * 24 * 3_600_000 + 60_000 });
+  await runWhatsAppTemplateTick();
+  await runWhatsAppTemplateTick();
+  const alerts = await alertsOf('whatsapp_connection');
+  assert(alerts.length === 1 && /expires in 6 days|expires in 5 days/.test(alerts[0].subject), JSON.stringify(alerts.map((a) => a.subject)));
+  assertEqual((await logRows('connection.token_expiring')).length, 1, 'one row');
+  await advance(24 * 3_600_000);
+  await runWhatsAppTemplateTick();
+  assertEqual((await alertsOf('whatsapp_connection')).length, 2, 'again the next day');
 });
 
 await test('no secret in any console line', async () => {

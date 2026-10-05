@@ -112,8 +112,38 @@ const CREATE = { name: 'hf_welcome_offer_1', language: 'de', category: 'MARKETIN
       json(200, { data: { is_valid: true, scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'], granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['111', '222'] }, { scope: 'whatsapp_business_messaging', target_ids: ['111'] }], expires_at: 0 } }),
     );
     const t = await c.debugToken();
-    assertEqual(t, { valid: true, scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'], wabaIds: ['111', '222'], expiresAt: null }, 'token');
+    assertEqual(t, { valid: true, scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'], wabaIds: ['111', '222'], expiresAt: null, appId: null, appName: null }, 'token');
     assert(calls[0].url.includes('/debug_token?input_token='), 'input_token is how debug_token works');
+  });
+
+  await test('debug_token: an admin system user’s token names no account (no target_ids), but its app and expiry', async () => {
+    const { c } = client(() =>
+      json(200, { data: { app_id: '123456789012345', application: 'HeidiFi', type: 'SYSTEM_USER', is_valid: true, scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'], granular_scopes: [{ scope: 'whatsapp_business_management' }, { scope: 'whatsapp_business_messaging' }], expires_at: 1793000000 } }),
+    );
+    const t = await c.debugToken();
+    assertEqual([t.wabaIds, t.appId, t.appName, t.expiresAt], [[], '123456789012345', 'HeidiFi', 1793000000 * 1000], 'token');
+  });
+
+  await test('subscribed_apps: the apps Meta sends the account’s notices to; an override is flagged; a 2xx without a list is "unavailable"', async () => {
+    const { c, calls, logs } = client(() =>
+      json(200, { data: [{ whatsapp_business_api_data: { id: '123456789012345', name: 'HeidiFi', link: 'https://heidifi.ai' } }, { whatsapp_business_api_data: { id: '999', name: 'Partner' }, override_callback_uri: 'https://elsewhere.example/hook' }] }),
+    );
+    assertEqual(await c.subscribedApps('WABA1'), [{ id: '123456789012345', name: 'HeidiFi', overrideCallback: false }, { id: '999', name: 'Partner', overrideCallback: true }], 'apps');
+    assertEqual([calls[0].method, new URL(calls[0].url).pathname], ['GET', `/${GRAPH_VERSION}/WABA1/subscribed_apps`], 'GET the edge');
+    assert(logs.every((l) => !l.includes(TOKEN) && !l.includes('elsewhere')), logs.join('\n'));
+    const bad = client(() => json(200, { success: true }));
+    assertEqual((await rejects(bad.c.subscribedApps('WABA1'))).kind, 'unavailable', 'no list');
+  });
+
+  await test('subscribe: exactly one POST without a body (no override is sent); success read from Meta; refusals classified', async () => {
+    const { c, calls } = client(() => json(200, { success: true }));
+    assertEqual(await c.subscribeApp('WABA1'), { ok: true }, 'ok');
+    assertEqual([calls.length, calls[0].method, calls[0].body, new URL(calls[0].url).pathname], [1, 'POST', undefined, `/${GRAPH_VERSION}/WABA1/subscribed_apps`], 'one POST, no body');
+    assertEqual((await client(() => json(200, {})).c.subscribeApp('WABA1')).ok, false, 'no success → not ok');
+    const denied = client(() => metaErr(400, 200, 1349174, 'Permissions error'));
+    assertEqual((await rejects(denied.c.subscribeApp('WABA1'))).kind, 'permission', 'code 200 → permission');
+    const lost = client(() => 'network');
+    assertEqual((await rejects(lost.c.subscribeApp('WABA1'))).kind, 'unknown', 'a lost POST is unknown');
   });
 
   await test('create: exactly one POST with the JSON body; the id, status and category come back', async () => {

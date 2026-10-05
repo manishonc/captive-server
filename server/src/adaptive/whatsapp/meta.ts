@@ -46,8 +46,17 @@ export interface MetaClient {
   /** Configured (token + phone number id) and allowed here (never under the emulator). */
   ready(): boolean;
   phoneNumberId(): string | null;
-  debugToken(): Promise<{ valid: boolean; scopes: string[]; wabaIds: string[]; expiresAt: number | null }>;
+  /** The server's own token: valid, its permissions, the accounts it names, its expiry (null: never) and its app. */
+  debugToken(): Promise<{ valid: boolean; scopes: string[]; wabaIds: string[]; expiresAt: number | null; appId: string | null; appName: string | null }>;
   phoneNumbers(wabaId: string): Promise<PhoneNumberInfo[]>;
+  /**
+   * The apps subscribed to the account's webhooks (`GET /{waba}/subscribed_apps`): Meta sends an
+   * app the account's notices only while it is subscribed. `overrideCallback`: notices go to another
+   * address than the app's own callback.
+   */
+  subscribedApps(wabaId: string): Promise<Array<{ id: string; name: string | null; overrideCallback: boolean }>>;
+  /** Subscribes the token's app to the account (`POST /{waba}/subscribed_apps`, no body). */
+  subscribeApp(wabaId: string): Promise<{ ok: boolean }>;
   /**
    * Every template of the WABA; `complete` false when a page limit or the time budget stopped it;
    * `minimal` when Meta refused an optional field and only the basic ones were read (quality,
@@ -214,7 +223,21 @@ export function createMetaClient(deps: MetaClientDeps = {}): MetaClient {
       const mgmt = granular.find((g) => g.scope === 'whatsapp_business_management');
       const wabaIds = Array.isArray(mgmt?.target_ids) ? (mgmt!.target_ids as unknown[]).map(String) : [];
       const exp = numOrNull(data.expires_at);
-      return { valid: data.is_valid === true, scopes, wabaIds, expiresAt: exp && exp > 0 ? exp * 1000 : null };
+      const appId = data.app_id !== undefined && data.app_id !== null && /^\d{1,30}$/.test(String(data.app_id)) ? String(data.app_id) : null;
+      return { valid: data.is_valid === true, scopes, wabaIds, expiresAt: exp && exp > 0 ? exp * 1000 : null, appId, appName: strOrNull(data.application, 120) };
+    },
+    async subscribedApps(wabaId) {
+      const json = await call('GET', `/${encodeURIComponent(wabaId)}/subscribed_apps`, 'subscribed_apps');
+      // A 2xx without a list is "couldn't ask", never "nothing subscribed".
+      if (!Array.isArray(json.data)) throw new MetaError('unavailable', 'Meta’s answer had no list of subscribed apps');
+      return (json.data as Array<Record<string, unknown>>).map((r) => {
+        const app = (r.whatsapp_business_api_data ?? {}) as Record<string, unknown>;
+        return { id: String(app.id ?? ''), name: strOrNull(app.name, 120), overrideCallback: Boolean(strOrNull(r.override_callback_uri, 2000)) };
+      });
+    },
+    async subscribeApp(wabaId) {
+      const json = await call('POST', `/${encodeURIComponent(wabaId)}/subscribed_apps`, 'subscribe_app');
+      return { ok: json.success === true };
     },
     async phoneNumbers(wabaId) {
       const json = await call('GET', `/${encodeURIComponent(wabaId)}/phone_numbers`, 'phone_numbers', {

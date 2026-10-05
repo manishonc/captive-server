@@ -292,7 +292,8 @@ in the log with who did it. Code: `adaptive/core/whatsapp/*` (pure), `adaptive/w
 | POST | `admin/whatsapp/templates/:id/dismiss` · `…/restore` | hide / bring back (never the OTP template) |
 | PUT | `admin/whatsapp/templates/:id/link` | `{use, map: [{n, field, fallback?, date?}], buttonField, baseVersion}` — an imported template gets named fields |
 | POST | `admin/whatsapp/templates/:id/use` | `{enabled}` — pause / resume our use (the brake: never refused) |
-| POST | `admin/whatsapp/connection/check` | → `{connection}` (token scopes, account, phone number, quality, problems) |
+| POST | `admin/whatsapp/connection/check` | → `{connection}` (token scopes, its app and expiry — `tokenDescribed` false: Meta didn't describe it, the last known expiry is kept — account, phone number, quality, `notices` on/off/unknown, `messagesOverride`, problems) |
+| POST | `admin/whatsapp/connection/notices` | Turn on notices: asks Meta which app the current token belongs to, then subscribes it to the account's webhooks (`POST /{waba}/subscribed_apps`, no body). Already subscribed: nothing is sent (so an override someone set — it moves message webhooks only; Meta allows none for template notices — is never removed) → `{on, changed, error, connection}`; 409 until the connection works |
 | PUT | `admin/whatsapp/connection` | `{wabaId}` — set the account by hand; 422 unless it owns our phone number |
 | POST | `admin/whatsapp/sync` | → `{running: true}` while the tick holds the lease, else `{sync}` |
 | POST | `dev/whatsapp/review` · `dev/whatsapp/fault` · `dev/whatsapp/tick` | sandbox only: Meta decides `{templateId \| name+language, decision, reason?, category?, quality?, hint?}`; queue faults `{items: [{op, fault}]}`; a tick now |
@@ -325,7 +326,8 @@ Meta's current state.
 **Alerts** (HeidiFi's alert email): `whatsapp_template` at once — rejected, paused, disabled, deleted
 while in use, blocked by its category, quality RED; the login-code template (urgent) not approved in a
 language the portal sends; `whatsapp_digest` daily; `whatsapp_connection` when a working connection
-fails (once a day per cause).
+fails (once a day per cause), and once a day while the token expires within 14 days (as the last
+Check connection saw it).
 
 **Firestore:** `CaptivePortal_WhatsAppTemplates/{wt_…}` (+ `history/{seq}`),
 `CaptivePortal_WhatsAppLog/{auto}` (`expireAt` +13 months, no TTL needed yet),
