@@ -247,7 +247,13 @@ PR F2a (the AI foundation, docs/adaptive-engine.md "The AI agents"): `GET /admin
 `agents { mode, accounts, monthlyBudgetUsd, changedBy }`; `PUT /admin/launch` also takes
 `change.agents { mode?: 'off'|'on', accounts?: { tenant: 'off'|'on'|null }, monthlyBudgetUsd?: 0–10000 }` — turning
 the AI agents on (the default or an account) needs "AI ON", a higher budget "LOOSEN LIMITS"; off and a lower
-budget are the brake (one click). The admin UI is the "AI agents" card on Launch & health. New:
+budget are the brake (one click). The admin UI is the "AI agents" card on Launch & health.
+
+PR W2b (WhatsApp Auto, docs/adaptive-engine.md "WhatsApp Auto"): `GET /admin/launch` also returns
+`whatsappTemplates { autoSubmit, maxPerDay, changedBy }` (and warns when Auto is on with a cap of 0, or with the
+AI agents off); `PUT /admin/launch` also takes `change.whatsappTemplates { autoSubmit?: 'off'|'on', maxPerDay?: 0–100 }`
+— on needs "WA AUTO-SUBMIT ON", a higher cap "LOOSEN LIMITS"; off and a lower cap are one click (the loosening kind
+is `wa_auto_on`). `POST /dev/launch` takes `whatsappTemplates` too (sandbox, no phrase). New:
 
 | Route | Body / query | Answer | Audit |
 |---|---|---|---|
@@ -282,7 +288,7 @@ in the log with who did it. Code: `adaptive/core/whatsapp/*` (pure), `adaptive/w
 
 | Method | Path | Body / query → answer |
 |---|---|---|
-| GET | `admin/whatsapp` | → `{connection, wabaId, configured, lastSync, templateCount, templateLimit, createsThisHour, managerUrl, alertsEmailSet, messages[] (coverage: message × en/de/fr/it cells), templates[], counts, badge, ai}` — PR W2a: each cell has `suggest [{kind, templateId}]` (what Suggest may write there) and `aiPending`; `ai {aiOn, scheduledOn, runsToday, maxRunsPerDay, queued, runsLeft, budgetOk, model, fallbackModel, blocked: ai_off\|budget\|daily_limit\|null, pendingCells}` (`runsLeft` = the day's runs minus those run and those queued) (null when it can't be read); a template has `ai` (its run, reasoning, category reason, AI fixes) when the AI wrote it |
+| GET | `admin/whatsapp` | → `{connection, wabaId, configured, lastSync, templateCount, templateLimit, createsThisHour, managerUrl, alertsEmailSet, messages[] (coverage: message × en/de/fr/it cells), templates[], counts, badge, ai}` — PR W2a: each cell has `suggest [{kind, templateId}]` (what Suggest may write there) and `aiPending`; `ai {aiOn, scheduledOn, runsToday, maxRunsPerDay, queued, runsLeft, budgetOk, model, fallbackModel, blocked: ai_off\|budget\|daily_limit\|null, pendingCells}` (`runsLeft` = the day's runs minus those run and those queued) (null when it can't be read); a template has `ai` (its run, reasoning, category reason, AI fixes) when the AI wrote it; PR W2b: `auto {on, maxPerDay, sentToday, blocked: not_connected\|not_configured\|meta_account\|meta_backoff\|meta_paused\|cap_zero\|cap_reached\|template_count_unknown\|hour_limit\|null, fixesBlocked: unknown\|ai_off\|writer_scheduled_off\|budget\|daily_limit\|null, ready: [templateId], waiting: [{templateId, reason}]}` (`reason`: alternative, unknown_origin, edited_by_hand, checks, warnings, category, english, cell_busy, cell_has_approved, meta_refused, no_answer, tried) and `ai.writtenAs`, `ai.autoSubmittedAt`, `ai.autoSubmittedVersion`, `ai.autoAttempts`, `ai.sentVersion` (the version Meta last saw; null: not sent since; absent: from before W2b) on a template |
 | GET | `admin/whatsapp/templates/:id` | → `{template (text, compiled params and components, checks, preview, Meta's state), history[], managerUrl}` |
 | GET | `admin/whatsapp/log` | `?templateId&before&limit&routine=1` → `{log[]}` newest first (a template: its timeline) |
 | GET | `admin/whatsapp/prefill` | `?journeyKey&poolKey&lang` → `{source, category}` from the message's SMS wording |
@@ -297,7 +303,7 @@ in the log with who did it. Code: `adaptive/core/whatsapp/*` (pure), `adaptive/w
 | POST | `admin/whatsapp/connection/notices` | Turn on notices: asks Meta which app the current token belongs to, then subscribes it to the account's webhooks (`POST /{waba}/subscribed_apps`, no body). Already subscribed: nothing is sent (so an override someone set — it moves message webhooks only; Meta allows none for template notices — is never removed) → `{on, changed, error, connection}`; 409 until the connection works |
 | PUT | `admin/whatsapp/connection` | `{wabaId}` — set the account by hand; 422 unless it owns our phone number |
 | POST | `admin/whatsapp/sync` | → `{running: true}` while the tick holds the lease, else `{sync}` |
-| POST | `admin/whatsapp/suggest` | PR W2a, "Suggest with AI": `{use: {journeyKey, poolKey}, lang, kind: new\|translation\|alternative\|fix, templateId?}` (translation: the English one; fix: the rejected/paused one) → `{queued: true, taskId, runsLeft}`; the draft appears when the worker's AI lane has run it. 409 with `code` and words, each logged (`ai.request_refused`): `ai_off`, `budget`, `daily_limit` (today's runs used or already queued), `pending` (a run is on its way for that message and language), `no_message`, `english_missing`, `language_exists`, `not_rejected`, `not_ours`, `no_target`, `fix_limit`, `other_language` (a fix of a template in another language). The words are cut at the first ": " by the cms in production — word refusals by `code`. Needs the AI switch only (not the writer's Scheduled runs); 10 a minute per admin |
+| POST | `admin/whatsapp/suggest` | PR W2a, "Suggest with AI": `{use: {journeyKey, poolKey}, lang, kind: new\|translation\|alternative\|fix, templateId?}` (translation: the English one; fix: the rejected/paused one) → `{queued: true, taskId, runsLeft}`; the draft appears when the worker's AI lane has run it. 409 with `code` and words, each logged (`ai.request_refused`): `ai_off`, `budget`, `daily_limit` (today's runs used or already queued), `pending` (a run is on its way for that message and language), `no_message`, `english_missing`, `language_exists`, `not_rejected`, `not_ours`, `no_target`, `fix_limit`, `other_language` (a fix of a template in another language), `fix_unsent` (PR W2b: the AI's fix hasn't been sent to Meta yet). The words are cut at the first ": " by the cms in production — word refusals by `code`. Needs the AI switch only (not the writer's Scheduled runs); 10 a minute per admin |
 | POST | `dev/whatsapp/review` · `dev/whatsapp/fault` · `dev/whatsapp/tick` | sandbox only: Meta decides `{templateId \| name+language, decision, reason?, category?, quality?, hint?}`; queue faults `{items: [{op, fault}]}`; a tick now |
 
 **How a template moves.** Stored: our `stage` (`draft` → `submitting` → `submitted`) and Meta's raw
@@ -334,7 +340,11 @@ Check connection saw it).
 **The AI writer (PR W2a)** — see docs/adaptive-engine.md "The WhatsApp template writer": Suggest queues one
 `wa_template_writer` run; the worker writes its answer as a draft (`origin: 'ai'`) exactly once, or logs why not
 (rejected by a check, no longer needed). The daily gap-fill runs in the tick after a complete sync when the
-writer's Scheduled runs are on. Nothing is sent to Meta by the AI (Auto comes with W2b).
+writer's Scheduled runs are on. PR W2b: with WhatsApp Auto on (Launch & health, "WA AUTO-SUBMIT ON"), the tick
+sends AI templates that pass its rules to Meta by itself and asks the AI to fix the ones Meta rejects (log
+kinds `auto.run`, `auto.left`, `auto.cap_reached`, `auto.stopped` (once a day per reason: `meta_account`,
+`meta_no_answer`, `meta_unavailable`, `meta_backoff`, `creates_hour`, `template_limit`, `rate_limited`),
+`auto.error`, `ai.auto_fix`, `ai.auto_fix_skipped`, `settings.auto_changed`).
 
 **Firestore:** `CaptivePortal_WhatsAppTemplates/{wt_…}` (+ `history/{seq}`),
 `CaptivePortal_WhatsAppLog/{auto}` (`expireAt` +13 months, no TTL needed yet),

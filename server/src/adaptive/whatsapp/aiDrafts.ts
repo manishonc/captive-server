@@ -21,6 +21,7 @@ import { whatsappTemplateIdFor } from '../core/runtime/ids';
 import { compileTemplate, metaLanguageFor } from '../core/whatsapp/template';
 import { displayStatus, type WaDisplay } from '../core/whatsapp/status';
 import {
+  aiFixUnsentOf,
   cellKeyOf,
   MAX_AI_FIXES,
   parseWriterParams,
@@ -74,6 +75,11 @@ export function writerViewOf(d: StoredTemplate, display: WaDisplay): WriterTempl
     aiFixes: ai?.fixes ?? 0,
     dismissedAtMs: d.dismissed && d.origin === 'ai' ? tsMs(d.updatedAt) : null,
     category: d.meta?.category ?? d.requestedCategory ?? null,
+    aiFixUnsent: aiFixUnsentOf(
+      ai ? { kind: ai.kind, appliedVersion: ai.appliedVersion, atMs: Number.isFinite(Date.parse(ai.at)) ? Date.parse(ai.at) : null, ...(ai.sentVersion !== undefined ? { sentVersion: ai.sentVersion } : {}) } : null,
+      d.version,
+      tsMs(d.meta?.lastChangedAt),
+    ),
   };
 }
 
@@ -162,9 +168,13 @@ export async function applyWriterAnswer(
   if (local.kind === 'fix') {
     const cur = docs.find((d) => d.id === local.targetTemplateId);
     if (!cur) return superseded('no_target');
-    const fixes = (aiInfoOf(cur)?.fixes ?? 0) + 1;
+    const prev = aiInfoOf(cur);
+    const fixes = (prev?.fixes ?? 0) + 1;
     const version = cur.version + 1;
-    const ai: WaAiInfo = { ...aiBase, appliedVersion: version, fixes };
+    // What the AI first wrote it as stays (an "alternative" stays one: Auto never sends it).
+    const writtenAs = prev?.writtenAs ?? (prev && prev.kind !== 'fix' ? prev.kind : null);
+    // Not sent yet (Meta saw an older version).
+    const ai: WaAiInfo = { ...aiBase, appliedVersion: version, fixes, writtenAs, sentVersion: null };
     changeTemplateInTx(tx, cur, {
       set: { source, compiled, requestedCategory: out.category, version, ai: ai as unknown as Record<string, unknown>, lastSubmitError: null, updatedBy: 'ai' },
       log: {
@@ -210,7 +220,7 @@ export async function applyWriterAnswer(
           useEnabled: true,
           version: 1,
           hint: null,
-          ai: { ...aiBase, appliedVersion: 1, fixes: 0 } as unknown as Record<string, unknown>,
+          ai: { ...aiBase, appliedVersion: 1, fixes: 0, writtenAs: local.kind === 'fix' ? null : local.kind, sentVersion: null } as unknown as Record<string, unknown>,
           createdBy: 'ai',
           updatedBy: 'ai',
         },
@@ -237,6 +247,29 @@ export async function applyWriterAnswer(
 const QUIET = new Set(['already_called', 'applied_earlier', 'duplicate', 'lease_lost', 'shutdown', 'gone']);
 /** The precheck's skips: the run wasn't needed any more (routine). */
 const NOT_NEEDED = new Set(['cell_filled', 'language_exists', 'edited_since', 'not_editable', 'fix_limit', 'english_missing', 'no_target', 'other_language', 'bad_params']);
+
+/** PR W2b: run endings that say nothing about the template (Auto may ask for its fix again). */
+const PASSING = new Set([
+  'aborted',
+  'interrupted',
+  'finish_failed',
+  'agents_off',
+  'agent_off',
+  'budget',
+  'daily_limit',
+  'stale',
+  'sending_paused',
+  'timeout',
+  'connection',
+  'server_error',
+  'rate_limited',
+  'unavailable',
+  'answer_lost',
+  'relay_daily_limit',
+  'deadline',
+  'api_error',
+  'unknown',
+]);
 
 /** A run's own reasons (the run's gates and ends) in words; the writer's codes are in writerCodeWords. */
 const RUN_WORDS: Readonly<Record<string, string>> = {
@@ -278,6 +311,12 @@ export async function reportWriterRun(r: RunReport): Promise<void> {
         const patch: Record<string, unknown> = {};
         const mark = (snap.get('aiPending') as Record<string, { taskId?: unknown }> | undefined)?.[cell];
         if (r.taskId !== null && mark?.taskId === r.taskId) patch.aiPending = { [cell]: FieldValue.delete() };
+        // PR W2b: an AI fix Auto asked for that ended for a passing reason (a deploy, the gate, the
+        // budget, the relay) — Auto may ask again for the same rejection (at most 3 tries). Its own
+        // request only (a newer one may stand there).
+        const target = local?.requestedBy === 'auto_fix' ? local.targetTemplateId : null;
+        const stamp = target ? (snap.get('autoFix') as Record<string, { taskId?: unknown }> | undefined)?.[target] : undefined;
+        if (target && stamp && r.taskId !== null && stamp.taskId === r.taskId && PASSING.has(reason)) patch.autoFix = { [target]: { retry: true } };
         if (r.outcome === 'rejected' && local?.requestedBy === 'gap_fill') {
           const rejects = Number(snap.get('aiGapFill')?.rejects?.[cell] ?? 0) + 1;
           patch.aiGapFill =

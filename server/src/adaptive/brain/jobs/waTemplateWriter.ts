@@ -64,7 +64,7 @@ export const waTemplateWriterJob: AgentJob<WriterBrief, WriterAnswer> = {
   key: 'wa_template_writer',
   label: 'WhatsApp template writer',
   description:
-    'Writes a WhatsApp template for one message in one language (new, translation, alternative, or a fix after Meta rejected one) as a draft for the WhatsApp tab. Runs on "Suggest with AI" (needs the AI switch only) and, with Scheduled runs on, in the daily gap-fill that fills missing templates.',
+    'Writes a WhatsApp template for one message in one language (new, translation, alternative, or a fix after Meta rejected one) as a draft for the WhatsApp tab. Runs on "Suggest with AI" (needs the AI switch only) and, with Scheduled runs on, in the daily gap-fill that fills missing templates and for the fixes WhatsApp Auto asks for after Meta rejects an AI template.',
   scope: 'platform',
   defaults: {
     enabled: false,

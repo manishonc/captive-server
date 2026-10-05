@@ -41,7 +41,7 @@ import { gateFor } from '../src/adaptive/brain/gate';
 import { requestOf, testConnectionTask, agentRunTask } from '../src/adaptive/brain/tasks';
 import { pingJob, pingNonce, pingOutputSchema } from '../src/adaptive/brain/jobs/ping';
 import { AGENT_KEYS, jobFor } from '../src/adaptive/brain/registry';
-import { applyChange, summarizeChange, type LaunchState } from '../src/adaptive/core/runtime/launch';
+import { applyChange, confirmMatches, summarizeChange, type LaunchState } from '../src/adaptive/core/runtime/launch';
 import type { EngineSettings } from '../src/adaptive/store/engineSettings';
 
 let passed = 0;
@@ -693,6 +693,7 @@ const state = (over: Partial<LaunchState> = {}): LaunchState => ({
   alertsEmail: null,
   bandit: { mode: 'off', accounts: {} },
   agents: { mode: 'off', accounts: {}, monthlyBudgetUsd: 100 },
+  whatsappTemplates: { autoSubmit: 'off', maxPerDay: 10 },
   ...over,
 });
 
@@ -743,6 +744,35 @@ test('a state without `agents` (older callers) gets none added', () => {
   const { agents: _a, ...rest } = state();
   const after = applyChange(rest as LaunchState, { paused: false });
   assert(!('agents' in after), 'no agents key');
+});
+
+console.log('\nWhatsApp Auto on the launch card (PR W2b)');
+
+test('turning Auto on needs "WA AUTO-SUBMIT ON"; off is one click', () => {
+  const before = state();
+  const onState = applyChange(before, { whatsappTemplates: { autoSubmit: 'on' } });
+  const on = summarizeChange(before, onState);
+  eq([on.confirmPhrase, on.loosening], ['WA AUTO-SUBMIT ON', ['wa_auto_on']], 'phrase');
+  eq(on.lines, ['WhatsApp Auto (send AI templates to Meta): off → on'], 'line');
+  eq(summarizeChange(onState, applyChange(onState, { whatsappTemplates: { autoSubmit: 'off' } })).confirmPhrase, null, 'off: one click');
+});
+
+test('a higher cap is LOOSEN LIMITS, a lower one one click; with other switches, every phrase', () => {
+  const before = state();
+  const up = summarizeChange(before, applyChange(before, { whatsappTemplates: { maxPerDay: 20 } }));
+  eq([up.confirmPhrase, up.lines], ['LOOSEN LIMITS', ['WhatsApp Auto: 10 → 20 templates a day']], 'up');
+  eq(summarizeChange(before, applyChange(before, { whatsappTemplates: { maxPerDay: 5 } })).confirmPhrase, null, 'down');
+  eq(summarizeChange(before, applyChange(before, { whatsappTemplates: { autoSubmit: 'on', maxPerDay: 20 } })).confirmPhrase, 'LOOSEN LIMITS AND WA AUTO-SUBMIT ON', 'on and up');
+  eq(summarizeChange(before, applyChange(before, { agents: { mode: 'on' }, whatsappTemplates: { autoSubmit: 'on' } })).confirmPhrase, 'AI ON AND WA AUTO-SUBMIT ON', 'with AI ON');
+  eq(summarizeChange(before, applyChange(before, { whatsappTemplates: { autoSubmit: 'off', maxPerDay: 10 } })).empty, true, 'no change');
+  eq([confirmMatches('wa auto-submit on', 'WA AUTO-SUBMIT ON'), confirmMatches('WA AUTO SUBMIT ON', 'WA AUTO-SUBMIT ON')], [true, false], 'the phrase as typed');
+});
+
+test('a state without `whatsappTemplates` (older callers) gets none added', () => {
+  const { whatsappTemplates: _w, ...rest } = state();
+  const after = applyChange(rest as LaunchState, { paused: false });
+  assert(!('whatsappTemplates' in after), 'no key');
+  eq(summarizeChange(rest as LaunchState, after).lines, ['Release the pause (live accounts send again)'], 'nothing about Auto');
 });
 
 console.log('\nThe ping job and the tasks');

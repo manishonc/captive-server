@@ -15,6 +15,8 @@
  *  - `launch.liveSince` is stamped here (core/runtime/launch.ts). The sandbox's /dev/launch uses
  *    the same function, so local runs exercise it too.
  *  - PR F2a: the AI agents' switch and monthly budget (`agents`) go through here as well.
+ *  - PR W2b: WhatsApp Auto and its daily cap (`whatsappTemplates`) too; a change of either writes
+ *    a row in the WhatsApp activity log as well (`settings.auto_changed`).
  */
 
 import { FieldPath, FieldValue } from 'firebase-admin/firestore';
@@ -33,6 +35,7 @@ import { venueHasSomethingOn } from '../core/runtime/hold';
 import { now as engineNow, refreshClock } from '../engine/clock';
 import { getEngineStatus } from './engine';
 import { accountNameOf } from '../core/owner/accountName';
+import { adminActor, SYSTEM, writeLog } from '../whatsapp/store';
 
 const modeSchema = z.enum(['off', 'test', 'live']);
 const tenantKey = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, 'not a valid account id');
@@ -72,6 +75,11 @@ export const launchChangeSchema = z
       })
       .strict()
       .optional(),
+    // PR W2b: WhatsApp Auto (global) and its daily cap (0 = Auto sends nothing).
+    whatsappTemplates: z
+      .object({ autoSubmit: z.enum(['off', 'on']).optional(), maxPerDay: z.number().int().min(0).max(100).optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -94,6 +102,7 @@ function stateOf(s: EngineSettings): LaunchState {
     alertsEmail: s.alerts.email,
     bandit: { mode: s.bandit?.mode ?? 'off', accounts: s.bandit?.accounts ?? {} },
     agents: { mode: s.agents?.mode ?? 'off', accounts: s.agents?.accounts ?? {}, monthlyBudgetUsd: s.agents?.monthlyBudgetUsd ?? 0 },
+    whatsappTemplates: { autoSubmit: s.whatsappTemplates?.autoSubmit ?? 'off', maxPerDay: s.whatsappTemplates?.maxPerDay ?? 0 },
   };
 }
 
@@ -198,6 +207,10 @@ export async function getLaunch() {
     warnings.push('Could not read the engine status');
   }
   if (!settings.alerts.email) warnings.push('No alert email is set: HeidiFi gets no Adaptive alerts');
+  // PR W2b: WhatsApp Auto that can't act.
+  const wa = settings.whatsappTemplates;
+  if (wa?.autoSubmit === 'on' && wa.maxPerDay === 0) warnings.push('WhatsApp Auto is on with a cap of 0 a day: nothing is sent to Meta');
+  if (wa?.autoSubmit === 'on' && settings.agents?.mode !== 'on') warnings.push('WhatsApp Auto is on but the AI agents are off (by default): the AI writes no new drafts or fixes for it to send');
   if (settings.launch.default === 'live' && ls.default === null) warnings.push('The default is live without a "live since" date (edited by hand?): every venue waits for Start sending');
   // Any live account whose date can't be read (no own entry and no default date, or a null/unreadable entry).
   for (const t of new Set([...Object.keys(settings.launch.accounts), ...Object.keys(ls.accounts)])) {
@@ -228,6 +241,12 @@ export async function getLaunch() {
       accounts: settings.agents?.accounts ?? {},
       monthlyBudgetUsd: settings.agents?.monthlyBudgetUsd ?? 0,
       changedBy: settings.agents?.changedBy ?? null,
+    },
+    // PR W2b: WhatsApp Auto (AI templates sent to Meta by the tick) and its daily cap.
+    whatsappTemplates: {
+      autoSubmit: settings.whatsappTemplates?.autoSubmit ?? 'off',
+      maxPerDay: settings.whatsappTemplates?.maxPerDay ?? 0,
+      changedBy: settings.whatsappTemplates?.changedBy ?? null,
     },
     accountNames: names,
     waitingForStartSending: waiting,
@@ -326,6 +345,13 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
       set(['agents', 'monthlyBudgetUsd'], after.agents!.monthlyBudgetUsd);
       set(['agents', 'changedBy'], by);
     }
+    if (input.change.whatsappTemplates) {
+      if (input.change.whatsappTemplates.autoSubmit !== undefined && after.whatsappTemplates?.autoSubmit !== before.whatsappTemplates?.autoSubmit) set(['whatsappTemplates', 'autoSubmit'], after.whatsappTemplates!.autoSubmit);
+      // Always the cap as it reads now (or as changed): a stored block that isn't a map reads as 0,
+      // and a write of one field would otherwise turn it into a map with no cap (10).
+      set(['whatsappTemplates', 'maxPerDay'], after.whatsappTemplates!.maxPerDay);
+      set(['whatsappTemplates', 'changedBy'], by);
+    }
     set(['version'], next);
     set(['updatedAt'], new Date(realNow));
     set(['updatedBy'], by);
@@ -351,6 +377,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         alertsEmail: before.alertsEmail,
         bandit: before.bandit ?? null,
         agents: before.agents ?? null,
+        whatsappTemplates: before.whatsappTemplates ?? null,
       },
       after: {
         default: after.default,
@@ -364,10 +391,31 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         alertsEmail: after.alertsEmail,
         bandit: after.bandit ?? null,
         agents: after.agents ?? null,
+        whatsappTemplates: after.whatsappTemplates ?? null,
       },
     });
-    return { changed: true as const, summary, version: next };
+    const waBefore = before.whatsappTemplates ?? { autoSubmit: 'off' as const, maxPerDay: 0 };
+    const waAfter = after.whatsappTemplates ?? waBefore;
+    const autoChanged = waBefore.autoSubmit !== waAfter.autoSubmit || waBefore.maxPerDay !== waAfter.maxPerDay ? { before: waBefore, after: waAfter } : null;
+    return { changed: true as const, summary, version: next, autoChanged, by };
   });
+  // PR W2b: WhatsApp Auto changed — the WhatsApp activity log says so too (never fails the save).
+  if (result.changed && 'autoChanged' in result && result.autoChanged) {
+    const { before: b, after: a } = result.autoChanged;
+    const actor = opts.actor.kind === 'seed' ? SYSTEM : await adminActor(result.by);
+    await writeLog({
+      kind: 'settings.auto_changed',
+      level: 'info',
+      actor,
+      summary:
+        b.autoSubmit !== a.autoSubmit
+          ? `Auto ${a.autoSubmit === 'on' ? 'turned on' : 'turned off'}${a.autoSubmit === 'on' ? ` (at most ${a.maxPerDay} a day)` : ''}`
+          : `Auto’s cap changed: ${b.maxPerDay} → ${a.maxPerDay} templates a day`,
+      from: b.autoSubmit,
+      to: a.autoSubmit,
+      detail: { before: b, after: a },
+    }).catch(() => undefined);
+  }
   // This API process sees it at once; the worker within ~10 s, other API processes within 60 s.
   clearEngineSettingsCache();
   // A committed change (the brake above all) always answers 200, even if re-reading the card fails.

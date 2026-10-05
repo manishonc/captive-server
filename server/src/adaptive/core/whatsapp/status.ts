@@ -167,11 +167,16 @@ export interface DigestInput {
   waiting: DigestItem[];
   inReview: DigestItem[];
   problems: DigestItem[];
+  /** PR W2b: what the AI wrote, and what Auto sent to Meta, since the last summary. */
+  aiWritten?: DigestItem[];
+  autoSent?: DigestItem[];
 }
 
 /** The daily summary (null when there is nothing to tell). */
 export function digestText(d: DigestInput): { subject: string; text: string } | null {
-  const total = d.approved.length + d.waiting.length + d.inReview.length + d.problems.length;
+  const aiWritten = d.aiWritten ?? [];
+  const autoSent = d.autoSent ?? [];
+  const total = d.approved.length + d.waiting.length + d.inReview.length + d.problems.length + aiWritten.length + autoSent.length;
   if (!total) return null;
   const section = (title: string, items: DigestItem[]): string[] =>
     items.length
@@ -184,6 +189,8 @@ export function digestText(d: DigestInput): { subject: string; text: string } | 
       : [];
   const lines = [
     ...section('Approved by Meta since the last summary', d.approved),
+    ...section('Sent to Meta by Auto', autoSent),
+    ...section('Written by the AI', aiWritten),
     ...section('Waiting for you', d.waiting),
     ...section('In review at Meta', d.inReview),
     ...section('Problems', d.problems),
@@ -194,6 +201,8 @@ export function digestText(d: DigestInput): { subject: string; text: string } | 
     d.waiting.length ? `${d.waiting.length} waiting for you` : null,
     d.problems.length ? `${d.problems.length} problem${d.problems.length === 1 ? '' : 's'}` : null,
     d.inReview.length ? `${d.inReview.length} in review` : null,
+    autoSent.length ? `${autoSent.length} sent by Auto` : null,
+    aiWritten.length ? `${aiWritten.length} written by AI` : null,
   ].filter(Boolean);
   return { subject: `WhatsApp templates: ${parts.join(', ')}`, text: lines.join('\n') };
 }
