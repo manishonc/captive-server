@@ -12,6 +12,7 @@
  * server error, an incomplete list).
  */
 
+import { FieldValue } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { hashId } from '../core/checksum';
@@ -21,6 +22,11 @@ import type { MetaClient, MetaTemplateCreate, PhoneNumberInfo } from './meta';
 import type { MetaComponent } from '../core/whatsapp/template';
 
 export const SANDBOX_WABA_ID = 'sandbox_waba_1';
+export const SANDBOX_APP_ID = '100000000000001';
+/**
+ * The sandbox's state doc: queued faults (`queue`), the apps subscribed to the account
+ * (`subscribed`), and those whose notices go to another address (`overrides`, set by tests).
+ */
 const FAULTS_DOC = '__faults';
 
 export const SANDBOX_FAULTS = [
@@ -37,7 +43,7 @@ export const SANDBOX_FAULTS = [
   'no_waba_scope',
 ] as const;
 export type SandboxFault = (typeof SANDBOX_FAULTS)[number];
-export type SandboxOp = 'debug' | 'phones' | 'list' | 'get' | 'find' | 'create' | 'edit' | 'any';
+export type SandboxOp = 'debug' | 'phones' | 'list' | 'get' | 'find' | 'create' | 'edit' | 'subscriptions' | 'any';
 
 const col = () => db.collection(COL.sandboxWhatsAppTemplates);
 
@@ -116,7 +122,7 @@ export async function queueSandboxFaults(items: Array<{ op: SandboxOp; fault: Sa
     const ref = col().doc(FAULTS_DOC);
     const snap = await tx.get(ref);
     const queue = ((snap.get('queue') as Array<{ op: SandboxOp; fault: SandboxFault }> | undefined) ?? []).concat(items);
-    tx.set(ref, { queue });
+    tx.set(ref, { queue }, { merge: true });
     return queue.length;
   });
 }
@@ -130,7 +136,7 @@ async function takeFault(op: SandboxOp): Promise<SandboxFault | null> {
     const i = queue.findIndex((q) => q.op === op || q.op === 'any');
     if (i < 0) return null;
     const [hit] = queue.splice(i, 1);
-    tx.set(ref, { queue });
+    tx.set(ref, { queue }, { merge: true });
     return hit.fault;
   });
 }
@@ -186,7 +192,23 @@ export function createSandboxMetaClient(): MetaClient {
         scopes: fault === 'no_waba_scope' ? ['whatsapp_business_messaging'] : ['whatsapp_business_management', 'whatsapp_business_messaging'],
         wabaIds: fault === 'no_waba_scope' ? [] : [SANDBOX_WABA_ID],
         expiresAt: null,
+        appId: SANDBOX_APP_ID,
+        appName: 'HeidiFi (sandbox)',
       };
+    },
+    async subscribedApps(wabaId) {
+      await failIfQueued('subscriptions', 'GET');
+      if (wabaId !== SANDBOX_WABA_ID) throw new MetaError('not_found', '(sandbox) Unsupported get request. Object does not exist', { status: 400, code: 100, subcode: 33 });
+      const state = await col().doc(FAULTS_DOC).get();
+      const ids = (state.get('subscribed') as string[] | undefined) ?? [];
+      const overrides = (state.get('overrides') as string[] | undefined) ?? [];
+      return ids.map((id) => ({ id, name: id === SANDBOX_APP_ID ? 'HeidiFi (sandbox)' : 'Another app', overrideCallback: overrides.includes(id) }));
+    },
+    async subscribeApp(wabaId) {
+      await failIfQueued('subscriptions', 'POST');
+      if (wabaId !== SANDBOX_WABA_ID) throw new MetaError('not_found', '(sandbox) Unsupported post request. Object does not exist', { status: 400, code: 100, subcode: 33 });
+      await col().doc(FAULTS_DOC).set({ subscribed: FieldValue.arrayUnion(SANDBOX_APP_ID) }, { merge: true });
+      return { ok: true };
     },
     async phoneNumbers(wabaId): Promise<PhoneNumberInfo[]> {
       await failIfQueued('phones', 'GET');

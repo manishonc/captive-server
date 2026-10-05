@@ -16,6 +16,7 @@
  *   POST whatsapp/templates/:id/use        {enabled} pause / resume our use (the brake: never refused)
  *   POST whatsapp/connection/check         Check connection
  *   PUT  whatsapp/connection               {wabaId} set the account by hand (verified first)
+ *   POST whatsapp/connection/notices       Turn on notices: subscribe the app to the account's webhooks
  *   POST whatsapp/sync                     Sync now (the tick's lease: `running` when it is busy)
  *
  * Every write lands in the activity log with who did it. Nothing here deletes at Meta.
@@ -47,7 +48,7 @@ import { sandboxEnabled } from '../engine/clock';
 import { loadCatalogue } from './catalogue';
 import { STOP_LINES } from '../send/compose';
 import { metaClient } from '../whatsapp/source';
-import { checkConnection } from '../whatsapp/connection';
+import { checkConnection, subscribeNotices } from '../whatsapp/connection';
 import { submitTemplate } from '../whatsapp/submit';
 import { reconcile, runWhatsAppTemplateTick } from '../whatsapp/sync';
 import { noteTemplateHint } from '../whatsapp/hints';
@@ -78,7 +79,9 @@ export function templateIdParam(value: unknown): string {
   return s;
 }
 
-const managerUrl = (wabaId: string | null) => (wabaId ? `https://business.facebook.com/wa/manage/message-templates/?waba_id=${encodeURIComponent(wabaId)}` : null);
+// Meta's own address for the template list (it has no documented way to name the account in the
+// link: WhatsApp Manager's account selector, top right, picks it).
+const managerUrl = (wabaId: string | null) => (wabaId ? 'https://business.facebook.com/latest/whatsapp_manager/message_templates/' : null);
 
 const RANK: Record<string, number> = { approved: 1, in_review: 2, submitting: 3, ready: 4, needs_fix: 5, rejected: 6, paused: 7, disabled: 8, blocked: 9, attention: 10, archived: 11, deleted: 12 };
 const WAITING: ReadonlySet<WaDisplay> = new Set(['ready', 'needs_fix']);
@@ -466,6 +469,16 @@ export async function setWhatsAppWaba(body: unknown, actor: Actor) {
   return { connection: toJson(connection) };
 }
 
+/** "Turn on notices" (only once the connection works); then a fresh check, so the tab shows Meta's answer. */
+export async function turnOnWhatsAppNotices(actor: Actor) {
+  const by = await who(actor);
+  const ops = await readOps();
+  if (!ops.wabaId || !ops.connection?.ok) throw conflict('Check the Meta connection first');
+  const result = await subscribeNotices(by, ops.wabaId);
+  const connection = await checkConnection(by);
+  return { ...result, connection: toJson(connection) };
+}
+
 export async function syncWhatsAppNow(actor: Actor) {
   const by = await who(actor);
   const ops = await readOps();
@@ -535,7 +548,7 @@ export async function devWhatsAppReview(body: unknown) {
 }
 
 const faultSchema = z
-  .object({ items: z.array(z.object({ op: z.enum(['debug', 'phones', 'list', 'get', 'find', 'create', 'edit', 'any']), fault: z.enum(SANDBOX_FAULTS) }).strict()).min(1).max(20) })
+  .object({ items: z.array(z.object({ op: z.enum(['debug', 'phones', 'list', 'get', 'find', 'create', 'edit', 'subscriptions', 'any']), fault: z.enum(SANDBOX_FAULTS) }).strict()).min(1).max(20) })
   .strict();
 
 export async function devWhatsAppFault(body: unknown) {

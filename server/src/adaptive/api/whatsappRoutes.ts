@@ -65,6 +65,14 @@ router.put(
   }),
 );
 router.post(
+  '/admin/whatsapp/connection/notices',
+  handle(async (req) => {
+    const actor = adminActorOf(req);
+    if (!metaCalls(`connection:${actor.uid}`)) throw tooManyRequests('Too many checks in a minute — wait a moment');
+    return wa.turnOnWhatsAppNotices(actor);
+  }),
+);
+router.post(
   '/admin/whatsapp/sync',
   handle(async (req) => {
     const actor = adminActorOf(req);

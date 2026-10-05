@@ -155,6 +155,10 @@ The temporary token on the API Setup page expires — use a System User token in
    **`message_template_quality_update`**. Optional: the server re-reads Meta every 15 minutes while a
    template is in review (every 6 hours otherwise); with these fields a decision shows within ~2 minutes.
    The notice is only a hint — the server never trusts its body and re-reads the template from Meta.
+7. Meta sends an account's notices only to apps **subscribed to the account** (`/{WABA_ID}/subscribed_apps`,
+   API only — no button in Meta's consoles). The WhatsApp tab shows it as **Notices from Meta: on / off**
+   and **Turn on notices** makes that one call with the server's token. Delivery receipts for `messages`
+   (PR W3) need the same subscription.
 
 ### 4b. WhatsApp templates in Adaptive Campaigns (PR W1)
 
@@ -163,7 +167,10 @@ Admin → Captive Portal → **Adaptive Campaigns → WhatsApp**. No new environ
 - **Check connection** reads the existing `WHATSAPP_ACCESS_TOKEN` with Meta's `debug_token`: it must be
   valid and carry **`whatsapp_business_management`** (step 3). It finds the WhatsApp Business Account
   that owns `WHATSAPP_PHONE_NUMBER_ID` and stores its id in `CaptivePortal_AdaptiveConfig/whatsapp` (or
-  you type the account id there when the token doesn't name it). Nothing in the tab runs before this.
+  you type the account id there when the token doesn't name it — normal for an admin system user's token;
+  after Meta's 2026 account move it is the **Messaging account** id, the same number). Nothing in the tab
+  runs before this. It also reads the token's app and expiry (an alert a day once it expires within 14
+  days) and whether the app is subscribed to the account (step 7).
 - The tab then lists every template of the account (imported, synced every 15 min / 6 h by the API
   server's tick), drafts and checks new ones (T01–T22, docs/adaptive-api.md), sends them to Meta with
   one click and logs every step. It never deletes at Meta.

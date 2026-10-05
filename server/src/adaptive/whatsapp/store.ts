@@ -357,6 +357,21 @@ export interface WaConnection {
   verifiedName: string | null;
   quality: string | null;
   problems: string[];
+  /** The token's app (debug_token); null when Meta didn't say. Absent on checks made before this field. */
+  appId?: string | null;
+  appName?: string | null;
+  /**
+   * Whether the app is subscribed to the account's webhooks: `on`, `off` (Meta sends it no template
+   * notices, and with W3 no delivery receipts), `unknown` (couldn't tell). Template notices always go
+   * to the app's own callback address — Meta allows no override for them.
+   */
+  notices?: 'on' | 'off' | 'unknown';
+  /** Subscribed with another callback address (an override): message webhooks (W3) go there; template notices don't. */
+  messagesOverride?: boolean;
+  /** Other apps subscribed to the account (names), for the admin's information. */
+  otherApps?: string[];
+  /** Meta described the token (debug_token answered); false: its expiry is unknown (the last known one is kept). */
+  tokenDescribed?: boolean;
 }
 
 export interface WaOps {
