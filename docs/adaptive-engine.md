@@ -365,6 +365,91 @@ sending pause.
   {"agentKey":"ping","answers":[{"fault":"rate_limit"}]}` makes the next answer fail; `GET /dev/model-calls` lists
   what the fake model received.
 
+## The WhatsApp template writer (PR W2a)
+
+The first agent whose answer is used: `wa_template_writer` (`brain/jobs/waTemplateWriter.ts`, prompt
+`wa-writer-v1`) writes one platform WhatsApp template for one Adaptive message in one language — a `new` one,
+a `translation` of the English one (same name, same fields), an `alternative` (Suggest only), or a `fix` of a
+template Meta rejected or paused (in place, at most 2 AI fixes per template). It messages nobody and sends
+nothing to Meta, so it never waits on the guest-sending pause (Manish, 2026-10-05). Defaults: off, Opus 5.5
+with Sonnet 5.5 as fallback (changeable on the AI agents card), effort medium, 10 runs a day, 4,000 output
+tokens, the system prompt cached.
+
+- **What the model gets** (`core/whatsapp/aiBrief.ts`, built by the API in `whatsapp/aiRequests.ts`): the
+  message's purpose and rule (MARKETING / UTILITY), the fields it may use with what they mean and how to write
+  them (a fallback in the language), the link the button opens, today's platform SMS/email wording of that
+  message (the variant WhatsApp can carry best — fewest fields a template can't have, so "Checkout
+  instructions" B without the late check-out offer only some venues make; links taken out; a sentence that
+  held another field left out whole; a text with contact data left out entirely and counted), the other
+  templates' bodies, the English template (translation), Meta's reason (fix) and, for a service message, the
+  words Meta reads as promotion (`avoidWords`). No personal data; the privacy scan still runs. The prompt
+  states the field rules the checks enforce (real words between two fields, three words of its own per field,
+  defaults in the language). The **local part** (never sent: the check context as the API saw it, the
+  target template and its version) travels on the run as `input.local` (at most 200 KB).
+- **The answer** `{reasoning, language, body, buttonText, category, categoryReason}`: our code adds the footer
+  (the STOP line, marketing only), the button (`${VISITOR_BASE_URL}/{{1}}`) and the examples. Rejected (nothing
+  written, one log row) when a template check T01–T22 fails or a writer check: WW01 category ≠ the message's
+  rule · WW02 language (as declared and as its own words read; German "ss", never "ß") · WW05 contact data ·
+  WW06 promotion in a service message · WW07 the same text as another template of the message, as the one it
+  fixes (text and button) or as the English one it translates · WW08 any warning, for the daily gap-fill and
+  the AI fixes (Auto, W2b, never sends one) · WW09 no button text where the message's link needs one · WW10 a
+  number, price or percentage the brief doesn't give (in the text, a default or the button: a made-up
+  discount, fee or time would reach every venue's guests) · WW11 a default left as "…" or a first-name default
+  in another language (Meta never sees defaults). A fix must target the language asked for (`other_language`);
+  an English template filed under another category than the message's rule is never a translation source (all
+  languages of a name share one category).
+- **Applied once** (new in `brain/run.ts`, for any job with an `apply`): an `ok` run is finished with
+  `apply: {state: 'pending'}`; then `store/agents.ts` `applyRunOnce` runs the job's `apply` and stamps
+  `apply {state: applied | superseded | failed, code, detail, ref, at}` in **one transaction** — a run already
+  stamped is never applied again. The writer's apply reads first (the message's templates, the ops doc), checks
+  the answer is still wanted, then writes the draft (`origin: 'ai'`, `ai {runId, kind, requestedBy, model,
+  promptVersion, reasoning, categoryReason, appliedVersion, fixes}`, `useEnabled: true`), its log row and
+  clears the cell's pending mark. A conflict (the language appeared, no free name, the template was edited, not
+  editable, at the fix limit, the cell filled for the gap-fill) is `superseded` with an `ai.superseded` row —
+  never a retry. A run another attempt closed, or whose record couldn't be finished, is never applied.
+- **Recovery:** a throw from the apply (a passing Firestore error) fails the task; its next attempt finds the
+  finished run and applies the **stored answer** (checked against the schema again; one that doesn't read is
+  `failed / bad_stored_answer`) without calling the model, and ends `skipped / applied_earlier`. A dead task's
+  answer is applied by the worker's sweep (with the abandoned-run sweep, every 10 minutes) once it is 15 minutes
+  old; after 7 days it is stamped `failed / apply_gave_up` with an `agent_failing` alert. A stored answer is
+  gated again before it is applied: when its agent or the AI switch was turned off meanwhile it is stamped
+  `superseded` with the gate's reason and never written. `finishRun` carries a nonce (as `startRun` does), so
+  a transaction the SDK replays after a late commit knows its own finish.
+- **Before the model** (`precheck`, new): the writer re-reads the registry; a run no longer needed (the cell
+  filled, the template edited since, …) is skipped with **no run record** and one routine `ai.skipped` row.
+  `report` (new): every run that wasn't applied — rejected, failed, skipped, stopped by a deploy mid-call, left
+  running by a crash (closed by the next attempt or the abandoned-run sweep), a stored answer that couldn't be
+  used — writes one log row and clears its own pending mark; quiet skips (another attempt has it, the worker is
+  stopping before the call) write nothing.
+- **Gates** (`brain/gate.ts`): a `manual` run (Suggest) needs the AI switch but not the agent's own switch;
+  `waitsOnSendingPause` (opt-in, new reason `sending_paused`) makes a job's scheduled runs wait on the pause —
+  the writer doesn't opt in.
+- **Triggers:** "Suggest with AI" (`POST /admin/whatsapp/suggest`, trigger `manual`); the **daily gap-fill**
+  (the template tick, right after a complete sync, once a UTC day, trigger `schedule`): needs the AI switch, the
+  writer's Scheduled runs and budget; every available message × language with nothing approved, in review, being
+  sent or waiting — English (`new`) first, a translation once the English is approved or in review; a cell with
+  a run on its way, rejected 3 runs in a row (7 days off) or rejected/dismissed within 30 days is skipped; at most
+  the writer's runs left today minus 3 (kept for Suggest), 3 minutes apart. The day is stamped once something was
+  queued or nothing was missing. An error in it is logged (`ai.error`) and keeps none of W1's alerts back.
+- **One run per cell:** the task and the cell's pending mark (`AdaptiveConfig/whatsapp.aiPending`) are written
+  in one transaction — a second click is refused (409 `pending`), never a second task. A mark counts only while
+  its task is queued or held by a worker (so a run that ended in any way, even without a word, never leaves its
+  cell "writing"), and a run clears only its own mark. Runs queued count against the writer's runs today (the
+  overview's `ai.queued`; Suggest is refused with `daily_limit` once queued + run reach the limit). The
+  gap-fill's counters live in `aiGapFill {lastDay, cooldowns, rejects}` on the same doc.
+- **The run log** shows `apply` on each line; the WhatsApp activity log has `ai.requested`,
+  `ai.request_refused`, `ai.draft_written`, `ai.fix_written`, `ai.superseded`, `ai.skipped`, `ai.rejected`,
+  `ai.failed`, `ai.gap_fill`, `ai.error`.
+- **Boundaries** (`tests/adaptiveBrainBoundary.test.ts`, `tests/adaptiveWhatsAppBoundary.test.ts`): the brain
+  reaches only the pure WhatsApp core and `whatsapp/store.ts` + `whatsapp/aiDrafts.ts` (loaded lazily by the job,
+  so the registry stays pure) — never a Meta client, the sync, the submit or the API side; submit, connection and
+  hints never reach the brain.
+- **No new index:** the sweep reads `apply.state == 'pending'`, the apply reads the message's templates by
+  `use.poolKey` — single fields.
+- **Local:** turn the AI on (`POST /dev/launch` with `agents`), press Suggest on the WhatsApp tab; the fake
+  model writes a valid template that names its message. `POST /dev/model-answer {"agentKey":"wa_template_writer",
+  "answers":[{"answer":{…}}]}` makes the next answer what you give (e.g. a wrong category, to see a rejection).
+
 ## Signals coming back
 
 | Source | Adaptive effect |

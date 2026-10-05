@@ -193,6 +193,24 @@ const BRAIN_MAY_REACH = new Set([
     'adaptive/brain/checks.ts',
     'adaptive/brain/gate.ts',
     'adaptive/brain/jobs/ping.ts',
+    // PR W2: the WhatsApp template writer — its pure core, and the registry's store for its apply
+    // (never the Meta client, the context (it reaches the opt-out code), submit or sync: see below).
+    'adaptive/brain/jobs/waTemplateWriter.ts',
+    'adaptive/core/whatsapp/aiBrief.ts',
+    'adaptive/core/whatsapp/checks.ts',
+    'adaptive/core/whatsapp/status.ts',
+    'adaptive/core/whatsapp/template.ts',
+    'adaptive/core/registry/index.ts',
+    'adaptive/core/registry/mergeFields.ts',
+    'adaptive/core/registry/nodes.ts',
+    'adaptive/core/registry/slots.ts',
+    'adaptive/core/registry/triggers.ts',
+    'adaptive/core/render.ts',
+    'adaptive/core/schemas.ts',
+    'adaptive/whatsapp/aiDrafts.ts',
+    'adaptive/whatsapp/store.ts',
+    'adaptive/api/errors.ts',
+    'adaptive/api/http.ts',
     'adaptive/brain/lane.ts',
     'adaptive/brain/modelClient.ts',
     'adaptive/brain/models.ts',
@@ -234,7 +252,9 @@ const BRAIN_MAY_REACH = new Set([
 ]);
 
 /** The collections the AI code's files may name (`COL.<key>`). */
-const BRAIN_COLLECTIONS = new Set(['agents', 'agentRuns', 'agentUsage', 'sandboxModelCalls', 'sandboxModelAnswers', 'journeyTasks', 'config', 'alerts', 'tenantUsers']);
+const BRAIN_COLLECTIONS = new Set(['agents', 'agentRuns', 'agentUsage', 'sandboxModelCalls', 'sandboxModelAnswers', 'journeyTasks', 'config', 'alerts', 'tenantUsers', 'whatsappTemplates', 'whatsappLog']);
+/** A file allowed to name a subcollection through its own constant (the template timeline). */
+const SUBCOLLECTION_OK: Readonly<Record<string, string>> = { [src('adaptive/whatsapp/store.ts')]: 'HISTORY' };
 
 test('the files this test names exist (so it checks something)', () => {
   for (const f of [...MODEL_CODE, ...SENDING, ALERTS, src('server.ts'), src('adaptive/worker/main.ts')]) assert(existsSync(f), `missing ${rel(f)}`);
@@ -343,7 +363,8 @@ test('the AI code names only its own collections, and creates only agent_run tas
       // `db.collection('…')` / `.doc('a/b')` with a literal: every collection goes through COL.
       if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ['collection', 'collectionGroup'].includes(n.expression.name.text)) {
         const a = n.arguments[0];
-        if (a && !(ts.isPropertyAccessExpression(a) && ts.isIdentifier(a.expression) && a.expression.text === 'COL')) literals.push(a.getText(sf));
+        const sub = SUBCOLLECTION_OK[f];
+        if (a && !(ts.isPropertyAccessExpression(a) && ts.isIdentifier(a.expression) && a.expression.text === 'COL') && !(sub && ts.isIdentifier(a) && a.text === sub)) literals.push(a.getText(sf));
       }
       ts.forEachChild(n, findLiterals);
     };
@@ -372,6 +393,13 @@ test('the AI code names only its own collections, and creates only agent_run tas
     const other = audiences.filter((a) => a !== "'heidifi'");
     assert(!other.length, `${rel(f)} raises an alert for ${other.join(', ')} (HeidiFi only)`);
   }
+});
+
+test('PR W2: the AI code never reaches the Meta client, the template context, submit, sync or the connection', () => {
+  const reached = new Set(allFiles(src('adaptive/brain')).flatMap((f) => [...reach(f)]));
+  const banned = ['context.ts', 'meta.ts', 'source.ts', 'sandbox.ts', 'submit.ts', 'sync.ts', 'connection.ts', 'hints.ts', 'aiRequests.ts'].map((x) => src(`adaptive/whatsapp/${x}`));
+  const bad = banned.filter((f) => reached.has(f));
+  assert(!bad.length, `the AI code reaches ${bad.map(rel).join(', ')}`);
 });
 
 test('only the model client names the relay (one way to a model)', () => {

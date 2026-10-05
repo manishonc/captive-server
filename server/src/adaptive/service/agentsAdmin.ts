@@ -198,6 +198,8 @@ function runLine(r: Record<string, unknown>, realNow: number) {
     latencyMs: r.latencyMs ?? null,
     createdAt: r.createdAt ?? null,
     finishedAt: r.finishedAt ?? null,
+    // PR W2a: what a job that uses its answer did with it (pending · applied · superseded · failed).
+    apply: r.apply ?? null,
   };
 }
 

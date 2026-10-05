@@ -267,3 +267,20 @@ export async function renewLease(taskId: string, workerId: string): Promise<'hel
     })
     .catch(() => 'error' as const);
 }
+
+/** PR W2a: a task still on its way (queued, or held by a worker). Done, dead and cancelled tasks are not. */
+export const LIVE_TASK_STATES: ReadonlySet<string> = new Set(['queued', 'leased']);
+
+/** PR W2a: each task's status, read by id (a missing task is left out). */
+export async function taskStatuses(ids: string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (!unique.length) return new Map();
+  const snaps = await db.getAll(...unique.map((id) => col().doc(id)));
+  return new Map(snaps.filter((s) => s.exists).map((s) => [s.id, String(s.get('status') ?? '')]));
+}
+
+/** PR W2a: one task's status inside a transaction (null: no such task). */
+export async function taskStatusInTx(tx: Transaction, id: string): Promise<string | null> {
+  const snap = await tx.get(col().doc(id));
+  return snap.exists ? String(snap.get('status') ?? '') : null;
+}

@@ -198,12 +198,12 @@ async function main() {
     await test('the admin routes: the tab, the run log, one run in full', async () => {
       const tab = await api.get('/admin/agents');
       assertEqual(tab.status, 200, 'tab');
-      assertEqual(tab.body.agents.map((a: Doc) => a.key), ['ping'], 'agents');
+      assertEqual(tab.body.agents.map((a: Doc) => a.key), ['ping', 'wa_template_writer'], 'agents (PR W2a adds the WhatsApp template writer)');
       assertEqual(tab.body.agents[0].today.runs, 1, 'today');
       assert(tab.body.month.spentUsd >= 0 && tab.body.month.budgetUsd === 100, 'the month');
       assert(tab.body.models.some((m: Doc) => m.id === 'anthropic/claude-sonnet-5.5'), 'the models');
       const log = await api.get('/admin/agent-runs?limit=5');
-      assertEqual([log.status, log.body.runs.length, log.body.runs[0].outcome], [200, 1, 'ok'], 'the log');
+      assertEqual([log.status, log.body.runs.length, log.body.runs[0].outcome, log.body.runs[0].apply], [200, 1, 'ok', null], 'the log (the ping uses no answer: no apply)');
       assert(!('input' in log.body.runs[0]), 'the log line carries no package');
       const one = await api.get(`/admin/agent-runs/${log.body.runs[0].runId}`);
       assertEqual([one.status, one.body.run.outcome], [200, 'ok'], 'one run');

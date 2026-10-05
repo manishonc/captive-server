@@ -6,7 +6,9 @@
  *  - `CaptivePortal_Agents/{agentKey}`: an agent's settings. A missing doc, or a field that can't
  *    be read, is the code's default (and a scheduled agent is off until HeidiFi turns it on).
  *  - `CaptivePortal_AgentRuns/{runId}`: one record per run (skipped ones too): what went in (the
- *    package as JSON text), what came back, the checks, tokens, cost, time. Written `running`
+ *    package as JSON text, and from PR W2 the job's non-model `local` part), what came back, the
+ *    checks, tokens, cost, time — and for a job that applies its answer, `apply` (pending → applied
+ *    / superseded / failed), stamped in the same transaction as what the answer wrote. Written `running`
  *    before the model is called — in one transaction with a check that the worker still holds the
  *    task's lease — and finished after; a run the worker dies in is closed by the task's next
  *    attempt (`interrupted`, counted at its worst case).
@@ -33,7 +35,7 @@ import { toJson } from './serialize';
 import { tsMs } from './time';
 import { isKnownModel, NO_USAGE, type ModelUsage } from '../brain/models';
 import { counterValue, dayKeyOf, monthKeyOf } from '../brain/budget';
-import type { AgentJob, AgentKey, AgentSettings, RunOutcome } from '../brain/types';
+import type { AgentJob, AgentKey, AgentSettings, ApplyDecision, RunOutcome } from '../brain/types';
 
 const DAY_MS = 24 * 60 * 60_000;
 export const RUN_KEEP_MS = 396 * DAY_MS; // 13 months
@@ -154,7 +156,7 @@ export interface RunStart {
   effort: string | null;
   promptVersion: string | null;
   client: string;
-  input: { summary: string; hash: string | null; package: string | null; chars: number };
+  input: { summary: string; hash: string | null; package: string | null; chars: number; local?: string | null };
   /** The usage docs this run is counted in (the month's and the agent's day's, by the run's start). */
   usageDocs: string[];
   /** The request's size as sent and the output limit: what an interrupted run is costed at. */
@@ -347,9 +349,14 @@ export interface FinishResult {
 /**
  * `usage`: the run's count, given when counting it earlier failed — it is counted here, in the
  * same transaction, unless the record says it already was (the earlier commit did land).
+ * `applyPending`: an ok run of a job that applies its answer is finished with `apply.state:
+ * 'pending'` (the apply, its recovery and the sweep look for it).
  */
-export async function finishRun(runId: string, f: RunFinish, realNow: number, usage?: UsageEntry): Promise<FinishResult> {
+export async function finishRun(runId: string, f: RunFinish, realNow: number, usage?: UsageEntry, opts: { applyPending?: boolean } = {}): Promise<FinishResult> {
   const ref = runs().doc(runId);
+  // PR W2a: the transaction may be replayed after a commit that landed but answered late — the
+  // nonce tells our own finish from another attempt's close (as `startNonce` does for the start).
+  const finishNonce = randomUUID();
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) {
@@ -361,7 +368,10 @@ export async function finishRun(runId: string, f: RunFinish, realNow: number, us
       const [m, d] = await tx.getAll(refs.mRef, refs.dRef);
       return { state: 'gone' as const, counted: true, spend: writeUsage(tx, usage, refs, m, d, false) };
     }
-    if (snap.get('status') !== 'running' && snap.get('closedAfterCount') !== true) return { state: 'closed' as const, counted: true, spend: null };
+    if (snap.get('status') !== 'running' && snap.get('closedAfterCount') !== true) {
+      if (snap.get('finishNonce') === finishNonce) return { state: 'finished' as const, counted: Boolean(snap.get('countedAt')), spend: null };
+      return { state: 'closed' as const, counted: true, spend: null };
+    }
     let counted = Boolean(snap.get('countedAt'));
     let spend: FinishResult['spend'] = null;
     let countFields: Record<string, unknown> = {};
@@ -372,7 +382,8 @@ export async function finishRun(runId: string, f: RunFinish, realNow: number, us
       counted = true;
       countFields = { countedAt: new Date(realNow), countedMicroUsd: Math.max(0, Math.round(usage.costMicro)) };
     }
-    finishRunDoc(tx, ref, { ...f, usageCounted: counted }, realNow, countFields);
+    const applyFields = opts.applyPending && f.outcome === 'ok' && !snap.get('apply') ? { apply: { state: 'pending', at: new Date(realNow) } } : {};
+    finishRunDoc(tx, ref, { ...f, usageCounted: counted }, realNow, { ...countFields, ...applyFields, finishNonce });
     return { state: 'finished' as const, counted, spend };
   });
 }
@@ -408,6 +419,84 @@ export async function runExists(runId: string): Promise<boolean> {
   return (await runs().doc(runId).get()).exists;
 }
 
+/** What recovery and the sweep need of a run to apply its stored answer (null: no such run). */
+export interface RunForApply {
+  runId: string;
+  agentKey: string;
+  trigger: string;
+  taskId: string | null;
+  tenantUserId: string | null;
+  status: string;
+  outcome: string | null;
+  applyState: string | null;
+  parsed: string | null;
+  packageText: string | null;
+  localText: string | null;
+  modelUsed: string | null;
+  promptVersion: string | null;
+  finishedAtMs: number | null;
+}
+
+function runForApply(snap: DocumentSnapshot): RunForApply {
+  const out = (snap.get('output') ?? {}) as Record<string, unknown>;
+  const input = (snap.get('input') ?? {}) as Record<string, unknown>;
+  return {
+    runId: snap.id,
+    agentKey: String(snap.get('agentKey') ?? ''),
+    trigger: String(snap.get('trigger') ?? ''),
+    taskId: (snap.get('taskId') as string | null) ?? null,
+    tenantUserId: (snap.get('tenantUserId') as string | null) ?? null,
+    status: String(snap.get('status') ?? ''),
+    outcome: (snap.get('outcome') as string | null) ?? null,
+    applyState: (snap.get('apply.state') as string | null | undefined) ?? null,
+    parsed: typeof out.parsed === 'string' ? out.parsed : null,
+    packageText: typeof input.package === 'string' ? input.package : null,
+    localText: typeof input.local === 'string' ? input.local : null,
+    modelUsed: (snap.get('modelUsed') as string | null) ?? null,
+    promptVersion: (snap.get('promptVersion') as string | null) ?? null,
+    finishedAtMs: tsMs(snap.get('finishedAt')),
+  };
+}
+
+export async function readRunForApply(runId: string): Promise<RunForApply | null> {
+  const snap = await runs().doc(runId).get();
+  return snap.exists ? runForApply(snap) : null;
+}
+
+/**
+ * Applies a passed answer exactly once: one transaction reads the run, refuses unless it is done,
+ * ok and not applied yet (`not_applicable`), lets `fn` read and write (all its reads before its
+ * writes; Firestore may run it again, so no side effect outside it), then stamps the run's
+ * `apply` with the decision. A throw from `fn` (a passing Firestore error) changes nothing: the
+ * task is tried again and recovery applies from the stored answer.
+ */
+export async function applyRunOnce(runId: string, fn: (tx: Transaction, run: RunForApply) => Promise<ApplyDecision>, realNow: number = Date.now()): Promise<ApplyDecision | 'not_applicable'> {
+  const ref = runs().doc(runId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return 'not_applicable' as const;
+    const run = runForApply(snap);
+    if (run.status !== 'done' || run.outcome !== 'ok' || (run.applyState !== null && run.applyState !== 'pending')) return 'not_applicable' as const;
+    const decision = await fn(tx, run);
+    tx.update(ref, {
+      apply: {
+        state: decision.state,
+        code: decision.code ?? null,
+        detail: decision.detail ? String(decision.detail).slice(0, 500) : null,
+        ref: decision.ref ?? null,
+        at: new Date(realNow),
+      },
+    });
+    return decision;
+  });
+}
+
+/** Ok runs whose answer isn't applied yet (by `apply.state` alone: single-field, no composite index). */
+export async function listPendingApplies(limit = 50): Promise<RunForApply[]> {
+  const snap = await runs().where('apply.state', '==', 'pending').limit(limit).get();
+  return snap.docs.map(runForApply).sort((a, b) => (a.finishedAtMs ?? 0) - (b.finishedAtMs ?? 0));
+}
+
 /** The fields one run-log line needs (never the package or the answer). */
 const LINE_FIELDS = [
   'runId',
@@ -428,6 +517,7 @@ const LINE_FIELDS = [
   'latencyMs',
   'createdAt',
   'finishedAt',
+  'apply',
 ];
 
 /** Newest runs first (the admin run log, list fields only); `before` = an ISO time to page from. */
