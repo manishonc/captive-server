@@ -115,6 +115,11 @@ function hasWord(text: string, word: string): boolean {
   return new RegExp(`(^|[^\\p{L}\\p{N}])${esc}($|[^\\p{L}\\p{N}])`, 'iu').test(text);
 }
 
+/** PR W2a: the words that read as promotion in one language, plus the English ones (the writer's brief lists them for a service message). */
+export function promoWordsFor(lang: Lang): string[] {
+  return [...new Set([...PROMO_WORDS[lang], ...PROMO_WORDS.en])];
+}
+
 export function promoWordsIn(text: string): string[] {
   const found = ALL_PROMO.filter((w) => hasWord(text, w));
   if (/\d\s?%/.test(text)) found.push('%');

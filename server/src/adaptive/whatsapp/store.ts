@@ -45,6 +45,10 @@ export interface WaActor {
 }
 export const SYSTEM: WaActor = { kind: 'system', uid: null, label: 'HeidiFi' };
 export const META: WaActor = { kind: 'meta', uid: null, label: 'Meta' };
+/** The AI template writer (PR W2). */
+export const AI_ACTOR: WaActor = { kind: 'ai', uid: null, label: 'AI' };
+/** Auto-send to Meta (PR W2b). */
+export const AUTO_ACTOR: WaActor = { kind: 'auto', uid: null, label: 'Auto' };
 
 export type WaLogLevel = 'info' | 'warn' | 'error' | 'routine';
 
@@ -113,7 +117,7 @@ export interface WaTemplateDoc {
   seq: number;
   hint: { at: unknown; field: string; event: string | null } | null;
   pendingAlerts: PendingAlert[];
-  /** PR W2: the AI run that wrote it. */
+  /** PR W2: the AI run that wrote (or last fixed) it — see `WaAiInfo` / `aiInfoOf`. */
   ai: Record<string, unknown> | null;
   /** The WhatsApp Business Account Meta holds it in (set when Meta has it): only that account's sync may call it deleted. */
   wabaId?: string | null;
@@ -124,6 +128,52 @@ export interface WaTemplateDoc {
 }
 
 export type StoredTemplate = WaTemplateDoc & { id: string };
+
+/**
+ * What the AI wrote on a template (PR W2), kept on `ai` (the cms already reads `categoryReason`).
+ * `appliedVersion`: the template's `version` the AI's text is — a person's edit moves `version`
+ * past it ("edited by hand since"; Auto never sends it).
+ */
+export interface WaAiInfo {
+  runId: string;
+  kind: 'new' | 'translation' | 'alternative' | 'fix';
+  requestedBy: 'suggest' | 'gap_fill' | 'auto_fix';
+  model: string | null;
+  promptVersion: string | null;
+  reasoning: string;
+  categoryReason: string;
+  appliedVersion: number;
+  /** AI fixes made on this template so far. */
+  fixes: number;
+  at: string;
+  /** Set by Auto (W2b) when it sent this version to Meta. */
+  autoSubmittedAt?: string | null;
+  autoSubmittedVersion?: number | null;
+}
+
+/** The `ai` field as a WaAiInfo (null when it isn't one — a template no AI touched). */
+export function aiInfoOf(d: Pick<WaTemplateDoc, 'ai'>): WaAiInfo | null {
+  const a = d.ai;
+  if (!a || typeof a !== 'object' || typeof a.runId !== 'string') return null;
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const int = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : 0);
+  const kind = ['new', 'translation', 'alternative', 'fix'].includes(String(a.kind)) ? (a.kind as WaAiInfo['kind']) : 'new';
+  const requestedBy = ['suggest', 'gap_fill', 'auto_fix'].includes(String(a.requestedBy)) ? (a.requestedBy as WaAiInfo['requestedBy']) : 'suggest';
+  return {
+    runId: a.runId,
+    kind,
+    requestedBy,
+    model: typeof a.model === 'string' ? a.model : null,
+    promptVersion: typeof a.promptVersion === 'string' ? a.promptVersion : null,
+    reasoning: str(a.reasoning, 1200),
+    categoryReason: str(a.categoryReason, 300),
+    appliedVersion: int(a.appliedVersion),
+    fixes: int(a.fixes),
+    at: str(a.at, 40),
+    autoSubmittedAt: typeof a.autoSubmittedAt === 'string' ? a.autoSubmittedAt : null,
+    autoSubmittedVersion: typeof a.autoSubmittedVersion === 'number' ? a.autoSubmittedVersion : null,
+  };
+}
 
 // ── Collections ──────────────────────────────────────────────────────────────
 
@@ -395,6 +445,15 @@ export interface WaOps {
   backoffUntilMs: number | null;
   /** Syncs failed in a row (reset by a good one): a connection alert after 3. */
   syncFailures: number;
+  /**
+   * PR W2: the last writer run queued per cell (`journeyKey:poolKey:lang`). It counts as on its way
+   * ("AI is writing…", Suggest refuses a second one) only while its task is queued or held by a
+   * worker (whatsapp/aiRequests.ts `livePendingCells`) — a mark whose task ended in any way is
+   * ignored. Cleared by its own run when that run is applied or reported.
+   */
+  aiPending: Record<string, { taskId: string; kind: string; atMs: number; by: string }>;
+  /** PR W2: the daily gap-fill — the (UTC) day it last queued, and cells waiting after repeated rejections. */
+  aiGapFill: { lastDay: string | null; cooldowns: Record<string, number>; rejects: Record<string, number> };
 }
 
 const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -422,7 +481,31 @@ export function parseOps(raw: Record<string, unknown> | undefined): WaOps {
     digest: { lastDay: typeof digest.lastDay === 'string' ? digest.lastDay : null, lastAtMs: typeof digest.lastAtMs === 'number' ? digest.lastAtMs : null },
     backoffUntilMs: typeof r.backoffUntilMs === 'number' ? r.backoffUntilMs : null,
     syncFailures: num(r.syncFailures, 0),
+    aiPending: parsePending(r.aiPending),
+    aiGapFill: parseGapFill(r.aiGapFill),
   };
+}
+
+function numberMap(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== 'object') return out;
+  for (const [k, n] of Object.entries(v as Record<string, unknown>)) if (typeof n === 'number' && Number.isFinite(n)) out[k] = n;
+  return out;
+}
+
+function parsePending(v: unknown): WaOps['aiPending'] {
+  const out: WaOps['aiPending'] = {};
+  if (!v || typeof v !== 'object') return out;
+  for (const [k, e] of Object.entries(v as Record<string, unknown>)) {
+    const x = e as Record<string, unknown> | null;
+    if (x && typeof x.taskId === 'string' && typeof x.atMs === 'number') out[k] = { taskId: x.taskId, kind: String(x.kind ?? ''), atMs: x.atMs, by: String(x.by ?? '') };
+  }
+  return out;
+}
+
+function parseGapFill(v: unknown): WaOps['aiGapFill'] {
+  const g = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  return { lastDay: typeof g.lastDay === 'string' ? g.lastDay : null, cooldowns: numberMap(g.cooldowns), rejects: numberMap(g.rejects) };
 }
 
 export async function readOps(): Promise<WaOps> {
@@ -563,6 +646,91 @@ export async function createDraftDoc(
     logInTx(tx, change.log, { templateId: id, name, language: doc.language, poolKey: input.poolKey, seq: 1 });
     return { id, ...doc };
   });
+}
+
+// ── The same, inside a caller's transaction (PR W2: the AI's answer is applied with its run's stamp) ──
+
+/** Every template of one message (by pool; the journey is matched in memory). Reads only. */
+export async function templatesOfMessageInTx(tx: Transaction, use: { journeyKey: string; poolKey: string }): Promise<StoredTemplate[]> {
+  const snap = await tx.get(templates().where('use.poolKey', '==', use.poolKey));
+  return snap.docs.map((d) => decode(d.id, d.data() as Record<string, unknown>)).filter((d) => d.use?.kind === 'adaptive' && d.use.journeyKey === use.journeyKey);
+}
+
+export async function readOpsInTx(tx: Transaction): Promise<WaOps> {
+  const snap = await tx.get(opsRef());
+  return parseOps(snap.exists ? (snap.data() as Record<string, unknown>) : undefined);
+}
+
+export type DraftInTxResult = { ok: true; doc: StoredTemplate } | { ok: false; code: 'language_exists' | 'no_free_name'; name: string | null };
+
+/**
+ * `createDraftDoc` inside the caller's transaction (which stays as it is): every read first (the
+ * ops doc, the name probes, the target id), then the writes. A conflict is a result, not a throw:
+ * the AI's apply turns it into a decision (a throw would retry it for nothing).
+ */
+export async function createDraftInTx(
+  tx: Transaction,
+  input: { poolKey: string; lang: Lang; existingName: string | null; ops: WaOps; build: (name: string, id: string) => TemplateChange; extraOps?: Record<string, unknown> },
+  idFor: (name: string, language: string) => string,
+): Promise<DraftInTxResult> {
+  let name = input.existingName;
+  let n = 0;
+  if (!name) {
+    n = Math.max(1, input.ops.nextNumber[input.poolKey] ?? 1);
+    let free = false;
+    for (let i = 0; i < 50; i += 1) {
+      const candidate = `hf_${input.poolKey}_${n}`;
+      const taken = await tx.get(templates().where('name', '==', candidate).limit(1));
+      if (taken.empty) {
+        free = true;
+        break;
+      }
+      n += 1;
+    }
+    if (!free) return { ok: false, code: 'no_free_name', name: null };
+    name = `hf_${input.poolKey}_${n}`;
+  }
+  const change = input.build(name, '');
+  if (!change.create) throw new ApiError('internal', 'A draft must be a create');
+  const id = idFor(name, change.create.language);
+  const ref = templates().doc(id);
+  const existing = await tx.get(ref);
+  if (existing.exists) return { ok: false, code: 'language_exists', name };
+  // Reads done: the writes.
+  const now = new Date();
+  const doc: WaTemplateDoc = { ...change.create, seq: 1, createdAt: now, updatedAt: now, pendingAlerts: [] };
+  tx.create(ref, encode(doc));
+  const opsPatch: Record<string, unknown> = { ...(input.extraOps ?? {}) };
+  if (!input.existingName) opsPatch.nextNumber = { [input.poolKey]: n + 1 };
+  if (Object.keys(opsPatch).length) tx.set(opsRef(), opsPatch, { merge: true });
+  logInTx(tx, change.log, { templateId: id, name, language: doc.language, poolKey: input.poolKey, seq: 1 });
+  return { ok: true, doc: { id, ...doc } };
+}
+
+/**
+ * `changeTemplate` inside the caller's transaction, for a doc the caller already read (so all its
+ * reads come before this write). `decide` returning null changes nothing.
+ */
+export function changeTemplateInTx(tx: Transaction, current: StoredTemplate, change: TemplateChange | null): StoredTemplate | null {
+  if (!change) return null;
+  const now = new Date();
+  const seq = current.seq + 1;
+  const patch: Partial<WaTemplateDoc> = { ...(change.set ?? {}), seq, updatedAt: now };
+  if (change.alerts?.length) patch.pendingAlerts = [...(current.pendingAlerts ?? []), ...change.alerts].slice(-MAX_PENDING_ALERTS);
+  tx.update(templates().doc(current.id), encode(patch));
+  const next = { ...current, ...patch };
+  logInTx(tx, change.log, { templateId: current.id, name: next.name, language: next.language, poolKey: next.use?.kind === 'adaptive' ? next.use.poolKey : null, seq });
+  return next;
+}
+
+/** Writes to the ops doc inside the caller's transaction (after its reads). */
+export function opsInTx(tx: Transaction, patch: Record<string, unknown>): void {
+  tx.set(opsRef(), patch, { merge: true });
+}
+
+/** One transaction (PR W2: a writer run's task and its cell's pending mark, together). */
+export function inTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+  return db.runTransaction(fn);
 }
 
 // ── Submitting (begin: one winner; the Meta call happens outside) ────────────

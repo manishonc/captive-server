@@ -97,8 +97,10 @@ const META = src('adaptive/whatsapp/meta.ts');
 const SANDBOX = src('adaptive/whatsapp/sandbox.ts');
 const SOURCE = src('adaptive/whatsapp/source.ts');
 const OLD_SENDER = src('services/whatsapp.ts');
-const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
-const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
+const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts', 'aiBrief.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
+const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts', 'aiDrafts.ts', 'aiRequests.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
+/** The code that calls a model (only the worker loads it): never reached from the template code. */
+const MODEL_CODE = ['run.ts', 'lane.ts', 'modelClient.ts', 'sandboxModel.ts'].map((f) => src(`adaptive/brain/${f}`));
 
 console.log('\nWhatsApp templates — import boundaries (PR W1)\n');
 
@@ -148,15 +150,25 @@ test('the WhatsApp webhook reaches the template code only through hints.ts', () 
   for (const bad of ['submit.ts', 'sync.ts', 'connection.ts', 'meta.ts', 'sandbox.ts', 'source.ts'].map((x) => src(`adaptive/whatsapp/${x}`))) assert(!r.has(bad), `hints reaches ${rel(bad)}`);
 });
 
-test('the template code never reaches the AI or the Adaptive send path', () => {
-  const entries = ['sync.ts', 'submit.ts', 'connection.ts', 'hints.ts'].map((x) => src(`adaptive/whatsapp/${x}`)).concat(src('service/whatsappAdmin.ts'), src('jobs/whatsappTemplates.ts'));
+test('the template code never reaches the code that calls a model, an AI SDK or the Adaptive send path (PR W2: it may queue a run)', () => {
+  const entries = ['sync.ts', 'submit.ts', 'connection.ts', 'hints.ts', 'aiRequests.ts'].map((x) => src(`adaptive/whatsapp/${x}`)).concat(src('service/whatsappAdmin.ts'), src('jobs/whatsappTemplates.ts'));
   for (const e of entries) {
     const r = reach(e);
     for (const f of r) {
-      assert(!f.startsWith(src('adaptive/brain/')), `${rel(e)} reaches ${rel(f)}`);
+      // From PR W2 the tab queues writer runs (brain/tasks.ts) and reads the writer's settings and
+      // usage: the pure AI files only — the model is called by the worker alone.
+      assert(!MODEL_CODE.includes(f), `${rel(e)} reaches ${rel(f)}`);
+      assert(!/^@anthropic-ai\/|^openai$|^@ai-sdk\//.test(f), `${rel(e)} loads ${f}`);
       assert(f !== src('adaptive/engine/sendPath.ts') && f !== src('adaptive/send/dispatch.ts'), `${rel(e)} reaches ${rel(f)}`);
       assert(!f.includes('(unresolved)') && f !== '<computed>', `${rel(e)}: unresolved import ${f}`);
     }
+  }
+});
+
+test('submit, the connection and the webhook hint never reach the AI at all (only the tab and the tick queue runs)', () => {
+  for (const e of ['submit.ts', 'connection.ts', 'hints.ts'].map((x) => src(`adaptive/whatsapp/${x}`))) {
+    const bad = [...reach(e)].filter((f) => f.startsWith(src('adaptive/brain/')));
+    assert(!bad.length, `${rel(e)} reaches ${bad.map(rel).join(', ')}`);
   }
 });
 

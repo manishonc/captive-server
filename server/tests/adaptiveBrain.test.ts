@@ -652,6 +652,21 @@ test('a scheduled platform job needs the agent on and the global switch on', () 
   eq(gateFor({ scope: 'platform' }, { trigger: 'manual', tenantUserId: null }, on, { enabled: true }), null, 'on');
 });
 
+test('PR W2: a person’s run (manual: Suggest with AI) needs the AI switch but not the agent’s scheduled switch', () => {
+  const on = engine({ agents: { mode: 'on', accounts: {}, monthlyBudgetUsd: 100, changedBy: null } });
+  eq(gateFor({ scope: 'platform' }, { trigger: 'manual', tenantUserId: null }, on, { enabled: false }), null, 'scheduled switch off: runs');
+  eq(gateFor({ scope: 'platform' }, { trigger: 'manual', tenantUserId: null }, engine(), { enabled: false }), 'agents_off', 'AI switch off: never');
+  eq(gateFor({ scope: 'platform' }, { trigger: 'schedule', tenantUserId: null }, on, { enabled: false }), 'agent_off', 'a scheduled run still needs its switch');
+});
+
+test('PR W2: only a job that asks waits on the sending pause (scheduled runs only)', () => {
+  const on = engine({ agents: { mode: 'on', accounts: {}, monthlyBudgetUsd: 100, changedBy: null }, paused: true });
+  eq(gateFor({ scope: 'platform', waitsOnSendingPause: true }, { trigger: 'schedule', tenantUserId: null }, on, { enabled: true }), 'sending_paused', 'waits');
+  eq(gateFor({ scope: 'platform', waitsOnSendingPause: true }, { trigger: 'manual', tenantUserId: null }, on, { enabled: true }), null, 'a person’s run doesn’t');
+  eq(gateFor({ scope: 'platform', waitsOnSendingPause: false }, { trigger: 'schedule', tenantUserId: null }, on, { enabled: true }), null, 'the writer: never (Manish, 2026-10-05)');
+  eq(gateFor({ scope: 'platform', waitsOnSendingPause: true }, { trigger: 'schedule', tenantUserId: null }, { ...on, paused: false }, { enabled: true }), null, 'not paused');
+});
+
 test("an account's job: the account's AI override first, and the account live", () => {
   const e = engine({
     launch: { default: 'off', accounts: { t_live: 'live', t_test: 'test' }, changedBy: null, liveSince: { default: null, accounts: {} } },
@@ -750,11 +765,17 @@ test('its valid answer passes every check; a wrong echo fails', () => {
   assert(!pingJob.check({ reasoning: 'x', echo: 1 }, built.pkg as never)[0].ok, 'a wrong echo');
 });
 
-test('the registry knows the ping job; defaults are allowed models, off', () => {
-  eq([...AGENT_KEYS], ['ping'], 'agents');
-  const job = jobFor('ping')!;
-  assert(isKnownModel(job.defaults.model) && isKnownModel(job.defaults.fallbackModel), 'allowed models');
-  eq(job.defaults.enabled, false, 'off');
+test('the registry knows the ping job and (PR W2) the WhatsApp writer; defaults are allowed models, off', () => {
+  eq([...AGENT_KEYS], ['ping', 'wa_template_writer'], 'agents');
+  for (const key of AGENT_KEYS) {
+    const job = jobFor(key)!;
+    assert(isKnownModel(job.defaults.model) && isKnownModel(job.defaults.fallbackModel), `${key}: allowed models`);
+    eq(job.defaults.enabled, false, `${key}: off`);
+    assert(Object.prototype.hasOwnProperty.call(job.prompts, job.defaults.promptVersion), `${key}: its default prompt exists`);
+  }
+  const w = jobFor('wa_template_writer')!;
+  eq([w.defaults.model, w.defaults.fallbackModel, w.defaults.effort, w.defaults.maxRunsPerDay, w.defaults.maxOutputTokens, w.scope, w.waitsOnSendingPause], ['anthropic/claude-opus-5.5', 'anthropic/claude-sonnet-5.5', 'medium', 10, 4000, 'platform', false], 'writer defaults (Manish, 2026-10-05)');
+  assert(typeof w.apply === 'function' && typeof w.precheck === 'function' && typeof w.report === 'function', 'the writer applies, prechecks and reports');
   assert(jobFor('nope') === null && jobFor(undefined) === null, 'unknown');
 });
 

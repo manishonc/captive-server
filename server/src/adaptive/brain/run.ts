@@ -33,24 +33,40 @@
  * From the model call on, nothing throws: a throw would make the queue hand the task out again,
  * and the model would be called a second time.
  *
- * It never sends a message, never charges credits and never waits on the sending pause: F2a
- * applies nothing (the first job that proposes changes comes with F2b).
+ * It never sends a message and never charges credits. A scheduled run waits on the sending pause
+ * only for a job that asks to (`waitsOnSendingPause`; none does today).
+ *
+ * PR W2 — a job may apply its answer (the WhatsApp template writer writes a draft):
+ *  - `precheck` (before anything is recorded): a run no longer needed is skipped without a run
+ *    record; the job logs it in its own log;
+ *  - `local`: the input's non-model part (the check context…), stored on the run and given to
+ *    the job's checks and its apply;
+ *  - an ok run of such a job is finished `apply.state: 'pending'`, then applied exactly once —
+ *    in one transaction with its `apply` stamp (store/agents.ts `applyRunOnce`). That apply is the
+ *    only thing after the call allowed to throw: the lane then fails the task, and the next attempt
+ *    finds the finished run and applies its stored answer (step 0) without calling the model; a
+ *    run still pending 15 minutes later (its task died on its last attempt) is applied by the
+ *    worker's sweep, and given up with an alert after 7 days;
+ *  - `report`: every run that isn't applied (skipped, rejected, failed) goes to the job's own log.
  */
 
 import { contentChecksum, hashId } from '../core/checksum';
 import { readEngineSettingsStrict, type EngineSettings } from '../store/engineSettings';
 import {
   addUsage,
+  applyRunOnce,
   closeInterruptedRun,
   finishRun,
+  listPendingApplies,
   listRunningRuns,
   readAgentSettings,
+  readRunForApply,
   readUsage,
-  runExists,
   startRun,
   usageDocIdsFor,
   type RunAttempt,
   type RunFinish,
+  type RunForApply,
   type RunLease,
 } from '../store/agents';
 import { tsMs } from '../store/time';
@@ -64,7 +80,7 @@ import { evaluateAnswer, numbersCheck, type CheckResult } from './checks';
 import { costMicroUsd, isKnownModel, microToUsd, MODELS, NO_USAGE, priceOf, type ModelUsage } from './models';
 import { classifyModelError, MAX_CALL_MS, ModelError, outputFormatFor, relayClient, type ModelClient, type ModelReply, type OutputFormat } from './modelClient';
 import { sandboxModel } from './sandboxModel';
-import type { AgentJob, RunOutcome, RunTrigger } from './types';
+import type { AgentJob, ApplyDecision, RunOutcome, RunReport, RunTrigger } from './types';
 
 /** The whole run, both calls included (the lane aborts at its own deadline too). */
 export const RUN_DEADLINE_MS = 250_000;
@@ -81,6 +97,12 @@ const MAX_SUMMARY_CHARS = 500;
 export const STALE_TEST_MS = 10 * 60_000;
 /** Attempt numbers checked for another attempt's start (an `agent_run` task has at most 3; one spare). */
 const ATTEMPTS_CHECKED = 4;
+/** The non-model part of an input, stored on the run (a job's check context is a few KB). */
+const MAX_LOCAL_BYTES = 200_000;
+/** A finished run whose answer is still not applied this long after is applied by the worker's sweep… */
+export const APPLY_SWEEP_AFTER_MS = 15 * 60_000;
+/** …and given up (stamped failed, with an alert) after this long. */
+export const APPLY_GIVE_UP_MS = 7 * 24 * 60 * 60_000;
 
 export interface RunRequest {
   agentKey: string;
@@ -115,6 +137,72 @@ export interface RunResult {
   outcome: RunOutcome;
   reason: string | null;
   costMicroUsd: number;
+  /** For a job that applies its answer: what the apply did (null: nothing to apply). */
+  applied?: ApplyDecision | null;
+}
+
+const TRIGGER_NAMES: readonly RunTrigger[] = ['test', 'schedule', 'manual', 'dev'];
+
+/** The job's own log for a run it didn't apply (never throws). */
+async function safeReport(job: AgentJob, r: RunReport): Promise<void> {
+  if (!job.report) return;
+  try {
+    await job.report(r);
+  } catch (err) {
+    console.error('[ADAPTIVE AI] the job’s report failed:', r.runId, (err as Error)?.name ?? 'Error');
+  }
+}
+
+/** The stored local part of a run, read back (null when it has none or it doesn't read). */
+function storedLocal(text: unknown): unknown {
+  if (typeof text !== 'string') return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Applies a finished run's stored answer (recovery and the sweep): the answer is read back and
+ * checked against the job's schema again; one that doesn't read is stamped failed
+ * (`bad_stored_answer`), never applied. The run's gates are checked again first: an answer whose
+ * agent (or the AI switch) was turned off meanwhile is stamped `superseded` with the gate's reason,
+ * never written. What isn't applied goes to the job's log.
+ */
+export async function applyStored(job: AgentJob, run: RunForApply, realNow: number = Date.now()): Promise<ApplyDecision | 'not_applicable'> {
+  if (!job.apply) return 'not_applicable';
+  const trigger = TRIGGER_NAMES.includes(run.trigger as RunTrigger) ? (run.trigger as RunTrigger) : 'schedule';
+  const tell = (outcome: RunOutcome, reason: string, detail: string) =>
+    safeReport(job, { runId: run.runId, agentKey: job.key, trigger, outcome, reason, params: {}, detail, modelUsed: run.modelUsed, taskId: run.taskId, local: storedLocal(run.localText) });
+  const [engine, settings] = await Promise.all([readEngineSettingsStrict(), readAgentSettings(job)]);
+  const gate = gateFor(job, { trigger, tenantUserId: run.tenantUserId }, engine, settings);
+  if (gate) {
+    const d = await applyRunOnce(run.runId, async () => ({ state: 'superseded', code: gate, detail: 'Its answer wasn’t used: the agent or the AI switch was turned off meanwhile' }), realNow);
+    if (d !== 'not_applicable') await tell('skipped', gate, 'Its answer wasn’t used: the agent or the AI switch was turned off meanwhile');
+    return d;
+  }
+  let value: unknown = null;
+  let local: unknown = null;
+  let pkg: unknown = null;
+  let ok = false;
+  try {
+    const parsed = job.outputSchema.safeParse(JSON.parse(run.parsed ?? 'null'));
+    if (parsed.success) {
+      value = parsed.data;
+      local = run.localText ? JSON.parse(run.localText) : null;
+      pkg = run.packageText ? JSON.parse(run.packageText) : null;
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    const d = await applyRunOnce(run.runId, async () => ({ state: 'failed', code: 'bad_stored_answer', detail: 'The stored answer couldn’t be read back' }), realNow);
+    if (d !== 'not_applicable') await tell('failed', 'bad_stored_answer', 'The stored answer couldn’t be read back');
+    return d;
+  }
+  return applyRunOnce(run.runId, (tx) => job.apply!(tx, { runId: run.runId, taskId: run.taskId, out: value, pkg, local, trigger, modelUsed: run.modelUsed, promptVersion: run.promptVersion }), realNow);
 }
 
 export function runIdFor(taskId: string | null, attempt: number): string {
@@ -229,6 +317,24 @@ export async function closeAbandonedRuns(realNow: number = Date.now(), settings?
     if (!closed) continue;
     closedCount += 1;
     if (closed.spend) await alertBudgetCrossings(closed.spend, monthKeyOf(r.createdAtMs ?? realNow), budgetUsd);
+    const owner = jobFor(r.agentKey);
+    if (owner?.report) {
+      // PR W2a: the job's own log hears of it too (its task died with the run).
+      const trigger = TRIGGER_NAMES.includes(closed.run.trigger as RunTrigger) ? (closed.run.trigger as RunTrigger) : 'schedule';
+      const input = (closed.run.input ?? {}) as Record<string, unknown>;
+      await safeReport(owner, {
+        runId: r.runId,
+        agentKey: owner.key,
+        trigger,
+        outcome: 'failed',
+        reason: 'interrupted',
+        params: {},
+        detail: 'The worker stopped during the run and the task gave up',
+        modelUsed: null,
+        taskId: (closed.run.taskId as string | null) ?? null,
+        local: storedLocal(input.local),
+      });
+    }
     if (closed.calledModel) {
       const job = jobFor(r.agentKey);
       await alertAgentFailing(
@@ -287,6 +393,9 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
   const alertFailure = (code: string, detail: string | null) => alertAgentFailing(job.key, job.label, code, detail, dayKeyOf(now()));
   const alertBudget = (spend: { beforeMicro: number; afterMicro: number }, month: string) => alertBudgetCrossings(spend, month, budgetUsd);
 
+  const report = (outcome: RunOutcome, reason: string | null, detail: string | null, modelUsed: string | null = null, id: string = runId) =>
+    safeReport(job, { runId: id, agentKey: job.key, trigger: req.trigger, outcome, reason, params: req.params ?? {}, detail, modelUsed, taskId: req.taskId });
+
   /** A run that never called the model: recorded (with no package), not counted as a run. */
   const endEarly = async (outcome: RunOutcome, reason: string, summary: string, extra: Partial<RunFinish> = {}): Promise<RunResult> => {
     const created = await startRun({ ...base, input: { summary, hash: null, package: null, chars: 0 }, realNow: t0 });
@@ -294,6 +403,7 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
     await finishRun(runId, { ...empty, ...extra, outcome, reason, latencyMs: now() - t0 }, now());
     await addUsage({ realNow: t0, agentKey: job.key, runId, tenantUserId: req.tenantUserId, outcome, counted: false, costMicro: 0, usage: NO_USAGE });
     if (outcome === 'failed') await alertFailure(reason, extra.error ?? null);
+    await report(outcome, reason, extra.error ?? null);
     return { runId, outcome, reason, costMicroUsd: 0 };
   };
 
@@ -302,27 +412,47 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
    * transaction (brain/store: the worst case, unless it counted its own spend before it stopped,
    * or never got to the call). An error here fails the task (nothing was called; it is tried again).
    */
-  const closeInterrupted = async (earlierId: string) => {
+  const closeInterrupted = async (earlierId: string): Promise<boolean> => {
     const closed = await closeInterruptedRun(earlierId, now(), interruptedCostMicro);
-    if (!closed) return;
+    if (!closed) return false;
     if (closed.spend) await alertBudget(closed.spend, monthKeyOf(tsMs(closed.run.createdAt) ?? t0));
     if (closed.calledModel) {
       await alertFailure('interrupted', closed.costMicro > 0 ? 'the worker stopped during the model call; counted at the worst case' : 'the worker stopped after the call was counted');
     }
+    return true;
   };
 
   // 0. A task another attempt of which already started (first: its dead run is closed even when
-  //    this one is too late anyway), then a stale Test connection.
+  //    this one is too late anyway; a finished one whose answer wasn't applied is applied from its
+  //    stored answer — the model is never called again), then a stale Test connection.
   if (req.taskId) {
     let started = false;
+    let recovered = false;
     for (let a = 1; a <= Math.max(req.attempt - 1, ATTEMPTS_CHECKED); a += 1) {
       if (a === req.attempt) continue;
       const earlierId = runIdFor(req.taskId, a);
-      if (!(await runExists(earlierId))) continue;
+      const earlier = await readRunForApply(earlierId);
+      if (!earlier) continue;
       started = true;
-      await closeInterrupted(earlierId);
+      // PR W2a: the closed run's end goes to the job's log (this attempt then ends quietly).
+      if (earlier.status === 'running') {
+        if (await closeInterrupted(earlierId)) await report('failed', 'interrupted', 'The worker stopped during the run', null, earlierId);
+      }
+      else if (job.apply && earlier.status === 'done' && earlier.outcome === 'ok' && earlier.applyState === 'pending') {
+        await applyStored(job, earlier, now());
+        recovered = true;
+      }
     }
-    if (started) return endEarly('skipped', 'already_called', job.label);
+    if (started) return endEarly('skipped', recovered ? 'applied_earlier' : 'already_called', job.label);
+  }
+
+  // The job's own question first: is this run still wanted? (No run record: nothing ran.)
+  if (job.precheck) {
+    const pre = await job.precheck({ params: req.params ?? {}, trigger: req.trigger, realNow: t0 });
+    if (pre) {
+      await report('skipped', pre.skip, pre.detail ?? null);
+      return { runId, outcome: 'skipped', reason: pre.skip, costMicroUsd: 0 };
+    }
   }
   if (req.trigger === 'test' && (req.waitedMs ?? 0) > STALE_TEST_MS) return endEarly('skipped', 'stale', job.label);
 
@@ -360,6 +490,10 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
       error: `The scan found ${findings.map((f) => `${f.kind} at ${f.path}`).join(', ')}`,
     });
   }
+  const localText = built.local === undefined ? null : JSON.stringify(built.local) ?? null;
+  if (localText !== null && Buffer.byteLength(localText, 'utf8') > MAX_LOCAL_BYTES) {
+    return endEarly('failed', 'too_large', summary, { error: `The input's local part has more than ${MAX_LOCAL_BYTES} bytes` });
+  }
   let format: OutputFormat;
   try {
     format = await outputFormatFor(job.outputSchema);
@@ -390,7 +524,7 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
   const created = await startRun(
     {
       ...base,
-      input: { summary, hash: contentChecksum(built.pkg), package: pkgText, chars: pkgText.length },
+      input: { summary, hash: contentChecksum(built.pkg), package: pkgText, chars: pkgText.length, local: localText },
       requestBytes,
       maxOutputTokens: settings.maxOutputTokens,
       realNow: t0,
@@ -463,6 +597,7 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
   let checks: CheckResult[] = [];
   let parsed: string | null = null;
   let reasoning: string | null = null;
+  let value: unknown = null;
   if (reply) {
     try {
       const ev = evaluateAnswer(reply, job.outputSchema);
@@ -472,8 +607,9 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
         checks = [{ code: ev.problem, ok: false, detail: ev.detail }];
       } else {
         reasoning = job.reasoningOf(ev.value);
-        checks = [numbersCheck(reasoning, wire, [prompt.system, prompt.instructions, JSON.stringify(format.schema)]), ...job.check(ev.value, built.pkg)];
+        checks = [numbersCheck(reasoning, wire, [prompt.system, prompt.instructions, JSON.stringify(format.schema)]), ...job.check(ev.value, built.pkg, built.local)];
         parsed = JSON.stringify(ev.value);
+        value = ev.value;
         const failed = checks.find((c) => !c.ok);
         outcome = failed ? 'rejected' : 'ok';
         reason = failed ? failed.code : null;
@@ -523,6 +659,7 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
       finishedAt,
       // Counting it above failed: count it with the finish (unless that count did land after all).
       spend ? undefined : { realNow: t0, agentKey: job.key, runId, tenantUserId: req.tenantUserId, outcome, counted, costMicro: cost, usage },
+      { applyPending: Boolean(job.apply) },
     );
     finishState = finished.state;
     if (finished.spend) spend = finished.spend;
@@ -534,10 +671,60 @@ export async function runAgent(req: RunRequest, deps: RunDeps = {}): Promise<Run
 
   if (spend) await alertBudget(spend, monthKeyOf(t0));
   // Never an outcome to use for a run another attempt closed, or whose account is gone.
-  if (finishState === 'closed') return { runId, outcome: 'failed', reason: 'interrupted', costMicroUsd: cost };
+  if (finishState === 'closed') {
+    await report('failed', 'interrupted', 'Another attempt closed this run meanwhile', modelUsed);
+    return { runId, outcome: 'failed', reason: 'interrupted', costMicroUsd: cost };
+  }
   if (finishState === 'gone') return { runId, outcome: 'skipped', reason: 'gone', costMicroUsd: cost };
   // A run stopped by the worker's shutdown (a deploy) is in the run log; no alert for it.
   const shutdown = reason === 'aborted' && deps.signal?.reason === 'shutdown';
   if (outcome === 'failed' && reason && !shutdown) await alertFailure(reason, lastError?.message ?? error);
+  if (outcome === 'ok' && job.apply) {
+    // A record that couldn't be finished is never applied (it is closed as interrupted later).
+    if (finishState !== 'finished') {
+      await report('failed', 'finish_failed', 'The run record couldn’t be finished, so its answer isn’t used', modelUsed);
+      return { runId, outcome: 'failed', reason: 'finish_failed', costMicroUsd: cost };
+    }
+    // The only throw after the call: the task is tried again, and recovery applies the stored answer.
+    const decision = await applyRunOnce(
+      runId,
+      (tx) => job.apply!(tx, { runId, taskId: req.taskId, out: value, pkg: built.pkg, local: built.local, trigger: req.trigger, modelUsed, promptVersion: settings.promptVersion }),
+      now(),
+    );
+    return { runId, outcome, reason, costMicroUsd: cost, applied: decision === 'not_applicable' ? null : decision };
+  }
+  // A run the shutdown stopped is reported too (PR W2a: its task is done, so its cell is free again).
+  if (outcome !== 'ok') await report(outcome, reason, shutdown ? 'The worker stopped for a deploy or restart during the run' : checks.find((c) => !c.ok)?.detail ?? error, modelUsed);
   return { runId, outcome, reason, costMicroUsd: cost };
+}
+
+/**
+ * Applies the answers left pending (their task died on its last attempt, or another attempt
+ * completed it first): those finished over 15 minutes ago; after 7 days they are stamped failed
+ * (`apply_gave_up`) with an alert. The worker runs it with the abandoned-run sweep. Returns how
+ * many it settled.
+ */
+export async function sweepPendingApplies(realNow: number = Date.now()): Promise<number> {
+  const due = (await listPendingApplies()).filter((r) => r.finishedAtMs !== null && realNow - r.finishedAtMs >= APPLY_SWEEP_AFTER_MS);
+  let settled = 0;
+  for (const r of due) {
+    const job = jobFor(r.agentKey);
+    if (!job?.apply) continue;
+    try {
+      if (realNow - (r.finishedAtMs ?? realNow) >= APPLY_GIVE_UP_MS) {
+        const d = await applyRunOnce(r.runId, async () => ({ state: 'failed', code: 'apply_gave_up', detail: 'Its answer couldn’t be applied for 7 days' }), realNow);
+        if (d !== 'not_applicable') {
+          settled += 1;
+          const trigger = TRIGGER_NAMES.includes(r.trigger as RunTrigger) ? (r.trigger as RunTrigger) : 'schedule';
+          await safeReport(job, { runId: r.runId, agentKey: job.key, trigger, outcome: 'failed', reason: 'apply_gave_up', params: {}, detail: 'Its answer couldn’t be saved for 7 days', modelUsed: r.modelUsed, taskId: r.taskId, local: storedLocal(r.localText) });
+          await alertAgentFailing(job.key, job.label, 'apply_gave_up', 'a passed answer couldn’t be applied for 7 days', dayKeyOf(realNow));
+        }
+        continue;
+      }
+      if ((await applyStored(job, r, realNow)) !== 'not_applicable') settled += 1;
+    } catch (err) {
+      console.warn('[ADAPTIVE AI] applying a pending answer failed (tried again later):', r.runId, (err as Error)?.name ?? 'Error');
+    }
+  }
+  return settled;
 }

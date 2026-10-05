@@ -58,7 +58,7 @@ import { learnVenue, rebuildPools } from '../bandit/learn';
 import { learnTask, poolTask } from '../bandit/tasks';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { AiLane } from '../brain/lane';
-import { closeAbandonedRuns } from '../brain/run';
+import { closeAbandonedRuns, sweepPendingApplies } from '../brain/run';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -192,6 +192,8 @@ export class AdaptiveWorker {
     if (Date.now() - this.lastAbandonedRunsAt > ABANDONED_RUNS_MS) {
       this.lastAbandonedRunsAt = Date.now();
       await closeAbandonedRuns(Date.now(), this.settings).catch((err) => console.warn('[ADAPTIVE WORKER] closing abandoned AI runs failed:', err?.message || err));
+      // PR W2: answers that passed but weren't applied (their task died) are applied from the run.
+      await sweepPendingApplies(Date.now()).catch((err) => console.warn('[ADAPTIVE WORKER] applying pending AI answers failed:', err?.message || err));
     }
 
     const tasks = await claimDue(this.id, now(), BATCH);

@@ -15,6 +15,8 @@ const handle = makeHandle('ADAPTIVE WHATSAPP API');
 /** Calls that make the server talk to Meta, per admin and minute: sends (40 templates one by one), checks and syncs. */
 const sends = rateLimiter(30, 60_000);
 const metaCalls = rateLimiter(10, 60_000);
+/** PR W2: "Suggest with AI" clicks, per admin and minute (each is a billed model call). */
+const suggests = rateLimiter(10, 60_000);
 
 const bodyOf = (req: { body?: unknown }) => {
   const { actor: _a, ...rest } = (req.body ?? {}) as Record<string, unknown>;
@@ -70,6 +72,14 @@ router.post(
     const actor = adminActorOf(req);
     if (!metaCalls(`connection:${actor.uid}`)) throw tooManyRequests('Too many checks in a minute — wait a moment');
     return wa.turnOnWhatsAppNotices(actor);
+  }),
+);
+router.post(
+  '/admin/whatsapp/suggest',
+  handle(async (req) => {
+    const actor = adminActorOf(req);
+    if (!suggests(`suggest:${actor.uid}`)) throw tooManyRequests('Too many AI suggestions in a minute — wait a moment');
+    return wa.suggestWhatsAppTemplate(bodyOf(req), actor);
   }),
 );
 router.post(

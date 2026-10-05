@@ -17,6 +17,7 @@
  *   POST whatsapp/connection/check         Check connection
  *   PUT  whatsapp/connection               {wabaId} set the account by hand (verified first)
  *   POST whatsapp/connection/notices       Turn on notices: subscribe the app to the account's webhooks
+ *   POST whatsapp/suggest                  {use, lang, kind, templateId?} Suggest with AI (PR W2): queue one writer run
  *   POST whatsapp/sync                     Sync now (the tick's lease: `running` when it is busy)
  *
  * Every write lands in the activity log with who did it. Nothing here deletes at Meta.
@@ -42,9 +43,11 @@ import { checkWhatsAppTemplate } from '../core/whatsapp/checks';
 import type { WaDisplay } from '../core/whatsapp/status';
 import { whatsappTemplateIdFor } from '../core/runtime/ids';
 import { ApiError, conflict, notFound, validationFailed } from '../api/errors';
+import { HttpError } from '../api/http';
+import { cellKeyOf, suggestOptionsFor, wantedCategory, WRITER_KINDS } from '../core/whatsapp/aiBrief';
 import { cachedEngineSettings } from '../store/engineSettings';
 import { toJson } from '../store/serialize';
-import { sandboxEnabled } from '../engine/clock';
+import { refreshClock, sandboxEnabled } from '../engine/clock';
 import { loadCatalogue } from './catalogue';
 import { STOP_LINES } from '../send/compose';
 import { metaClient } from '../whatsapp/source';
@@ -54,7 +57,8 @@ import { reconcile, runWhatsAppTemplateTick } from '../whatsapp/sync';
 import { noteTemplateHint } from '../whatsapp/hints';
 import { SANDBOX_FAULTS, SANDBOX_WABA_ID, queueSandboxFaults, sandboxDecide, type SandboxDecision } from '../whatsapp/sandbox';
 import { checkContext, loadPools, poolFor, templateView, unhandledParts, visitorBaseUrl } from '../whatsapp/context';
-import { staleTemplate } from '../whatsapp/store';
+import { staleTemplate, writeLog } from '../whatsapp/store';
+import { livePendingCells, queueWriterRun, snapshotOf, templatesOfMessage, writerBlockedWords, writerRefusalWords, writerRequestFor, writerStatus, type WriterStatus } from '../whatsapp/aiRequests';
 import {
   adminActor,
   changeTemplate,
@@ -95,15 +99,34 @@ async function who(actor: Actor): Promise<WaActor> {
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 export async function getWhatsAppOverview() {
-  const [ops, docs, pools, settings] = await Promise.all([readOps(), listTemplates(), loadPools(), cachedEngineSettings()]);
+  const realNow = Date.now();
+  const [ops, docs, pools, settings, ai] = await Promise.all([
+    readOps(),
+    listTemplates(),
+    loadPools(),
+    cachedEngineSettings(),
+    // The writer's status (PR W2); the tab works without it.
+    writerStatus(realNow).catch((): WriterStatus | null => null),
+  ]);
   const views = docs.map((d) => templateView(d, pools, checkContext(pools, docs, ops, d.use))) as Array<ReturnType<typeof templateView> & { display: WaDisplay }>;
+  const snap = snapshotOf(docs, pools, ops, new Map(views.map((v) => [v.id, v.display])));
+  // The cells whose writer run is still queued or running (the tab works without it).
+  const pending = await livePendingCells(ops).catch((): Record<string, never> => ({}));
   const messages = pools.map((p) => {
     const cells: Record<string, unknown> = {};
+    const all = templatesOfMessage(snap, p.journeyKey, p.poolKey);
     for (const lang of LANGS) {
       const mine = views.filter((v) => v.use?.kind === 'adaptive' && v.use.poolKey === p.poolKey && v.use.journeyKey === p.journeyKey && v.lang === lang && !v.dismissed);
       mine.sort((a, b) => Number(b.usable) - Number(a.usable) || (RANK[a.display] ?? 99) - (RANK[b.display] ?? 99));
       const best = mine[0];
-      cells[lang] = best ? { display: best.display, templateId: best.id, name: best.name, usable: best.usable, count: mine.length } : { display: 'missing', templateId: null, name: null, usable: false, count: 0 };
+      const ai = {
+        // What "Suggest with AI" may write here (PR W2), and whether a run is on its way.
+        suggest: suggestOptionsFor(all.filter((t) => t.lang === lang), all, lang, wantedCategory(p)),
+        aiPending: Boolean(pending[cellKeyOf(p.journeyKey, p.poolKey, lang)]),
+      };
+      cells[lang] = best
+        ? { display: best.display, templateId: best.id, name: best.name, usable: best.usable, count: mine.length, ...ai }
+        : { display: 'missing', templateId: null, name: null, usable: false, count: 0, ...ai };
     }
     return {
       journeyKey: p.journeyKey,
@@ -148,6 +171,7 @@ export async function getWhatsAppOverview() {
       dismissed: views.length - visible.length,
     },
     badge: waiting.length + problems.length,
+    ai: ai ? { ...ai, pendingCells: Object.keys(pending).length } : null,
   };
 }
 
@@ -477,6 +501,42 @@ export async function turnOnWhatsAppNotices(actor: Actor) {
   const result = await subscribeNotices(by, ops.wabaId);
   const connection = await checkConnection(by);
   return { ...result, connection: toJson(connection) };
+}
+
+// ── Suggest with AI (PR W2) ──────────────────────────────────────────────────
+
+const suggestSchema = z
+  .object({ use: useSchema, lang: z.enum(LANGS), kind: z.enum(WRITER_KINDS), templateId: z.string().regex(TEMPLATE_ID).optional() })
+  .strict();
+
+/**
+ * Queues one writer run for a cell. Refused (409 with words, and a log row) before anything is
+ * queued when the AI switch is off, the budget or today's runs are used up, a run for the cell is
+ * on its way, or the kind doesn't fit the cell. A double click within the minute is one run.
+ */
+const PENDING_WORDS = 'The AI is already writing for this message and language: the draft appears in a minute or two';
+
+export async function suggestWhatsAppTemplate(body: unknown, actor: Actor) {
+  const input = suggestSchema.parse(body ?? {});
+  const by = await who(actor);
+  await refreshClock();
+  const realNow = Date.now();
+  const refuse = async (code: string, words: string): Promise<never> => {
+    await writeLog(
+      { kind: 'ai.request_refused', level: 'info', actor: by, summary: `Suggest with AI refused: ${words}`, detail: { code, kind: input.kind, lang: input.lang, poolKey: input.use.poolKey } },
+      { poolKey: input.use.poolKey, language: metaLanguageFor(input.lang) },
+    );
+    throw new HttpError(409, code, words);
+  };
+  const status = await writerStatus(realNow);
+  if (status.blocked) return refuse(status.blocked, writerBlockedWords(status.blocked));
+  const cell = cellKeyOf(input.use.journeyKey, input.use.poolKey, input.lang);
+  if ((await livePendingCells(await readOps()))[cell]) return refuse('pending', PENDING_WORDS);
+  const req = await writerRequestFor({ kind: input.kind, requestedBy: 'suggest', use: input.use, lang: input.lang, templateId: input.templateId ?? null });
+  if ('refuse' in req) return refuse(req.refuse, writerRefusalWords(req.refuse));
+  const taskId = await queueWriterRun({ request: req, trigger: 'manual', key: `wa:suggest:${cell}:${input.kind}`, by, realNow });
+  if (!taskId) return refuse('pending', PENDING_WORDS);
+  return { queued: true, taskId, runsLeft: Math.max(0, status.runsLeft - 1) };
 }
 
 export async function syncWhatsAppNow(actor: Actor) {

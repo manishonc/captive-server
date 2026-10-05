@@ -232,7 +232,8 @@ export function templateView(d: StoredTemplate, pools: PoolRow[], ctx: CheckCont
     preview: previewOf(d),
     version: d.version,
     seq: d.seq,
-    ai: d.ai ? toJson(d.ai) : null,
+    // The list line carries a short reasoning (PR W2: the template window has it whole).
+    ai: d.ai ? (opts.full ? toJson(d.ai) : { ...(toJson(d.ai) as Record<string, unknown>), reasoning: String(d.ai.reasoning ?? '').slice(0, 300) }) : null,
     createdAt: toJson(d.createdAt ?? null),
     updatedAt: toJson(d.updatedAt ?? null),
     approvedAt: toJson(d.meta?.approvedAt ?? null),

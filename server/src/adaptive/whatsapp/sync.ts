@@ -34,6 +34,7 @@ import { metaClient } from './source';
 import { checkContext, displayOf, loadPools, reportFor } from './context';
 import { decideDeleted, decideFromMeta, importedDoc, inferUse, viewOf } from './apply';
 import { connectionAlert, metaErrorDetail, revert } from './submit';
+import { planGapFill } from './aiRequests';
 import {
   alertRecorded,
   changeTemplate,
@@ -239,6 +240,8 @@ async function otpLocaleCheck(facts: MetaTemplateFacts[]): Promise<void> {
 
 export interface TickResult {
   ran: boolean;
+  /** PR W2: writer runs the daily gap-fill queued. */
+  aiQueued?: number;
   reason?: string;
   repaired?: number;
   synced?: boolean;
@@ -254,6 +257,7 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
   if (!(await claimLease(owner, LEASE_MS))) return { ran: false, reason: 'busy' };
   const started = Date.now();
   const out: TickResult = { ran: true, repaired: 0, synced: false, alerts: 0, digest: false };
+  let syncedComplete = false;
   try {
     // The registry is read once here; again only after a sync changed it (for the alerts it brought).
     let docs = await listTemplates();
@@ -277,6 +281,7 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
       if (!(await renewLease(owner, LEASE_MS))) return { ...out, reason: 'lease_lost' };
       const res = await reconcile({ by: SYSTEM, budgetMs: Math.max(30_000, TICK_BUDGET_MS - (Date.now() - started) - 30_000), reason: hinted ? 'hint' : 'tick' });
       out.synced = res.ok;
+      syncedComplete = res.ok && res.complete === true;
       docs = await listTemplates();
     }
 
@@ -284,6 +289,15 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
     out.alerts = await flushAlerts(docs);
     out.digest = await maybeDigest();
     await tokenExpiryCheck(ops);
+    // PR W2: the daily gap-fill, right after a complete sync — on its own, so an error here never
+    // keeps W1's alerts, summary or token reminder from going out (they ran above).
+    if (syncedComplete && (await renewLease(owner, LEASE_MS))) {
+      try {
+        out.aiQueued = await planGapFill(Date.now());
+      } catch (err) {
+        await writeLog({ kind: 'ai.error', level: 'error', actor: SYSTEM, summary: `The daily AI gap-fill failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null } });
+      }
+    }
   } catch (err) {
     await writeLog({ kind: 'tick.error', level: 'error', actor: SYSTEM, summary: `The template tick failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null, code: (err as { code?: unknown })?.code ?? null } });
   } finally {
