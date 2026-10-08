@@ -46,17 +46,49 @@ export interface SeedUnit {
   docs: SeedDoc[];
 }
 
+/**
+ * PR S: a later version the seed publishes next to an existing one (seed/versionUpgrades.ts) —
+ * publishing never changes a published version.
+ */
+export interface VersionTarget {
+  label: string;
+  kind: 'journey' | 'playbook';
+  key: string;
+  version: number;
+  /** Header fields this version brings (the journey's name, its availability; the playbook's name). */
+  header: Record<string, unknown>;
+  /** The version document (stamps are added when it is written). */
+  doc: Record<string, unknown>;
+  /** The template versions a playbook version pins: each must exist when it is published. */
+  pins?: Array<{ journeyKey: string; templateVersion: number }>;
+}
+
 export interface SeedPlan {
   units: SeedUnit[];
-  reports: { journeys: Record<string, ValidationReport>; playbooks: Record<string, ValidationReport> };
+  /** PR S: later versions, published in this order (journeys before the playbooks that pin them). */
+  versions: VersionTarget[];
+  /** PR S: `versions` holds the checks of the later versions (`key@version`). */
+  reports: { journeys: Record<string, ValidationReport>; playbooks: Record<string, ValidationReport>; versions: Record<string, ValidationReport> };
   problems: string[];
 }
+
+export type VersionDecision = 'publish' | 'current' | 'kept' | 'missing';
+
+/** Pure: what the seed's version step does with a target, given the stored header and whether its version doc exists. */
+export function versionDecision(header: { latestVersion?: unknown; publishedVersion?: unknown } | null, versionExists: boolean, target: Pick<VersionTarget, 'version'>): VersionDecision {
+  if (versionExists) return 'current';
+  if (!header) return 'missing';
+  const prev = target.version - 1;
+  return header.latestVersion === prev && header.publishedVersion === prev ? 'publish' : 'kept';
+}
+
+type SeedInput = Omit<typeof SEED, 'journeyVersions' | 'playbookVersions'> & Partial<Pick<typeof SEED, 'journeyVersions' | 'playbookVersions'>>;
 
 export function variantId(poolKey: string, letter: string): string {
   return hashId('var', `platform:${poolKey}:${letter}`);
 }
 
-export function buildSeedPlan(now: Date = new Date(), seed = SEED): SeedPlan {
+export function buildSeedPlan(now: Date = new Date(), seed: SeedInput = SEED): SeedPlan {
   const problems: string[] = [];
   const units: SeedUnit[] = [];
   const stamp = { createdAt: now, updatedAt: now, schemaVersion: SCHEMA_VERSION };
@@ -148,6 +180,52 @@ export function buildSeedPlan(now: Date = new Date(), seed = SEED): SeedPlan {
     });
   }
 
+  // PR S: later journey versions. Wording is checked against the newest definition of each
+  // journey; the later playbook versions against the newest templates.
+  const versions: VersionTarget[] = [];
+  const versionReports: Record<string, ValidationReport> = {};
+  const latest = new Map(definitions);
+  const latestTemplates = new Map<string, TemplateInfo>();
+  for (const [key, info] of templates) latestTemplates.set(key, { header: info.header, versions: new Map(info.versions) });
+  for (const jv of seed.journeyVersions ?? []) {
+    const key = jv.header.key;
+    const label = `Journey template ${key} v${jv.version}`;
+    const base = templates.get(key);
+    if (!base) {
+      problems.push(`${label}: there is no earlier version in the seed`);
+      continue;
+    }
+    const report = validateJourneyTemplate({ header: jv.header, definition: jv.definition }, rules);
+    versionReports[`${key}@${jv.version}`] = report;
+    if (!report.ok) {
+      problems.push(`${label}: ${report.issues.filter((i) => i.severity === 'error').map((i) => `${i.code} ${i.message}`).join('; ')}`);
+      continue;
+    }
+    const header = journeyTemplateHeaderSchema.parse(jv.header);
+    const definition = journeyDefinitionSchema.parse(jv.definition);
+    latest.set(key, { header, definition });
+    const info = latestTemplates.get(key)!;
+    info.versions.set(jv.version, { state: 'published', definition });
+    latestTemplates.set(key, { header: { ...header, publishedVersion: jv.version }, versions: info.versions });
+    versions.push({
+      label,
+      kind: 'journey',
+      key,
+      version: jv.version,
+      header: { name: header.name, description: header.description, purpose: header.purpose, venueTypes: header.venueTypes, availability: header.availability, kpi: header.kpi, requiredCapabilities: header.requiredCapabilities, display: header.display },
+      doc: {
+        version: jv.version,
+        state: 'published',
+        definition,
+        engineVersion: ENGINE_RANGE,
+        checksum: contentChecksum(definition),
+        validation: { ...report, checkedAt: now },
+        changelog: jv.changelog,
+        schemaVersion: SCHEMA_VERSION,
+      },
+    });
+  }
+
   // Wording
   const variants: VariantSeed[] = [];
   for (const v of seed.variants) {
@@ -157,7 +235,7 @@ export function buildSeedPlan(now: Date = new Date(), seed = SEED): SeedPlan {
       continue;
     }
     const variant = parsed.data;
-    const journey = definitions.get(variant.journeyKey);
+    const journey = latest.get(variant.journeyKey);
     const pool = journey?.definition.pools[variant.poolKey];
     if (!journey || !pool) {
       problems.push(`Wording ${variant.poolKey}/${variant.letter}: pool is not declared by journey ${variant.journeyKey}`);
@@ -267,5 +345,36 @@ export function buildSeedPlan(now: Date = new Date(), seed = SEED): SeedPlan {
     });
   }
 
-  return { units, reports: { journeys: journeyReports, playbooks: playbookReports }, problems };
+  // PR S: later playbook versions, checked against the newest templates.
+  for (const pv of seed.playbookVersions ?? []) {
+    const label = `Playbook ${pv.key} v${pv.version}`;
+    const report = validatePlaybook(pv.content, { templates: latestTemplates, wording, questions, rules, publishedKind: null });
+    versionReports[`${pv.key}@${pv.version}`] = report;
+    if (!report.ok) {
+      problems.push(`${label}: ${report.issues.filter((i) => i.severity === 'error').map((i) => `${i.code} ${i.message}`).join('; ')}`);
+      continue;
+    }
+    const content: PlaybookContent = playbookContentSchema.parse(pv.content);
+    versions.push({
+      label,
+      kind: 'playbook',
+      key: pv.key,
+      version: pv.version,
+      header: { kind: content.kind, name: content.name, summary: content.summary, icon: content.icon, venueTypes: content.venueTypes },
+      doc: {
+        ...content,
+        version: pv.version,
+        state: 'published',
+        basedOnVersion: pv.version - 1,
+        engineVersion: ENGINE_RANGE,
+        validation: { ...report, checkedAt: now },
+        checksum: contentChecksum(content),
+        changelog: pv.changelog,
+        schemaVersion: SCHEMA_VERSION,
+      },
+      pins: content.journeys.map((j) => ({ journeyKey: j.journeyKey, templateVersion: j.templateVersion })),
+    });
+  }
+
+  return { units, versions, reports: { journeys: journeyReports, playbooks: playbookReports, versions: versionReports }, problems };
 }

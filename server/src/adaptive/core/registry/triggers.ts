@@ -56,15 +56,17 @@ const visitRevisit: TriggerContract<Record<string, never>> = {
   describe: () => 'Comes back',
 };
 
-const daysSinceVisit: TriggerContract<{ days: number[] }> = {
+// PR S: the scan triggers run (core/scans, scans/). New config keys are optional, so the v1
+// placeholders still parse; `catchUpDays` etc. have defaults in scans/finders.ts.
+const daysSinceVisit: TriggerContract<{ days: number[]; catchUpDays?: number }> = {
   type: 'days_since_visit',
   typeVersion: 1,
   source: 'scan',
-  configSchema: z.object({ days: z.array(z.number().int().min(1).max(365)).min(1).max(6) }),
+  configSchema: z.object({ days: z.array(z.number().int().min(1).max(365)).min(1).max(6), catchUpDays: z.number().int().min(0).max(7).optional() }),
   describe: (c) => `${c.days.join('/')} days since last visit`,
 };
 
-const dateField: TriggerContract<{ field: 'birthdayMonth' | 'firstVisitAt'; day?: number; at?: string; offset?: string }> = {
+const dateField: TriggerContract<{ field: 'birthdayMonth' | 'firstVisitAt'; day?: number; at?: string; offset?: string; lateUntilDay?: number }> = {
   type: 'date_field',
   typeVersion: 1,
   source: 'scan',
@@ -73,8 +75,11 @@ const dateField: TriggerContract<{ field: 'birthdayMonth' | 'firstVisitAt'; day?
     day: z.number().int().min(1).max(28).optional(),
     at: hhmmSchema.optional(),
     offset: z.string().regex(/^[+-]?\d{1,3}(d|mo|y)$/).optional(),
+    // PR S: a guest who tells us their month later in that month still gets the gift until this day.
+    lateUntilDay: z.number().int().min(1).max(28).optional(),
   }),
-  describe: (c) => (c.field === 'birthdayMonth' ? 'Birthday month' : 'First-visit anniversary'),
+  describe: (c) =>
+    c.field === 'birthdayMonth' ? `Birthday month${c.day ? `, day ${c.day}` : ''}${c.at ? ` at ${c.at}` : ''}` : 'First-visit anniversary',
 };
 
 type StayConfig = { requireConnect?: boolean; anchor: 'checkInAt' | 'checkOutAt'; offsetDays: number; at: string };
@@ -100,23 +105,32 @@ const stayWindow: TriggerContract<StayConfig> = {
   },
 };
 
-const calendarHoliday: TriggerContract<{ leadDays: number }> = {
+const calendarHoliday: TriggerContract<{ leadDays: number; slot?: string; spreadDays?: number; catchUpDays?: number }> = {
   type: 'calendar.holiday',
   typeVersion: 1,
   source: 'scan',
-  configSchema: z.object({ leadDays: z.number().int().min(0).max(60) }),
-  describe: (c) => `${c.leadDays} days before a holiday`,
+  configSchema: z.object({
+    leadDays: z.number().int().min(0).max(60),
+    // PR S: the `holidays` blank with the owner's picks; the reminders spread over this many mornings.
+    slot: z.string().regex(/^[a-z][a-z0-9_]*$/).optional(),
+    spreadDays: z.number().int().min(1).max(5).optional(),
+    catchUpDays: z.number().int().min(0).max(5).optional(),
+  }),
+  describe: (c) => `${c.leadDays} days before the holidays the owner picks`,
 };
 
-const slowDaypart: TriggerContract<{ dayparts: number; lookbackWeeks: number }> = {
+const slowDaypart: TriggerContract<{ dayparts: number; lookbackWeeks: number; minWeeks?: number; minVisits?: number; recentDays?: number }> = {
   type: 'computed.slow_daypart',
   typeVersion: 1,
   source: 'scan',
   configSchema: z.object({
     dayparts: z.number().int().min(1).max(6),
     lookbackWeeks: z.number().int().min(2).max(26),
+    minWeeks: z.number().int().min(1).max(26).optional(),
+    minVisits: z.number().int().min(1).max(10_000).optional(),
+    recentDays: z.number().int().min(0).max(30).optional(),
   }),
-  describe: () => 'Weekly scan (quiet hours)',
+  describe: (c) => `Every Monday: the ${c.dayparts} slowest times of the last ${c.lookbackWeeks} weeks`,
 };
 
 const genericEvent: TriggerContract<{ type: string; where?: Record<string, unknown> }> = {
@@ -167,4 +181,6 @@ export const KNOWN_EVENTS = new Set([
   'stay.cancelled',
   'question.answered',
   'booking.direct',
+  // PR S: a scan found a new occasion (a scan journey's next run closes the open one).
+  'scan.due',
 ]);

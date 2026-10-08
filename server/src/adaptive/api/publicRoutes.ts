@@ -9,7 +9,7 @@
 
 import { Router } from 'express';
 import { makeHandle } from './http';
-import { publicInfo, publicOffer, publicRating } from '../service/publicPages';
+import { publicInfo, publicOffer, publicRating, saveBirthdayMonth } from '../service/publicPages';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE PUBLIC API');
@@ -33,6 +33,15 @@ router.get(
   handle(async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return publicRating(String(req.params.shortCode ?? ''), req.query.venueId, req.query.lang);
+  }),
+);
+
+// PR S: the guest tells us their birthday month on one of those pages (asked once).
+router.post(
+  '/public/birthday/:shortCode',
+  handle(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return saveBirthdayMonth(String(req.params.shortCode ?? ''), req.body);
   }),
 );
 

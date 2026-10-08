@@ -145,6 +145,13 @@ export const slotDefSchema = z.discriminatedUnion('type', [
     ...slotBase,
     default: hhmmSchema.optional(),
   }),
+  // PR S: the holidays the owner picks (core/scans/holidays.ts) — a comma-separated list of keys.
+  z.object({
+    type: z.literal('holidays'),
+    ...slotBase,
+    region: z.literal('ch').default('ch'),
+    default: z.string().max(500).optional(),
+  }),
 ]);
 export type SlotDef = z.infer<typeof slotDefSchema>;
 
@@ -175,6 +182,8 @@ export const previewStepSchema = z.object({
   nodeId: z.string().min(1),
   pool: z.string().optional(),
   channel: z.enum(['sms', 'email', 'whatsapp', 'page']),
+  /** PR S: which offer blank this step's preview shows (Win-back has one per stage). */
+  offerSlot: keySchema.optional(),
   when: i18nSchema,
   why: i18nSchema,
 });

@@ -6,6 +6,7 @@
  */
 
 import { isI18n, type Offer, type SlotDef, type SlotValue } from '../schemas';
+import { parseHolidayKeys, unknownHolidayKeys } from '../scans/holidays';
 
 export interface SlotCheckContext {
   /** The offer menu the value must come from (playbook defaults or the venue's menu). */
@@ -58,6 +59,12 @@ export function checkSlotValue(def: SlotDef, value: SlotValue | undefined, ctx: 
     }
     case 'time':
       return typeof value === 'string' && HHMM.test(value) ? null : 'must look like 09:00';
+    case 'holidays': {
+      if (typeof value !== 'string' || value.length > 500) return 'must be a list of holidays';
+      const unknown = unknownHolidayKeys(value);
+      if (unknown.length) return `has holidays that aren't on the calendar (${unknown.join(', ')})`;
+      return parseHolidayKeys(value).length ? null : def.required ? 'needs at least one holiday' : null;
+    }
     default:
       return 'has an unknown slot type';
   }
@@ -73,6 +80,7 @@ export function slotStartValue(def: SlotDef): SlotValue {
     case 'days':
       return def.default ?? null;
     case 'time':
+    case 'holidays':
       return def.default ?? null;
     case 'offer':
       return null;

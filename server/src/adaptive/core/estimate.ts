@@ -26,6 +26,8 @@ export interface EstimateVenueInput {
 }
 
 export interface EstimateJourneyInput {
+  /** PR S: separate runs a guest gets (Holidays: one per picked day), each starting with its first touch. */
+  runs?: number;
   journeyKey: string;
   purpose: 'marketing' | 'service' | 'mixed';
   avgTouchesPerGuest: number;

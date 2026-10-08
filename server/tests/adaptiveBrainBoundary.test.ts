@@ -206,6 +206,11 @@ const BRAIN_MAY_REACH = new Set([
     'adaptive/core/registry/slots.ts',
     'adaptive/core/registry/triggers.ts',
     'adaptive/core/render.ts',
+    // PR S: pure scan rules (holiday calendar, slow times, occasion merge fields) — render.ts and
+    // the slot checks read them.
+    'adaptive/core/scans/occasions.ts',
+    'adaptive/core/scans/dayparts.ts',
+    'adaptive/core/scans/holidays.ts',
     'adaptive/core/schemas.ts',
     'adaptive/whatsapp/aiDrafts.ts',
     'adaptive/whatsapp/store.ts',

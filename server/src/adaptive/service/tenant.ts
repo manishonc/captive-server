@@ -9,6 +9,8 @@
  * switch (`AdaptiveConfig/global.killSwitch.sendingPaused`) starts on.
  */
 
+import { parseHolidayKeys } from '../core/scans/holidays';
+import { variantEligible } from '../engine/renderSend';
 import { getPlaybookHeader, getPlaybookVersion, listPlaybookHeaders } from '../store/definitions';
 import {
   applyVenueChanges,
@@ -185,8 +187,18 @@ export async function getSetup(tenantUserId: string, venueId: string, playbookKe
   await ownedVenues(tenantUserId, [venueId]);
   const setup = await getVenuePlaybook(venueId, playbookKey);
   if (!setup || setup.tenantUserId !== tenantUserId) throw notFound('This venue has no setup for that playbook');
-  const [{ version }, cat] = await Promise.all([livePlaybook(playbookKey, setup.playbookVersion), loadCatalogue()]);
-  return { setup: toJson(setup), playbook: ownerPlaybookView(playbookKey, version.version, versionContent(version), cat) };
+  const [{ header, version }, cat] = await Promise.all([livePlaybook(playbookKey, setup.playbookVersion), loadCatalogue()]);
+  const out: { setup: unknown; playbook: OwnerPlaybookView; latestPlaybook?: OwnerPlaybookView } = {
+    setup: toJson(setup),
+    playbook: ownerPlaybookView(playbookKey, version.version, versionContent(version), cat),
+  };
+  // PR S: a newer published version (Restaurant growth v2: the scan journeys run). The owner's
+  // editor opens it, and saving moves this venue to it; values carry over by blank.
+  if (header.publishedVersion && header.publishedVersion > version.version) {
+    const latest = await getPlaybookVersion(playbookKey, header.publishedVersion);
+    if (latest && latest.state === 'published') out.latestPlaybook = ownerPlaybookView(playbookKey, latest.version, versionContent(latest), cat);
+  }
+  return out;
 }
 
 // ── Checks, estimate, preview ────────────────────────────────────────────────
@@ -230,12 +242,16 @@ export async function estimate(tenantUserId: string, body: unknown): Promise<Est
   const hints = playbook.content.estimateHints;
   const journeyInputs = Object.entries(journeys)
     .filter(([, j]) => j.enabled)
-    .map(([key]) => {
+    .map(([key, j]) => {
       const t = templates.get(key);
+      // PR S: Holidays sends once per picked day a year — its hint is per day.
+      const holidaySlot = Object.entries(t?.definition.slots ?? {}).find(([, d]) => d.type === 'holidays')?.[0];
+      const perPick = holidaySlot ? Math.max(1, parseHolidayKeys(j.slots[holidaySlot]).length) : 1;
       return {
         journeyKey: key,
         purpose: t?.header.purpose ?? 'marketing',
-        avgTouchesPerGuest: hints.avgTouchesPerGuest[key] ?? 1,
+        avgTouchesPerGuest: (hints.avgTouchesPerGuest[key] ?? 1) * perPick,
+        ...(perPick > 1 ? { runs: perPick } : {}),
         ladder: t?.definition.channelLadder ?? (['email'] as Channel[]),
       };
     });
@@ -306,17 +322,19 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
   const playbook = setupPlaybook(header, version);
   const { journeys } = resolveSetupJourneys({ [input.journeyKey]: { enabled: true, slots: input.slots } }, playbook, setupTemplates(cat, content));
   const slots = journeys[input.journeyKey]?.slots ?? {};
-  const values = sampleValues({ lang: input.lang, venueName, slots, offers: content.offerMenuDefaults });
+  const baseValues = sampleValues({ lang: input.lang, venueName, slots, offers: content.offerMenuDefaults });
 
   const messages: PreviewMessage[] = found.definition.previewSteps.map((step) => {
-    const base = { nodeId: step.nodeId, channel: step.channel, when: pickLang(step.when, input.lang), why: pickLang(step.why, input.lang) };
+    // PR S: a step may show another offer blank (Win-back's stages).
+    const values = step.offerSlot ? sampleValues({ lang: input.lang, venueName, slots, offers: content.offerMenuDefaults, offerSlot: step.offerSlot }) : baseValues;
+    const base = { nodeId: step.nodeId, ...(step.offerSlot ? { offerSlot: step.offerSlot } : {}), channel: step.channel, when: pickLang(step.when, input.lang), why: pickLang(step.why, input.lang) };
     if (step.channel === 'page' || !step.pool) {
       const staff = typeof slots.staff_name === 'string' ? slots.staff_name : '';
       return { ...base, channel: 'page' as const, variantName: null, text: staff, unknown: [] };
     }
-    const variant = cat.variants
-      .filter((v) => v.poolKey === step.pool && v.status === 'active')
-      .sort((a, b) => a.letter.localeCompare(b.letter))[0];
+    // The first wording these values allow (PR S: Holidays has one with the booking link, one without).
+    const pool = cat.variants.filter((v) => v.poolKey === step.pool && v.status === 'active').sort((a, b) => a.letter.localeCompare(b.letter));
+    const variant = pool.find((v) => variantEligible(v, slots)) ?? pool[0];
     if (!variant) return { ...base, variantName: null, text: '', unknown: [] };
     const wanted = step.channel === 'whatsapp' ? 'email' : step.channel;
     const channel = contentFor(variant.channels, variant.locales as Record<string, Partial<ChannelContent>>, input.lang, wanted)

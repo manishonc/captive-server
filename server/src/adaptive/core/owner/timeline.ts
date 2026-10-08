@@ -23,6 +23,7 @@
  *    (`offerLabels`, PR E follow-up): the event itself stores only the English label.
  */
 
+import { dayText, occasionMergeValues } from '../scans/occasions';
 import { creditsWord, explainDecision, type DecisionRecord } from '../runtime/decision';
 import { isValidTimeZone } from '../runtime/time';
 import type { I18n } from '../schemas';
@@ -217,9 +218,25 @@ export const TIMELINE_EVENT_TYPES = [
   'stay.moment',
   'stay.moment_skipped',
   'moment.passed',
+  // PR S: a daily scan found this guest for a journey; the guest told us their birthday month.
+  'scan.due',
+  'profile.birthday_month',
 ] as const;
 
 type L = TimelineLang;
+
+const DAYPART_WORDS: Record<string, Record<L, string>> = {
+  morning: { en: 'morning', de: 'Morgen' },
+  lunch: { en: 'lunchtime', de: 'Mittag' },
+  afternoon: { en: 'afternoon', de: 'Nachmittag' },
+  evening: { en: 'evening', de: 'Abend' },
+  late: { en: 'late evening', de: 'später Abend' },
+};
+
+const MONTH_NAMES: Record<L, string[]> = {
+  en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+  de: ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'],
+};
 
 const FALLBACK_TZ = 'Europe/Zurich';
 
@@ -345,10 +362,12 @@ const EXIT_ON_WORDS: Record<string, Record<L, string>> = {
   'message.replied': { en: 'the guest replied', de: 'der Gast hat geantwortet' },
   'offer.redeemed': { en: 'the offer was used', de: 'das Angebot wurde eingelöst' },
   'stay.changed': { en: 'the booking changed', de: 'die Buchung hat sich geändert' },
+  'scan.due': { en: 'the next occasion started', de: 'der nächste Anlass hat begonnen' },
 };
 
 const GOAL_WORDS: Record<string, Record<L, string>> = {
   'visit.started': { en: 'the guest came back', de: 'der Gast kam wieder' },
+  'visit.revisit': { en: 'the guest came back', de: 'der Gast kam wieder' },
   'offer.redeemed': { en: 'the offer was used', de: 'das Angebot wurde eingelöst' },
   'message.clicked': { en: 'the guest clicked', de: 'der Gast hat geklickt' },
   'rating.submitted': { en: 'the guest gave a rating', de: 'der Gast hat bewertet' },
@@ -674,6 +693,41 @@ function eventSentence(c: Ctx, ev: TimelineEventInput, journeyKey: string | null
       );
     }
 
+    case 'scan.due': {
+      // PR S: why a scan journey started (core/scans/occasions.ts vars on the event).
+      const occasion = str(data.occasion) ?? '';
+      if (occasion.startsWith('winback:') && num(data.winbackDays) !== null) {
+        const days = num(data.winbackDays)!;
+        return one(t(l, `Journey ${j}: the last visit was ${days} days ago.`, `Journey ${j}: der letzte Besuch war vor ${days} Tagen.`));
+      }
+      if (occasion.startsWith('birthday:')) return one(t(l, `Journey ${j}: the guest's birthday month.`, `Journey ${j}: der Geburtstagsmonat des Gastes.`));
+      if (occasion.startsWith('holiday:')) {
+        const words = occasionMergeValues(data, l);
+        return one(
+          words['holiday.name'] && words['holiday.day']
+            ? t(l, `Journey ${j}: ${words['holiday.name']} is on ${words['holiday.day']}.`, `Journey ${j}: ${words['holiday.name']} am ${words['holiday.day']}.`)
+            : t(l, `Journey ${j}: a holiday is coming up.`, `Journey ${j}: ein Feiertag steht bevor.`),
+        );
+      }
+      if (occasion.startsWith('slow:')) {
+        // The day itself (read weeks later, "this Tuesday" would be wrong).
+        const day = typeof data.slowDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.slowDate) ? dayText(data.slowDate, l) : null;
+        const part = typeof data.slowDaypart === 'string' ? DAYPART_WORDS[data.slowDaypart]?.[l] ?? null : null;
+        return one(
+          day && part
+            ? t(l, `Journey ${j}: an invite for ${day} (${part}), a slow time.`, `Journey ${j}: eine Einladung für ${day} (${part}), eine ruhige Zeit.`)
+            : t(l, `Journey ${j}: an invite for a slow time.`, `Journey ${j}: eine Einladung für eine ruhige Zeit.`),
+        );
+      }
+      return one(t(l, `Time for journey ${j}.`, `Zeit für Journey ${j}.`));
+    }
+
+    case 'profile.birthday_month': {
+      const month = num(data.month);
+      const name = month !== null && month >= 1 && month <= 12 ? MONTH_NAMES[l][month - 1] : null;
+      return one(name ? t(l, `The guest told us their birthday month (${name}).`, `Der Gast hat den Geburtstagsmonat angegeben (${name}).`) : t(l, 'The guest told us their birthday month.', 'Der Gast hat den Geburtstagsmonat angegeben.'));
+    }
+
     default:
       return one(c.admin ? ev.type : t(l, 'Something else happened.', 'Etwas anderes ist passiert.'));
   }
@@ -830,6 +884,7 @@ const SAME_TIME_ORDER: Record<string, number> = {
   'offer.redeemed': 3,
   'stay.linked': 3,
   'stay.moment': 4,
+  'scan.due': 4,
   'journey.not_started': 5,
   'journey.entered': 5,
   'journey.config_updated': 6,

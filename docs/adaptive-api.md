@@ -209,6 +209,7 @@ captive-server before the cms: without `purpose` the cms counts every running jo
 | `GET /public/offer/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, offer: { label, expiresAt, expiresOn, status: valid\|expired\|redeemed } }`; 410 after expiry + 7 days |
 | `GET /public/info/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, info: { fields… }, secrets: { wifiPassword, doorCode, keyInstructions, shownFrom, shownUntil }, stay \| null }` — secrets only in the stay window (12 h before check-in to 2 h after checkout; other links: the Wi-Fi password only, 30 days); 410 after checkout + 7 days, or once the stay is cancelled / no longer this guest's |
 | `GET /public/rating/:shortCode` | `?venueId&lang?` | `{ venueId, venueName, lang, staffName: string \| null }` — for the rating page of a journey's review ask (`{{link.rating}}`, PR E follow-up): `lang` = `?lang` when en/de/it/fr, else the guest's language, else `en`; `staffName` = the journey's `staff_name` blank in the config version the guest's journey runs with (trimmed; `null` when empty or the journey has none). **Never a 410**: nothing secret, and a rating from the link counts at any time (`/ingest/rating` has no age limit) |
+| `POST /public/birthday/:shortCode` | body `{ venueId, kind: 'offer'\|'hub'\|'rating', month: 1–12 }` | `{ saved: boolean }` (PR S) — the guest's birthday month, picked on one of those pages: the code must be a live journey link of that `kind` at `venueId` (else the same 404); stored once on the contact (`profile.birthdayMonth`), a second answer changes nothing; a `profile.birthday_month` event for the timeline. The three `GET /public/*` answers carry `birthday: { ask }` — true while the venue runs Birthday (v2) and the guest hasn't told us yet |
 
 Only a live journey link of the right kind at `venueId` answers; anything else is the same 404.
 `Cache-Control: no-store`. Opening a page is not a click (the cms forwards clicks to `/ingest/click`).
@@ -339,6 +340,17 @@ writer's Scheduled runs are on. Nothing is sent to Meta by the AI (Auto comes wi
 `CaptivePortal_WhatsAppLog/{auto}` (`expireAt` +13 months, no TTL needed yet),
 `CaptivePortal_AdaptiveConfig/whatsapp`; sandbox: `CaptivePortal_AdaptiveSandboxWhatsAppTemplates`.
 Reads are by id, the whole small registry, or newest first by one field: no composite index.
+
+### PR S changes
+
+- `GET /tenants/:t/venues/:v/setups/:playbookKey` also answers `latestPlaybook` when a newer version of the
+  playbook is published than the setup pins (Restaurant growth v2): the owner's editor opens it, and saving
+  with its `playbookVersion` moves the venue to it.
+- Owner playbook views: a `holidays` blank (`type: 'holidays'`, value = the picked keys comma-separated)
+  carries `holidays: [{ key, name, nextDate }]`; a pinned v1 of a restaurant scan journey reads `comingSoon`.
+- `PATCH /admin/journey-templates/:key` `{ availability: 'available' }` → 409 when the published version
+  can't run (v1 of the four restaurant scan journeys).
+- Setup check S02 also refuses switching on a pinned v1 of those four.
 
 ## Check codes
 

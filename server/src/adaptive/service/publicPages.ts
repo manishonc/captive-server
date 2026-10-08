@@ -13,6 +13,12 @@
  *    date (nothing secret; a rating from the link counts at any time).
  */
 
+import type { ContactDoc } from '../store/engineTypes';
+import { loadVenueContext, type VenueContext } from '../engine/context';
+import { consentFor, consentState } from '../identity/resolve';
+import { appendEvent } from '../engine/events';
+import { eventIdFor } from '../core/runtime/ids';
+import { scanJourneyRunnable } from '../core/scans/occasions';
 import { db } from '../../firebase';
 import { COL, guestInfoId } from '../store/collections';
 import type { JourneySendDoc } from '../store/engineTypes';
@@ -76,6 +82,7 @@ export async function publicOffer(shortCode: string, venueId: unknown, langHint?
     venueId: p.send.venueId,
     venueName: p.venueName,
     lang,
+    birthday: await birthdayAsk(p.inst.meta.contactId, p.send.venueId),
     offer: {
       label,
       expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
@@ -114,6 +121,7 @@ export async function publicInfo(shortCode: string, venueId: unknown, langHint?:
     venueId: p.send.venueId,
     venueName: p.venueName,
     lang,
+    birthday: await birthdayAsk(p.inst.meta.contactId, p.send.venueId),
     info: fields,
     secrets: {
       wifiPassword: secrets.wifiPassword ? pageField(gi, lang, 'wifiPassword') : null,
@@ -141,5 +149,89 @@ export async function publicRating(shortCode: string, venueId: unknown, langHint
     venueName: p.venueName,
     lang,
     staffName: staffNameOf(pinned.slots.staff_name, lang),
+    birthday: await birthdayAsk(p.inst.meta.contactId, p.send.venueId),
   };
+}
+
+// ── PR S: the birthday month (decision S-D2) ─────────────────────────────────
+
+/**
+ * May this guest be asked their birthday month at this venue? Only while the venue runs the
+ * Birthday journey (a version that runs), the guest said yes to marketing here (some channel)
+ * and the owner hasn't stopped it — the gift couldn't reach anyone else — and only until they
+ * have told us (never asked twice).
+ */
+function birthdayAskable(contact: ContactDoc | undefined, ctx: VenueContext | null, venueId: string): boolean {
+  if (!contact || contact.status !== 'active' || typeof contact.profile?.birthdayMonth === 'number') return false;
+  if (contact.ownerStoppedAll) return false;
+  if (!Object.values(consentFor(contact, venueId)).some((c) => consentState(c) === 'granted')) return false;
+  const jc = ctx?.marketing?.doc.journeys?.[BIRTHDAY_JOURNEY];
+  return Boolean(jc?.enabled && scanJourneyRunnable(BIRTHDAY_JOURNEY, jc.templateVersion));
+}
+
+async function birthdayAsk(contactId: string, venueId: string): Promise<{ ask: boolean }> {
+  try {
+    const [contactSnap, ctx] = await Promise.all([db.collection(COL.contacts).doc(contactId).get(), loadVenueContext(venueId)]);
+    return { ask: birthdayAskable(contactSnap.data() as ContactDoc | undefined, ctx, venueId) };
+  } catch {
+    return { ask: false }; // the page works without the question
+  }
+}
+
+const BIRTHDAY_JOURNEY = 'birthday';
+
+/** The page's link still opens (the same rules as the GETs: an ended offer or info link doesn't take answers). */
+async function linkStillOpen(p: Awaited<ReturnType<typeof journeyPage>>, kind: 'offer' | 'hub' | 'rating'): Promise<boolean> {
+  if (kind === 'rating') return true;
+  if (kind === 'offer') {
+    const vars = p.inst.state.vars ?? {};
+    return offerLinkOpen(p.t, typeof vars.offerExpiresAt === 'number' ? vars.offerExpiresAt : null, p.sentAt);
+  }
+  const stayId = typeof p.inst.meta.context?.stayId === 'string' ? p.inst.meta.context.stayId : null;
+  let stay: InfoStay | null = null;
+  if (stayId) {
+    const st = await loadStay(stayId);
+    if (!st || st.status === 'cancelled' || st.contactId !== p.inst.meta.contactId) return false;
+    stay = { checkInAt: st.checkInAt, checkOutAt: st.checkOutAt, current: true };
+  }
+  return infoLinkOpen(p.t, p.sentAt, stay);
+}
+
+export async function saveBirthdayMonth(shortCode: string, body: unknown): Promise<{ saved: boolean }> {
+  const b = (body ?? {}) as { venueId?: unknown; kind?: unknown; month?: unknown };
+  const kind = b.kind === 'offer' || b.kind === 'hub' || b.kind === 'rating' ? b.kind : null;
+  const month = typeof b.month === 'number' && Number.isInteger(b.month) && b.month >= 1 && b.month <= 12 ? b.month : null;
+  if (!kind || month === null) throw notFound(NOT_FOUND);
+  const p = await journeyPage(shortCode, b.venueId, kind);
+  if (!(await linkStillOpen(p, kind))) throw notFound(NOT_FOUND);
+  const contactId = p.inst.meta.contactId;
+  const ref = db.collection(COL.contacts).doc(contactId);
+  const ctx = await loadVenueContext(p.send.venueId);
+  const result = await db.runTransaction(async (tx): Promise<'saved' | 'had_one' | 'not_askable'> => {
+    const snap = await tx.get(ref);
+    const contact = snap.data() as ContactDoc | undefined;
+    if (typeof contact?.profile?.birthdayMonth === 'number') return 'had_one';
+    if (!birthdayAskable(contact, ctx, p.send.venueId)) return 'not_askable';
+    tx.update(ref, { 'profile.birthdayMonth': month, 'profile.birthdayMonthAt': new Date(p.t), 'profile.birthdayMonthVia': `guest_page:${kind}`, updatedAt: new Date() });
+    return 'saved';
+  });
+  // Nothing to ask here (Birthday isn't on, no yes to marketing): the same 404 as any other link.
+  if (result === 'not_askable') throw notFound(NOT_FOUND);
+  const saved = result === 'saved';
+  if (saved) {
+    await appendEvent(
+      {
+        type: 'profile.birthday_month',
+        occurredAt: p.t,
+        tenantUserId: p.inst.meta.tenantUserId,
+        venueId: p.send.venueId,
+        contactId,
+        source: 'cms',
+        data: { month, via: kind },
+      },
+      eventIdFor('guest', `birthday_month:${contactId}`),
+    );
+  }
+  // A month told earlier is kept (first answer wins); the page isn't told which happened.
+  return { saved: true };
 }

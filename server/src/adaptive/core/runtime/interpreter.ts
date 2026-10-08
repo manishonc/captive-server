@@ -203,6 +203,16 @@ function isAnchoredTimerWait(state: InstanceState, def: JourneyDefinition): bool
 
 // ── The loop ─────────────────────────────────────────────────────────────────
 
+/**
+ * Does this event reach the goal? `visit.revisit` (PR S: Win-back, Holidays, the Slow-time
+ * filler, Birthday) is a new visit by a guest who has been here before — the engine logs it
+ * as `visit.started` with `isRevisit`, and a running journey hears that event.
+ */
+export function goalMatches(goalEvent: string, event: EngineEvent): boolean {
+  if (event.type === goalEvent) return true;
+  return goalEvent === 'visit.revisit' && event.type === 'visit.started' && event.data?.isRevisit === true;
+}
+
 function within(startedAt: number, window: string, now: number): boolean {
   return now - startedAt <= durationMs(window);
 }
@@ -266,7 +276,7 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
       }
       // The goal is checked continuously and counted once per instance.
       // The window is judged by when the event happened, not when it was handled.
-      if (def.goal && !state.goal && event.type === def.goal.event && within(state.startedAt, def.goal.within, Math.min(now, event.occurredAt))) {
+      if (def.goal && !state.goal && goalMatches(def.goal.event, event) && within(state.startedAt, def.goal.within, Math.min(now, event.occurredAt))) {
         state.goal = { reachedAt: now, eventId: event.id };
         effects.push({ type: 'emit', eventType: 'journey.converted', data: { goalEvent: event.type, eventId: event.id } });
         result = def.goal.onReach ? moveTo(def.goal.onReach) : { exit: def.goal.exit, reason: 'goal' };

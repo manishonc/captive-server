@@ -461,7 +461,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const vc = variantContent(variant, channel, lang)!;
   // Links: same-length stand-ins for pricing and the gate (real ones are minted only
   // once the gate says yes), readable ones for the stored preview.
-  const gates = linkGates(guestInfo, lang, cfg.pool, typeof inst.state.vars.offerKey === 'string');
+  const gates = linkGates(guestInfo, lang, cfg.pool, typeof inst.state.vars.offerKey === 'string', a.pinned.slots.booking_url);
   const bookingUrl = validBookingUrl(gates.bookingRaw);
   const guestId = inst.meta.context.guestId ?? contact.guestIds?.[contact.guestIds.length - 1] ?? null;
   const priceLinks: Partial<Record<LinkKind, string>> = pricingLinks(['offer', 'rating', 'hub', 'booking']);

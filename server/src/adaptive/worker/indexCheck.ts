@@ -31,6 +31,7 @@ interface Probe {
   run: () => Promise<unknown>;
 }
 
+import { birthdayMonthQuery, lastVisitRangeQuery } from '../scans/finders';
 const past = () => new Date(Date.now() - 1000);
 
 const PROBES: Probe[] = [
@@ -87,6 +88,11 @@ const PROBES: Probe[] = [
   { name: 'ContactVenues(contactId)', run: () => contactVenuesQuery('_probe').limit(1).get() },
   { name: 'VenuePlaybooks(venueId)', run: () => venueSetupsQuery('_probe').limit(1).get() },
   { name: 'JourneyInstances(tenantUserId, status, waiting.creditsShort)', run: () => accountCreditWaitQuery('_probe').limit(1).get() },
+  // Scan journeys (PR S): Win-back / Holidays page the guest list's composite with a range on the
+  // last visit; Birthday and the scan watchdog are equality only (merged single-field indexes).
+  { name: 'ContactVenues(venueId, lastVisitAt range desc)', run: () => lastVisitRangeQuery('_probe', Date.now() - 86_400_000, Date.now()).limit(1).get() },
+  { name: 'Contacts(tenantUserId, profile.birthdayMonth)', run: () => birthdayMonthQuery('_probe', 1).limit(1).get() },
+  { name: 'AdaptiveVenues(status)', run: () => db.collection(COL.adaptiveVenues).where('status', '==', 'on').limit(1).get() },
   // An owner's link by hand gives back that guest's journeys of the stay (PR D).
   { name: 'JourneyInstances(context.stayId, contactId)', run: () => stayContactInstancesQuery('_probe', '_probe').limit(1).get() },
 ];
