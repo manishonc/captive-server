@@ -105,6 +105,8 @@ export interface ContactDoc {
   };
   /** The owner stopped marketing to this guest at all their venues (PR D): venues opened later are covered too. */
   ownerStoppedAll?: { at: StoredTime; by: string } | null;
+  /** PR S: what the guest told us about themselves (the birthday month, 1–12, from a guest page). */
+  profile?: { birthdayMonth?: number | null; birthdayMonthAt?: StoredTime; birthdayMonthVia?: string | null } | null;
   replyNoticeSentAt: StoredTime;
   createdAt: StoredTime;
   updatedAt: StoredTime;

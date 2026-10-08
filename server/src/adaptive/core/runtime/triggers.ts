@@ -3,12 +3,14 @@
  *
  * Event-driven triggers this round: visit.started, visit.ended, visit.revisit and
  * the generic `event`; stay.window arrives with stays (its moments are scheduled
- * per stay, then delivered as a `stay.moment` event naming the journey).
+ * per stay, then delivered as a `stay.moment` event naming the journey). The scan
+ * triggers (PR S) arrive as a `scan.due` event naming the journey and the trigger.
  */
 
 import { getTriggerContract } from '../registry';
 import { matchesWhere } from './conditions';
 import type { EngineEvent } from './types';
+import { SCAN_EVENT } from '../scans/occasions';
 
 export interface TriggerDef {
   type: string;
@@ -45,8 +47,13 @@ export function triggerMatches(trigger: TriggerDef, event: EngineEvent, journeyK
       return event.type === 'stay.moment' && d.journeyKey === journeyKey;
     case 'event':
       return event.type === c.type && matchesWhere(c.where, event);
+    case 'days_since_visit':
+    case 'date_field':
+    case 'calendar.holiday':
+    case 'computed.slow_daypart':
+      // PR S: a venue scan found this guest for this journey (scans/trigger.ts) and names it.
+      return event.type === SCAN_EVENT && d.journeyKey === journeyKey && d.trigger === trigger.type;
     default:
-      // Scan triggers (days_since_visit, date_field, …) are not fired by events.
       return false;
   }
 }
@@ -58,6 +65,8 @@ export function triggerMatches(trigger: TriggerDef, event: EngineEvent, journeyK
 export function entryKeyFor(reentryMode: 'never' | 'after_exit' | 'cooldown', event: EngineEvent): string {
   if (reentryMode === 'never') return 'once';
   const d = event.data ?? {};
+  // A scan's occasion (PR S): `winback:30:<last visit>`, `birthday:2026`, `holiday:<key>:2026`, `slow:<week>`.
+  if (event.type === SCAN_EVENT && typeof d.occasion === 'string') return d.occasion;
   if (typeof d.stayId === 'string') return `stay:${d.stayId}`;
   if (typeof d.visitId === 'string') return `visit:${d.visitId}`;
   return `event:${event.id}`;

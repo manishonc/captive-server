@@ -14,6 +14,9 @@
  *  - Airbnb stays: `stay_poll` reads an owner's calendar link over outbound https (this is
  *    the only process that does, stays/fetch.ts), `stay_trigger` starts a stay journey at its
  *    moment; at start and then hourly a watchdog restarts calendar chains that stopped.
+ *  - scan journeys (PR S): `scan_venue` is a venue's daily scan at 03:00 venue time (it arms the
+ *    next day's), `scan_trigger` starts one guest's Win-back / Birthday / Holidays / Slow-time
+ *    journey; at start and then hourly a watchdog arms today's scan for every venue that is on.
  *  - AI agents (PR F2a): an `agent_run` task only starts in the AI lane (brain/lane.ts) — one
  *    run at a time, outside the claimed batch, so due sends never wait for a model. This is the
  *    only process that calls a model (through the cms relay).
@@ -58,6 +61,9 @@ import { learnVenue, rebuildPools } from '../bandit/learn';
 import { learnTask, poolTask } from '../bandit/tasks';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { AiLane } from '../brain/lane';
+import { scanWatchdog, type ScanVenuePayload } from '../scans/schedule';
+import { handleScanVenue } from '../scans/run';
+import { handleScanTrigger, type ScanTriggerPayload } from '../scans/trigger';
 import { closeAbandonedRuns, sweepPendingApplies } from '../brain/run';
 
 const POLL_MS = 5_000;
@@ -88,6 +94,7 @@ export class AdaptiveWorker {
   private lastBeatAt = 0;
   private lastReclaimAt = 0;
   private lastStayWatchdogAt = 0;
+  private lastScanWatchdogAt = 0;
   private lastPoolArmAt = 0;
   private lastAbandonedRunsAt = 0;
   private settings: EngineSettings = SAFE_SETTINGS;
@@ -175,6 +182,15 @@ export class AdaptiveWorker {
       this.lastStayWatchdogAt = Date.now();
       if (anyAccountOn(this.settings)) {
         await stayFeedWatchdog({ now: now(), settings: this.settings }).catch((err) => console.warn('[ADAPTIVE WORKER] stay feed watchdog failed:', err?.message || err));
+      }
+    }
+
+    // PR S: every venue that is on has today's scan armed (a venue just turned on, a chain that
+    // stopped while it was paused or its task died). Nothing to arm while every account is off.
+    if (Date.now() - this.lastScanWatchdogAt > STAY_WATCHDOG_MS) {
+      this.lastScanWatchdogAt = Date.now();
+      if (anyAccountOn(this.settings)) {
+        await scanWatchdog({ now: now(), settings: this.settings }).catch((err) => console.warn('[ADAPTIVE WORKER] scan watchdog failed:', err?.message || err));
       }
     }
 
@@ -319,6 +335,17 @@ export class AdaptiveWorker {
         case 'stay_trigger':
           // A linked guest's stay moment: re-checked now, then the journey starts (or not).
           await handleStayTrigger(task.payload as unknown as StayTriggerPayload, env);
+          break;
+        case 'scan_venue': {
+          // PR S: a venue's daily scan — finds today's Win-back / Birthday / Holidays / Slow-time guests.
+          const r = await handleScanVenue(task.payload as unknown as ScanVenuePayload, env, { onProgress: () => extendLease(task.id, this.id) });
+          const found = Object.entries(r.journeys).map(([k, v]) => `${k} ${v.found}${v.note ? ` (${v.note})` : ''}`);
+          if (found.length) console.log(`[ADAPTIVE WORKER] scan ${task.venueId}: ${found.join(', ')}`);
+          break;
+        }
+        case 'scan_trigger':
+          // PR S: one guest's occasion — re-checked now, then the journey starts (or not).
+          await handleScanTrigger(task.payload as unknown as ScanTriggerPayload, env);
           break;
         case 'agent_run':
           // PR F2a: started in the AI lane, which marks the task done (or failed) itself — this

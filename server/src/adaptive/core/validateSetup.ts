@@ -13,6 +13,7 @@
  *  W02  warning: stay messages wait for the booking calendar
  */
 
+import { scanJourneyRunnable } from './scans/occasions';
 import { pickLang, type JourneyDefinition, type JourneyTemplateHeader, type PlaybookContent, type SetupJourneyInput, type SlotValue } from './schemas';
 import { VENUE_TYPE_LABELS, type Channel, type PlaybookKind, type VenueType } from './constants';
 import { error, info, makeReport, warning, type Issue, type ValidationReport } from './issues';
@@ -77,7 +78,9 @@ export function resolveSetupJourneys(
     const label = pickLang(template.header.name) || j.journeyKey;
     const given = input[j.journeyKey];
     const current = base?.[j.journeyKey];
-    const comingSoon = template.header.availability === 'coming_soon';
+    // PR S: v1 of the four restaurant scan journeys was a placeholder — it stays "coming soon"
+    // for setups that still pin it, whatever the header says (core/scans/occasions.ts).
+    const comingSoon = template.header.availability === 'coming_soon' || !scanJourneyRunnable(j.journeyKey, template.version);
     let enabled = given ? given.enabled : current ? current.enabled : j.defaultEnabled;
     if (!given) enabled = (enabled || j.required) && !comingSoon;
 

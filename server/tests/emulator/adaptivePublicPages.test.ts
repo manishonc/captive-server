@@ -305,7 +305,8 @@ async function main() {
       let res = await rating(code);
       assertEqual(res.status, 200, `GET rating: ${res.text.slice(0, 200)}`);
       assertEqual(res.headers.get('cache-control'), 'no-store', 'never cached');
-      assertEqual(res.body, { ok: true, venueId: P.venueId, venueName: `Venue ${P.venueId}`, lang: 'de', staffName: 'Priya' }, 'venue, the guest’s language, the staff name (trimmed) — nothing else');
+      // PR S: plus whether to ask the birthday month (Birthday isn't on at this venue).
+      assertEqual(res.body, { ok: true, venueId: P.venueId, venueName: `Venue ${P.venueId}`, lang: 'de', staffName: 'Priya', birthday: { ask: false } }, 'venue, the guest’s language, the staff name (trimmed) — nothing else');
       for (const s of ['Rita', 'rita@test.local', '791119201', ask.contactId, ask.id, ask.instanceId]) assert(!res.text.includes(s), `no ${s} in the page data`);
       assertEqual([(await rating(code, P.venueId, '&lang=fr')).body.lang, (await rating(code, P.venueId, '&lang=xx')).body.lang], ['fr', 'de'], 'a language hint (en/de/it/fr only)');
       const clicks = (await db.collection(COL.journeySends).doc(ask.id).get()).get('engagement.clicks') ?? 0;

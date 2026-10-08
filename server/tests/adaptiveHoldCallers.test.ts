@@ -499,11 +499,11 @@ test('the scan sees the adaptive source and its functions', () => {
 
 // ── enrolForEvent: the only three ways a journey starts ─────────────────────
 
-test('enrolForEvent is called exactly 3 times: route.ts ×2, moments.ts ×1', () => {
+test('enrolForEvent is called exactly 4 times: route.ts ×2, moments.ts ×1, scans/trigger.ts ×1 (PR S)', () => {
   const calls = callsOf('enrolForEvent');
-  assertEqual(perFile(calls), { 'engine/route.ts': 2, 'stays/moments.ts': 1 }, `calls (${calls.map(where)})`);
+  assertEqual(perFile(calls), { 'engine/route.ts': 2, 'scans/trigger.ts': 1, 'stays/moments.ts': 1 }, `calls (${calls.map(where)})`);
   const fns = calls.map((r) => `${r.src.rel} ${enclosing(r.src, r.at).name}`).sort();
-  assertEqual(fns, ['engine/route.ts handleConnect', 'engine/route.ts handleVisitEnd', 'stays/moments.ts handleStayTrigger'], 'calling functions');
+  assertEqual(fns, ['engine/route.ts handleConnect', 'engine/route.ts handleVisitEnd', 'scans/trigger.ts handleScanTrigger', 'stays/moments.ts handleStayTrigger'], 'calling functions');
 });
 
 test('enrolForEvent, linkStayOnConnect and recordConnect are never passed along, aliased or re-exported', () => {
@@ -531,9 +531,10 @@ test('each enrolForEvent call gets its mode from venueModeFor, after an off → 
   assertEqual(sites.sort(), [
     'engine/route.ts handleConnect: mode=mode from mode',
     'engine/route.ts handleVisitEnd: mode=mode from mode',
+    'scans/trigger.ts handleScanTrigger: mode=mode from mode',
     'stays/moments.ts handleStayTrigger: mode=mode from current',
   ], 'where each mode comes from');
-  for (const rel of ['engine/route.ts', 'stays/moments.ts']) {
+  for (const rel of ['engine/route.ts', 'stays/moments.ts', 'scans/trigger.ts']) {
     const s = source(rel);
     const imported = importRanges(s).map((r) => s.masked.slice(r[0], r[1])).join('\n');
     assert(/(?<![\w$])venueModeFor(?![\w$])/.test(imported), `${rel} imports venueModeFor`);
@@ -588,6 +589,8 @@ test("venueModeFor is judged at the event's own time with the venue's doc, never
   assertEqual(got.handleConnect, 'event.occurredAt', 'connect: at the connect');
   assertEqual(got.handleStayTrigger, 'Math.max(p.momentAt,stay.linkedAt??p.momentAt)', 'stay moment: the later of the moment and the link');
   assert(/(?<![\w$])visit\.startedAt(?![\w$])/.test(got.handleVisitEnd ?? ''), `visit end: at the visit's start (${got.handleVisitEnd})`);
+  // PR S: a scan journey is judged at the guest's qualifying visit (S-D1), never the scan's time.
+  assertEqual(got.handleScanTrigger, 'p.qualifiedAt', 'scan: at the qualifying visit');
   const s = source('stays/moments.ts');
   const fn = functionNamed(s, 'handleStayTrigger');
   const [occurredAt] = declsIn(s, fn, 'occurredAt');

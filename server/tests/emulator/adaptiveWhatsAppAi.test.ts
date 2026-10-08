@@ -453,7 +453,8 @@ async function main() {
     assertEqual(Object.keys((await ops()).aiPending).length, 7, 'their cells pending');
     assertEqual((await ops()).aiGapFill.lastDay, dayKeyOf(Date.now()), 'the day stamped');
     const gf = await logRows('ai.gap_fill');
-    assertEqual([gf.length, gf[0].detail.queued, gf[0].detail.missing], [1, 7, 10], 'one summary row');
+    // PR S: Birthday runs now, so its WhatsApp message counts as missing too (11, was 10).
+    assertEqual([gf.length, gf[0].detail.queued, gf[0].detail.missing], [1, 7, 11], 'one summary row');
     await advance(7 * 3_600_000);
     assertEqual((await runWhatsAppTemplateTick()).aiQueued ?? 0, 0, 'once a day');
     await runUntil(now() + 30 * 60_000);
@@ -461,7 +462,7 @@ async function main() {
     assertEqual([drafts.length, new Set(drafts.map((d) => d.use.poolKey)).size], [7, 7], 'seven English drafts, one per message');
     for (const d of drafts) assertEqual((await view(d.id)).template.display, 'ready', `${d.name}: ready to send (no duplicate text)`);
     assert(drafts.every((d) => d.lang === 'en' && d.ai.requestedBy === 'gap_fill'), 'English, by the gap-fill');
-    assert(!drafts.some((d) => d.use.poolKey === 'birthday'), 'a coming-soon message is skipped');
+    assert(drafts.every((d) => d.use.poolKey !== 'winback' && d.use.poolKey !== 'holiday'), 'only pools that send by WhatsApp');
   });
 
   await test('gap-fill: translations once the English is in review; a cell with a run on its way skipped; 3 rejections in a row → 7 days off', async () => {
@@ -473,7 +474,7 @@ async function main() {
     assertEqual((await submit(en.id, 1)).status, 200, 'in review');
     assertEqual((await suggest({ use: WIFI, lang: 'en', kind: 'new' })).status, 200, 'a Suggest on its way for Wi-Fi info');
     const queued = await planGapFill(Date.now());
-    assertEqual(queued, 11, '8 English (Wi-Fi info pending) + 3 translations of the offer');
+    assertEqual(queued, 12, '9 English (Wi-Fi info pending; Birthday counts since PR S) + 3 translations of the offer');
     await runUntil(now() + 60 * 60_000);
     const all = await aiTemplates();
     const tr = all.filter((t) => t.use.poolKey === OFFER.poolKey && t.lang !== 'en');

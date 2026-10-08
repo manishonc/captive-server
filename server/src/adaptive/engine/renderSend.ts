@@ -18,6 +18,7 @@ import { localDateForRender } from '../core/runtime/time';
 import { evaluateCondition, factsFrom } from '../core/runtime/conditions';
 import { smsCheaperText, smsSafeText } from '../core/runtime/smsParts';
 import type { StayTimes } from '../stays/times';
+import { occasionMergeValues } from '../core/scans/occasions';
 
 export type LinkKind = 'offer' | 'rating' | 'hub' | 'booking' | 'unsubscribe';
 
@@ -79,6 +80,8 @@ export function renderValues(i: RenderInputs): RenderValues {
   if (typeof i.vars.offerExpiresAt === 'number') values['offer.expiryDate'] = localDateForRender(new Date(i.vars.offerExpiresAt), i.tz);
 
   for (const [key, value] of Object.entries(i.slots)) values[`slot.${key}`] = slotText(value, i.lang, i.offers);
+  // PR S: a scan journey's occasion — the holiday and its day, the slow time.
+  Object.assign(values, occasionMergeValues(i.vars, i.lang));
 
   // Each field in the guest's language, else English (PR D): a German block that lacks the
   // Wi-Fi name still gets the English one, instead of blocking the whole card.
@@ -218,9 +221,10 @@ export function renderMessage(content: any, channel: Channel, values: RenderValu
  * with `validBookingUrl`). The info page (D-C21): only when Guest info has something on it, and
  * Local tips only when there are tips. The offer: only when the journey holds one.
  */
-export function linkGates(guestInfo: Record<string, any> | null, lang: Lang, pool: string, hasOffer: boolean) {
+export function linkGates(guestInfo: Record<string, any> | null, lang: Lang, pool: string, hasOffer: boolean, slotBookingUrl?: unknown) {
   return {
-    bookingRaw: guestInfoField(guestInfo, lang, 'directBookingUrl'),
+    // PR S: a journey's own booking-link blank (Holidays' table booking link) comes first.
+    bookingRaw: (typeof slotBookingUrl === 'string' && slotBookingUrl.trim() ? slotBookingUrl.trim() : null) ?? guestInfoField(guestInfo, lang, 'directBookingUrl'),
     hub: guestInfoHasContent(guestInfo) && (pool !== 'local_tips' || guestInfoField(guestInfo, lang, 'localTips') !== null),
     offer: hasOffer,
   };

@@ -50,6 +50,10 @@ function journeyView(j: Record<string, any>, lang: Lang) {
       ...(s.min !== undefined ? { min: s.min, max: s.max } : {}),
       ...(s.maxLength ? { maxLength: s.maxLength } : {}),
       ...(s.options ? { options: s.options.map((o: Record<string, any>) => ({ value: o.value, label: tr(o.label, lang) })) } : {}),
+      // A holidays blank: the days to pick from (its value is their keys, comma-separated).
+      ...(s.holidays
+        ? { options: s.holidays.map((h: Record<string, any>) => ({ value: h.key, label: `${tr(h.name, lang)} (next: ${h.nextDate})` })), multiple: true, valueFormat: 'the picked values, comma-separated' }
+        : {}),
     })),
   };
 }
@@ -109,7 +113,7 @@ export function registerPlaybookTools(server: McpServer): void {
   addTool<{ playbookKey: string; lang?: Lang }>(
     server,
     'get_playbook',
-    'Get one Adaptive Campaigns playbook in detail: every journey with what it does, when it runs, its channels, and the blanks the owner fills in (offer, days, staff name) with their bounds and defaults, plus the offers owners can pick. Discover keys via list_playbooks.',
+    'Get one Adaptive Campaigns playbook in detail: every journey with what it does, when it runs, its channels, and the blanks the owner fills in (offer, days, staff name, which holidays, a booking link) with their bounds and defaults, plus the offers owners can pick. Discover keys via list_playbooks.',
     { playbookKey: z.string().describe('The playbook key (from list_playbooks), e.g. restaurant_growth.'), lang: langSchema },
     async (args, extra) => {
       const tenantUserId = tenantFrom(extra);

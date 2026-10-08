@@ -418,7 +418,7 @@ test('the modules are pure: their runtime imports load no firebase', () => {
   assertEqual(runtimeImports(join(SRC, 'adaptive/core/owner/deadTasks.ts')), [], 'deadTasks imports nothing');
   assertEqual(
     runtimeImports(join(SRC, 'adaptive/engine/renderSend.ts')).sort(),
-    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/schemas'],
+    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/scans/occasions', '../core/schemas'],
     'renderSend runtime imports',
   );
   for (const rel of ['adaptive/core/owner/deadTasks.ts', 'adaptive/core/runtime/decision.ts', 'adaptive/core/runtime/replay.ts', 'adaptive/engine/renderSend.ts']) {

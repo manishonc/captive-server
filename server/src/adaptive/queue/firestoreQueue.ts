@@ -35,7 +35,10 @@ export type TaskKind =
   | 'learn_arms'
   | 'learn_pool'
   // The AI foundation (PR F2a): one agent run (brain/lane.ts runs it outside the claimed batch)
-  | 'agent_run';
+  | 'agent_run'
+  // Scan journeys (PR S): a venue's daily scan, and one guest's occasion found by it
+  | 'scan_venue'
+  | 'scan_trigger';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;

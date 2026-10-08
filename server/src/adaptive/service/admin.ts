@@ -5,6 +5,7 @@
  * re-read what is stored).
  */
 
+import { scanJourneyRunnable } from '../core/scans/occasions';
 import {
   getJourneyTemplate,
   getPlaybookHeader,
@@ -401,6 +402,15 @@ export async function getJourneyTemplateDetail(key: string, version?: number) {
 }
 
 export async function setAvailability(key: string, availability: 'available' | 'coming_soon', actor: Actor) {
+  // PR S: only a journey the engine can run may be offered to owners (a "coming soon"
+  // placeholder version — v1 of the four restaurant scan journeys — can't).
+  if (availability === 'available') {
+    const rec = await getJourneyTemplate(key);
+    const published = rec?.header.publishedVersion ?? null;
+    if (rec && (published === null || !scanJourneyRunnable(key, published))) {
+      throw new ApiError('conflict', `The published version of this journey can't run yet — publish a version that runs first`);
+    }
+  }
   await setAvailabilityTx(key, availability, actor.uid, new Date()).catch(rethrow);
   invalidateCatalogue();
   return getJourneyTemplateDetail(key);

@@ -29,6 +29,8 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
   apply_config_inflight → an owner's "apply to guests already in these journeys" save
   stay_poll    → an Airbnb calendar feed, every 4 h (or Sync now): Stays kept in step with it
   stay_trigger → a linked guest's stay moment (arrival 17:00, day 2 10:00, …): the stay journey starts
+  scan_venue   → a venue's daily scan, 03:00 venue time (PR S): Win-back / Birthday / Holidays / Slow times
+  scan_trigger → one guest's occasion found by a scan: re-checked, then the scan journey starts
 
 Twilio status / inbound, Brevo webhook, the /u unsubscribe page ── +1 guarded line each ──▶ event + signal task
 the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ─────────────────────▶ event + signal task
@@ -449,6 +451,65 @@ tokens, the system prompt cached.
 - **Local:** turn the AI on (`POST /dev/launch` with `agents`), press Suggest on the WhatsApp tab; the fake
   model writes a valid template that names its message. `POST /dev/model-answer {"agentKey":"wa_template_writer",
   "answers":[{"answer":{…}}]}` makes the next answer what you give (e.g. a wrong category, to see a rejection).
+
+## Scan journeys (PR S)
+
+Win-back, Birthday, Holidays and the Slow-time filler (formerly "Quiet-hours filler") start from a
+daily scan of each venue, not from a Wi-Fi event. Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-s-brief.md`.
+
+- **The chain.** One `scan_venue` task per venue and venue-local day (`scan:{venueId}:{YYYY-MM-DD}`),
+  due 03:00 venue time on the engine clock. Each scan arms the next day's first; a run on another day
+  (the worker was down) only arms and stops — that day's own scan catches up. The worker's
+  `scanWatchdog` (at start, then hourly, while any account isn't off) arms today's and tomorrow's scan
+  for every venue whose marketing playbook is on. Paused / off venues stop their chain; the watchdog
+  starts it again. Weekly work (slow times) runs in Monday's scan.
+- **Finders** (`scans/finders.ts`) → one `scan_trigger` per guest and occasion (create-only key
+  `scan_trigger:{venue}:{journey}:{occasion}:{contact}`):
+  - Win-back: guests whose last visit's local date was 30 / 60 / 90 days ago (+2 days catch-up).
+  - Birthday: guests whose `Contacts.profile.birthdayMonth` is this month, from the 1st (10:00) to the
+    25th (late answers), who visited in the last 12 months.
+  - Holidays: 7 days before each picked day (Swiss calendar, `core/scans/holidays.ts`; +2 days
+    catch-up), guests of the last 12 months, spread over 3 mornings (06:00 triggers, morning slot).
+  - Slow times (Mondays): the 2 slowest open weekday × daypart times of the last 8 weeks (open = visits
+    in at least half the weeks; needs 4 weeks and 40 visits); guests who came in that daypart before and
+    not in the last 3 days; triggers 07:00 on the day (morning times: 16:00 the day before).
+- **"Past guests aren't messaged"** (S-D1): a guest counts only when their last visit came after the
+  marketing playbook went live; the trigger judges the venue's mode at that visit (`venueModeFor`) — a
+  visit before the launch or the Start-sending click starts nothing, one from before the account went
+  live is a test run.
+- **The trigger** (`scans/trigger.ts`) re-checks: ≤ 12 h late, the journey still on and runnable, the
+  occasion still holds (no visit since, month unchanged, day still picked, no ≤ 2★), then appends a
+  deterministic `scan.due` event and enrols. The occasion key is the entry key, so stages, years and
+  weeks never collide; the occasion's values become instance vars (`winbackDays`, `holidayKey`,
+  `slowDaypart`, …) for branches and the merge fields `holiday.name`, `holiday.day`, `slow.when`.
+- **Versions.** v1 of the four templates were placeholders and never run (`SCAN_MIN_TEMPLATE_VERSION`);
+  the seed publishes v2 of the four and Restaurant growth / Local business v2 next to v1
+  (`seed/versionUpgrades.ts`, only when the stored versions are exactly one step behind). A venue on
+  v1 moves to v2 when its owner next saves (the editor opens the newest version). The admin
+  Availability switch refuses a journey whose published version can't run.
+- **Goals.** The v2 templates stay open after their message (Win-back and Birthday 14 days — the
+  offer's life —, Holidays 10, slow times 7) so a return visit converts them; `visit.revisit` is
+  reached by a `visit.started` with `isRevisit`.
+- **A newer occasion closes an open run.** All four v2 templates have `exitOn: scan.due`: a run that
+  already sent its message and only waits for the guest to come back is closed by the journey's next
+  occasion (Christmas Eve, then Christmas Day and New Year's Eve each get their reminder). A run that
+  hasn't sent yet keeps going and the newer occasion is passed (`busy`). Each guest's three holiday
+  mornings are the same for every holiday, so close days reach them a day apart, in order.
+- **Before recording**, the trigger also checks the guest said yes to marketing here and isn't in a
+  pause between runs: nobody gets a `scan.due` line for an occasion that can't reach them.
+- **Booking link.** Holidays' "Table booking link" blank is the send's `link.booking` (a tracked
+  short link; it wins over Guest info's direct booking link for that journey).
+- **Scan summary.** Each scan writes `AdaptiveVenues.lastScan { date, at, journeys: { key: { found,
+  note } } }` (e.g. the slow-time targets or "not enough data"); trigger outcomes are in the worker log.
+- **Birthday month** comes from the guest pages (offer, info, rating): `POST /public/birthday/:code`
+  stores it once on the contact while the venue runs Birthday (`birthday.ask` on the page data).
+- **Birthday month** lives on `Contacts.profile.birthdayMonth`, asked only of guests who said yes to
+  marketing at the venue (and not stopped by the owner); `Contacts.profile` must NOT be exempted from
+  indexing (the PRD's schema suggests it): the Birthday finder queries it, and the worker's index probe
+  would stop the worker.
+- **Indexes:** none new. Win-back / Holidays use ContactVenues(venueId, lastVisitAt desc) with a range;
+  Birthday and the watchdog are equality-only; slow times read `visit.started` events on
+  JourneyEvents(venueId, type, occurredAt desc). All are in the worker's index probe.
 
 ## Signals coming back
 

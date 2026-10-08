@@ -12,7 +12,9 @@
 import { db } from '../../firebase';
 import { stripUndefined } from '../store/serialize';
 import { buildSeedPlan } from './buildSeed';
+import { invalidateCatalogue } from '../service/catalogue';
 import { applyWordingUpgrades, upgradeTargets } from './upgrades';
+import { applyVersionUpgrades } from './versionUpgrades';
 
 export interface SeedResult {
   created: string[];
@@ -23,6 +25,10 @@ export interface SeedResult {
   upgraded?: string[];
   /** …and wording docs left alone because they were edited by hand. */
   keptEdited?: string[];
+  /** PR S: later versions published next to the existing ones (seed/versionUpgrades.ts)… */
+  versionsPublished?: string[];
+  /** …and those left alone (an admin's draft or version). */
+  versionsKept?: string[];
 }
 
 export async function ensureAdaptiveSeed(opts: { dryRun?: boolean } = {}): Promise<SeedResult> {
@@ -66,6 +72,12 @@ export async function ensureAdaptiveSeed(opts: { dryRun?: boolean } = {}): Promi
   result.keptEdited = upgrades.keptEdited;
   result.failed.push(...upgrades.failed);
   result.problems.push(...upgrades.problems);
+  // PR S: the runnable scan journeys (v2) and the playbook versions that pin them.
+  const versions = await applyVersionUpgrades(plan, { dryRun: opts.dryRun });
+  result.versionsPublished = versions.published;
+  result.versionsKept = versions.kept;
+  result.failed.push(...versions.failed);
+  if (versions.published.length && !opts.dryRun) invalidateCatalogue();
   return result;
 }
 
@@ -81,6 +93,8 @@ export function startAdaptiveSeed(): void {
       if (r.failed.length) console.error('[ADAPTIVE SEED] Failed:', r.failed);
       if (r.upgraded?.length) console.log(`[ADAPTIVE SEED] Upgraded ${r.upgraded.length}: ${r.upgraded.join(', ')}`);
       if (r.keptEdited?.length) console.warn(`[ADAPTIVE SEED] Not upgraded (edited by hand): ${r.keptEdited.join(', ')}`);
+      if (r.versionsPublished?.length) console.log(`[ADAPTIVE SEED] Published ${r.versionsPublished.length}: ${r.versionsPublished.join(', ')}`);
+      if (r.versionsKept?.length) console.warn(`[ADAPTIVE SEED] Not published: ${r.versionsKept.join(', ')}`);
     })
     .catch((err) => console.error('[ADAPTIVE SEED] Seed run failed (the server keeps running):', err));
 }

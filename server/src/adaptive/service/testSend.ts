@@ -18,13 +18,14 @@
  * The answer carries the status and a preview with the secrets masked, never the rendered text.
  */
 
+import { holidayDef, parseHolidayKeys } from '../core/scans/holidays';
 import { randomBytes } from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { db } from '../../firebase';
 import { venuePlaybookId } from '../store/collections';
 import type { VenuePlaybookDoc } from '../store/types';
-import type { Actor, Offer, SlotValue } from '../core/schemas';
+import type { Actor, JourneyDefinition, Offer, SlotValue } from '../core/schemas';
 import type { Channel, Lang } from '../core/constants';
 import { LANGS } from '../core/constants';
 import { getNodeContract } from '../core/registry';
@@ -55,6 +56,8 @@ const TEST_COUNTERS = 'CaptivePortal_TestSendCounters';
 export const testSendInputSchema = z.object({
   journeyKey: z.string().min(1).max(64),
   nodeId: z.string().min(1).max(64).optional(),
+  /** PR S: the preview step's offer blank (Win-back's stages share one message step). */
+  offerSlot: z.string().regex(/^[a-z][a-z0-9_]{0,40}$/).optional(),
   channel: z.enum(['sms', 'email']),
   lang: z.enum(LANGS).optional(),
   recipientId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/),
@@ -93,12 +96,49 @@ async function setupWith(venueId: string, journeyKey: string, preferred: string[
   return docs[0]?.doc ?? null;
 }
 
-function offerVars(slots: Record<string, SlotValue>, offers: Offer[], at: number): Record<string, unknown> {
-  const chosen = slots.offer;
-  const offer = typeof chosen === 'string' ? offers.find((o) => o.offerKey === chosen) : undefined;
-  if (!offer) return {};
-  const days = typeof slots.offer_days === 'number' ? slots.offer_days : offer.expiryDays;
-  return { offerKey: offer.offerKey, offerLabel: offer.label, offerDays: days, offerExpiresAt: at + days * DAY_MS };
+/**
+ * The offer a guest of this journey would hold: its first offer step whose blank names an offer
+ * from the menu (PR S: Win-back's stages, the birthday gift — not only a blank called `offer`).
+ */
+function offerVars(definition: JourneyDefinition, slots: Record<string, SlotValue>, offers: Offer[], at: number, preferSlot?: string): Record<string, unknown> {
+  const steps = Object.values(definition.nodes).filter((n) => n.type === 'issue_offer');
+  const all = [...steps.map((n) => ({ slot: String(n.config?.slot ?? ''), days: n.config?.expiryDays })), { slot: 'offer', days: undefined }];
+  const candidates = preferSlot ? [...all.filter((c) => c.slot === preferSlot), ...all.filter((c) => c.slot !== preferSlot)] : all;
+  for (const c of candidates) {
+    const chosen = slots[c.slot];
+    const offer = typeof chosen === 'string' ? offers.find((o) => o.offerKey === chosen) : undefined;
+    if (!offer) continue;
+    const days = typeof c.days === 'number' ? c.days : typeof slots.offer_days === 'number' ? slots.offer_days : offer.expiryDays;
+    return { offerKey: offer.offerKey, offerLabel: offer.label, offerDays: days, offerExpiresAt: at + days * DAY_MS };
+  }
+  return {};
+}
+
+/** PR S: an example occasion for a scan journey's test (the first picked holiday, a slow Tuesday afternoon, …). */
+function sampleOccasion(definition: JourneyDefinition, slots: Record<string, SlotValue>, at: number, offerSlot?: string): Record<string, unknown> {
+  const trigger = definition.entry.trigger;
+  const today = new Date(at).toISOString().slice(0, 10);
+  switch (trigger.type) {
+    case 'days_since_visit': {
+      // The stage of the preview step (`offer_60` → 60).
+      const stage = Number(/^offer_(\d+)$/.exec(offerSlot ?? '')?.[1] ?? 30);
+      return { occasionKind: 'winback', winbackDays: stage };
+    }
+    case 'date_field':
+      return { occasionKind: 'birthday', birthdayMonth: Number(today.slice(5, 7)) };
+    case 'calendar.holiday': {
+      const slot = typeof trigger.config?.slot === 'string' ? trigger.config.slot : 'holidays';
+      const key = parseHolidayKeys(slots[slot])[0] ?? 'christmas_eve';
+      const def = holidayDef(key)!;
+      const year = Number(today.slice(0, 4));
+      const date = def.dateIn(year) >= today ? def.dateIn(year) : def.dateIn(year + 1);
+      return { occasionKind: 'holiday', holidayKey: key, holidayDate: date };
+    }
+    case 'computed.slow_daypart':
+      return { occasionKind: 'slow', slowWeekday: 2, slowDaypart: 'afternoon' };
+    default:
+      return {};
+  }
 }
 
 export async function testSend(tenantUserId: string, venueId: string, body: unknown, actor: Actor) {
@@ -157,9 +197,9 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
   await refreshClock();
   const at = now();
   const guestInfo = await loadGuestInfo(venueId);
-  const vars = offerVars(slots, offers, at);
+  const vars = { ...sampleOccasion(found.definition, slots, at, input.offerSlot), ...offerVars(found.definition, slots, offers, at, input.offerSlot) };
   // The engine's link rules (a test shows what a guest would get): booking, info page, offer.
-  const gates = linkGates(guestInfo, lang, pool, typeof vars.offerKey === 'string');
+  const gates = linkGates(guestInfo, lang, pool, typeof vars.offerKey === 'string', slots.booking_url);
   const bookingUrl = validBookingUrl(gates.bookingRaw);
   const placeholder = placeholderLink(VISITOR_BASE_URL);
   const links: Partial<Record<LinkKind, string>> = {

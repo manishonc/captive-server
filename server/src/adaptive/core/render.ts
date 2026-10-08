@@ -8,6 +8,7 @@
 import { canonicalField, parseMergeExpressions } from './registry';
 import { pickLang, type I18n, type Offer, type SlotValue } from './schemas';
 import type { Lang } from './constants';
+import { sampleOccasionValues } from './scans/occasions';
 
 export type RenderValues = Record<string, string | undefined>;
 
@@ -55,6 +56,8 @@ export interface SampleContext {
   slots: Record<string, SlotValue>;
   offers: Offer[];
   now?: Date;
+  /** PR S: show the offer of this blank (a preview step of Win-back's stages). */
+  offerSlot?: string;
 }
 
 const SAMPLE_LINKS: RenderValues = {
@@ -88,12 +91,19 @@ export function sampleValues(ctx: SampleContext): RenderValues {
     'guestinfo.secret.keyInstructions': 'The key box is next to the door.',
   };
 
+  // PR S: the scan journeys' occasion (a holiday, a slow time) for the example guest.
+  Object.assign(values, sampleOccasionValues(ctx.lang));
+
   for (const [key, value] of Object.entries(ctx.slots)) {
     values[`slot.${key}`] = slotToText(value, ctx.lang, ctx.offers);
   }
 
-  // The offer a journey gives comes from its offer blank.
-  const offerKey = Object.values(ctx.slots).find((v) => typeof v === 'string' && ctx.offers.some((o) => o.offerKey === v));
+  // The offer a journey gives comes from its offer blank (PR S: a step may name which one).
+  const named = ctx.offerSlot ? ctx.slots[ctx.offerSlot] : undefined;
+  const offerKey =
+    typeof named === 'string' && ctx.offers.some((o) => o.offerKey === named)
+      ? named
+      : Object.values(ctx.slots).find((v) => typeof v === 'string' && ctx.offers.some((o) => o.offerKey === v));
   const offer = ctx.offers.find((o) => o.offerKey === offerKey) ?? ctx.offers[0];
   const days = Number(ctx.slots.offer_days ?? offer?.expiryDays ?? 14);
   if (offer) {

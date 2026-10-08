@@ -109,7 +109,10 @@ export function withSmsSteps(
       const touches = j.avgTouchesPerGuest;
       const next = firstOf(j.ladder, j.ladder.indexOf('sms') + 1);
       const nextPrice = next === 'email' ? prices.email : prices.sms * parts;
-      const asSent = prices.sms * parts * Math.min(1, touches) + Math.max(0, touches - 1) * nextPrice;
+      // PR S: each run (a Holidays reminder per picked day) starts with its own SMS.
+      const runs = Math.max(1, j.runs ?? 1);
+      const perRun = touches / runs;
+      const asSent = runs * (prices.sms * parts * Math.min(1, perRun) + Math.max(0, perRun - 1) * nextPrice);
       const d = v.optedIn30d * phoneShare * (asSent - touches * prices.sms);
       delta += d;
       deltaByJourney.set(j.journeyKey, (deltaByJourney.get(j.journeyKey) ?? 0) + d);

@@ -245,6 +245,28 @@ const CASES: Array<{ e: TimelineEventInput; sends?: Record<string, TimelineSendI
     en: 'Journey “Stay guide” didn\'t run: the guest had checked out before you started sending.',
     de: 'Journey „Aufenthaltsguide“ lief nicht: der Gast war ausgecheckt, bevor du den Versand gestartet hast.',
   },
+  // PR S: a scan journey's occasion, and the birthday month a guest told us.
+  {
+    e: ev('scan.due', { journeyKey: 'welcome', trigger: 'days_since_visit', occasion: 'winback:30:1', winbackDays: 30 }, J),
+    en: 'Journey “Welcome”: the last visit was 30 days ago.',
+    de: 'Journey „Willkommen“: der letzte Besuch war vor 30 Tagen.',
+  },
+  {
+    e: ev('scan.due', { journeyKey: 'welcome', trigger: 'calendar.holiday', occasion: 'holiday:christmas_eve:2026', holidayKey: 'christmas_eve', holidayDate: '2026-12-24' }, J),
+    en: 'Journey “Welcome”: Christmas Eve is on Thursday 24 December.',
+    de: 'Journey „Willkommen“: Heiligabend am Donnerstag, 24. Dezember.',
+  },
+  {
+    e: ev('scan.due', { journeyKey: 'welcome', trigger: 'computed.slow_daypart', occasion: 'slow:2026-W42', slowWeekday: 2, slowDaypart: 'afternoon', slowDate: '2026-10-13' }, J),
+    en: 'Journey “Welcome”: an invite for Tuesday 13 October (afternoon), a slow time.',
+    de: 'Journey „Willkommen“: eine Einladung für Dienstag, 13. Oktober (Nachmittag), eine ruhige Zeit.',
+  },
+  {
+    e: ev('scan.due', { journeyKey: 'welcome', trigger: 'date_field', occasion: 'birthday:2026', birthdayMonth: 3 }, J),
+    en: "Journey “Welcome”: the guest's birthday month.",
+    de: 'Journey „Willkommen“: der Geburtstagsmonat des Gastes.',
+  },
+  { e: ev('profile.birthday_month', { month: 3, via: 'offer' }), en: 'The guest told us their birthday month (March).', de: 'Der Gast hat den Geburtstagsmonat angegeben (März).' },
 ];
 
 test('every event type the engine writes has its own sentence, in English and German', () => {
@@ -648,7 +670,7 @@ test('offer.issued: German label in the German timeline; English unchanged; anot
 test('the module is pure: its only runtime imports are the decision sentences, time helpers and the bandit block reader', () => {
   const src = readFileSync(join(__dirname, '../src/adaptive/core/owner/timeline.ts'), 'utf8');
   const runtime = [...src.matchAll(/^import\s+(?!type\b)[^;]*?from\s+'([^']+)'/gm)].map((m) => m[1]);
-  assertEqual(runtime.sort(), ['../runtime/bandit', '../runtime/decision', '../runtime/time'], 'runtime imports');
+  assertEqual(runtime.sort(), ['../runtime/bandit', '../runtime/decision', '../runtime/time', '../scans/occasions'], 'runtime imports');
   const cache = typeof require !== 'undefined' ? Object.keys(require.cache ?? {}) : [];
   assert(!cache.some((k) => /[\\/]src[\\/]firebase\.ts$/.test(k)), 'firebase.ts was not loaded');
 });

@@ -6,6 +6,9 @@
  * and only through the admin screens, which clear it. Admin reads skip it.
  */
 
+import { localDateKey } from '../core/runtime/time';
+import { scanJourneyRunnable } from '../core/scans/occasions';
+import { HOLIDAYS_CH } from '../core/scans/holidays';
 import {
   getAdaptiveConfig,
   listPlatformVariants,
@@ -142,6 +145,8 @@ export interface OwnerSlotView {
   required: boolean;
   default: SlotValue;
   options?: Array<{ value: string; label: I18n; name: string; kind: Offer['kind'] }>;
+  /** PR S: a `holidays` blank — the days the owner can tick (value: their keys, comma-separated). */
+  holidays?: Array<{ key: string; name: I18n; nextDate: string }>;
 }
 
 export interface OwnerJourneyView {
@@ -184,6 +189,8 @@ export function ownerPlaybookView(key: string, versionNumber: number, content: P
     const found = templateVersion(cat, j.journeyKey, j.templateVersion);
     if (!found) continue;
     const { record, definition } = found;
+    // PR S: a pinned v1 of a restaurant scan journey (a placeholder) never runs: coming soon.
+    const comingSoon = record.header.availability === 'coming_soon' || !scanJourneyRunnable(j.journeyKey, j.templateVersion);
     const slots: OwnerSlotView[] = Object.entries(definition.slots).map(([slotKey, def]) => {
       const view: OwnerSlotView = {
         key: slotKey,
@@ -196,6 +203,16 @@ export function ownerPlaybookView(key: string, versionNumber: number, content: P
       if (def.type === 'text') Object.assign(view, { maxLength: def.maxLength, i18n: def.i18n, ...(def.placeholder ? { placeholder: def.placeholder } : {}) });
       if (def.type === 'int' || def.type === 'days') Object.assign(view, { min: def.min, max: def.max, ...('unit' in def && def.unit ? { unit: def.unit } : {}) });
       if (def.type === 'url' && def.placeholder) view.placeholder = def.placeholder;
+      if (def.type === 'holidays') {
+        // PR S: the days to pick from, with this year's (or next year's) date for each.
+        // Today in Switzerland (every venue's calendar is Swiss for now).
+        const today = localDateKey(new Date(), 'Europe/Zurich');
+        const year = Number(today.slice(0, 4));
+        view.holidays = HOLIDAYS_CH.map((h) => {
+          const date = h.dateIn(year) >= today ? h.dateIn(year) : h.dateIn(year + 1);
+          return { key: h.key, name: h.name, nextDate: date };
+        });
+      }
       if (def.type === 'offer') {
         view.options = content.offerMenuDefaults
           .filter((o) => !def.kinds || def.kinds.includes(o.kind))
@@ -212,8 +229,8 @@ export function ownerPlaybookView(key: string, versionNumber: number, content: P
       when: record.header.display.when,
       channels: definition.channelLadder,
       purpose: record.header.purpose,
-      comingSoon: record.header.availability === 'coming_soon',
-      defaultEnabled: j.defaultEnabled && record.header.availability !== 'coming_soon',
+      comingSoon,
+      defaultEnabled: j.defaultEnabled && !comingSoon,
       required: j.required,
       priority: j.priority,
       slots,

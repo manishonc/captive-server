@@ -10,7 +10,9 @@
  *       mode), mark the journey on ContactVenues, queue the first step.
  *
  * Only guests who connect after the venue was switched on start journeys — the
- * owner was promised "past guests aren't messaged out of the blue".
+ * owner was promised "past guests aren't messaged out of the blue". The scan journeys
+ * (PR S) keep it too: a scan only picks guests whose visit came after the start
+ * (scans/trigger.ts).
  */
 
 import { FieldPath } from 'firebase-admin/firestore';
@@ -78,6 +80,8 @@ export async function enrolForEvent(args: {
   stayId?: string | null;
   /** More facts for `entry.when` (a stay moment adds `stay.*`). */
   facts?: Record<string, unknown>;
+  /** PR S: what the journey knows about its occasion from the start (`instance.vars`). */
+  vars?: Record<string, unknown>;
 }): Promise<string[]> {
   const { ctx, who, event } = args;
   const created: string[] = [];
@@ -108,6 +112,7 @@ async function enrolOne(args: {
   visit: VisitFacts | null;
   now: number;
   stayId?: string | null;
+  vars?: Record<string, unknown>;
   journey: JourneyRef;
 }): Promise<string | null> {
   const { ctx, who, event, journey: j, now } = args;
@@ -157,6 +162,7 @@ async function enrolOne(args: {
       },
     };
     const state = freshState(j.definition.start, now);
+    if (args.vars) state.vars = { ...args.vars };
     // The first step runs through the same token check as every timer.
     state.waiting = { kind: 'timer', nodeId: '__start', token: 'start', untilAt: now };
 

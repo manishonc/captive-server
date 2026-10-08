@@ -52,6 +52,10 @@ const FIELDS = new Set([
   'guestinfo.hostContactUrl',
   'guestinfo.openingHours',
   'guestinfo.menuUrl',
+  // PR S: the scan journeys' occasion (core/scans/occasions.ts).
+  'holiday.name',
+  'holiday.day',
+  'slow.when',
 ]);
 
 const SECRET_PREFIX = 'guestinfo.secret.';
