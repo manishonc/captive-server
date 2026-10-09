@@ -66,7 +66,7 @@ const VALID_KEYS = new Set([
   'languages.autoDetect', 'languages.translations',
 ]);
 
-const BUILT_IN_LOGIN_FIELDS = ['firstName', 'lastName', 'email', 'phone'];
+const BUILT_IN_LOGIN_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'birthdayMonth'];
 const VERIFICATION_CHANNELS = ['email', 'sms', 'whatsapp'];
 
 console.log('\nstructure');

@@ -5,6 +5,13 @@ function isUnifi() { return !!param('ap'); }
 function clientMac() { return param('mac') || param('id'); }
 function apMac() { return param('apmac') || param('ap'); }
 
+// The Birthday month pick as a number 1–12, or null when the field is off or skipped.
+function birthdayMonthValue() {
+  var el = document.getElementById('birthdayMonth');
+  var n = el ? parseInt(el.value, 10) : NaN;
+  return n >= 1 && n <= 12 ? n : null;
+}
+
 // ── 3. Step 1 → Step 2 transition ─────────────────────────────────────────
 // Resolved per call, not cached in an object literal: the guest can switch
 // language after a failed submit, and a cached English message would survive it.
@@ -16,12 +23,15 @@ function goToConsent() {
   var lp  = normalizeLoginPage(CONFIG);
   var err = document.getElementById('step1Error');
 
-  var ids = ['firstName', 'lastName', 'email', 'phone'];
+  var ids = ['firstName', 'lastName', 'email', 'phone', 'birthdayMonth'];
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i];
     var f = lp.fields[id];
     if (!f.enabled || !f.required) continue;
-    var value = document.getElementById(id).value.trim();
+    // birthdayMonth exists only while switched on (config.js builds it).
+    var el = document.getElementById(id);
+    if (!el) continue;
+    var value = el.value.trim();
     var invalid = (id === 'email') ? (!value || !value.includes('@')) : !value;
     if (invalid) { showErr(err, fieldErrorMsg(id)); return; }
   }
@@ -164,6 +174,7 @@ async function submitConsent(marketing) {
     phone:     document.getElementById('phone').value.trim(),
     dialCode:  document.getElementById('selectedCode').textContent,
     splashResponses: collectSplashResponses(),
+    birthdayMonth: birthdayMonthValue(),
     privacyPolicyConsent: privacyPolicyConsent,
     termsConsent: termsConsent,
     marketingConsent: marketingConsent,
@@ -652,6 +663,7 @@ async function completeSubmission(verificationToken) {
   var phone     = p.phone;
   var dialCode  = p.dialCode;
   var splashResponses = p.splashResponses;
+  var birthdayMonth = p.birthdayMonth;
   var privacyPolicyConsent = p.privacyPolicyConsent;
   var termsConsent = p.termsConsent;
   var marketingConsent = p.marketingConsent;
@@ -672,6 +684,7 @@ async function completeSubmission(verificationToken) {
         termsConsent,
         marketingConsent,
         splashResponses,
+        birthdayMonth,
         verificationToken,
         // Persisted on the guest record and reused for every later email/SMS/
         // WhatsApp we send them — see services/guestLanguage.ts.
@@ -695,6 +708,7 @@ async function completeSubmission(verificationToken) {
           termsConsent,
           marketingConsent,
           splashResponses,
+          birthdayMonth,
           verificationToken,
           language: ACTIVE_LANG,
         }),

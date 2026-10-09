@@ -28,6 +28,8 @@ export interface CreateUserRequestBody {
    *  the venue offers one language or the guest never picked — see
    *  services/guestLanguage.ts for why absent is meaningful. */
   language?: string;
+  /** The built-in Birthday month field (1–12) — validated server-side (parseBirthdayMonth). */
+  birthdayMonth?: unknown;
 }
 
 export interface MarketingSmsMessage {
@@ -155,6 +157,8 @@ export interface LoginPageConfig {
     lastName: SplashFieldConfig;
     email: SplashFieldConfig;
     phone: SplashFieldConfig;
+    /** A month picker the portal adds itself (no template carries it); off by default. */
+    birthdayMonth: SplashFieldConfig;
   };
   /** #btnNext label. */
   buttonText: string;
@@ -259,6 +263,9 @@ export interface CaptivePortalUserDocument {
    *  the venue offers one language or the guest never picked — see
    *  services/guestLanguage.ts for why absent is meaningful. */
   language?: string;
+  /** Birthday month (1–12) from the splash's built-in Birthday month field. Absent
+   *  when never asked or skipped; a later answer replaces it. */
+  birthdayMonth?: number;
 }
 
 export interface CaptivePortalSessionDocument {
@@ -301,4 +308,6 @@ export interface UnifiAuthorizeRequestBody {
    *  the venue offers one language or the guest never picked — see
    *  services/guestLanguage.ts for why absent is meaningful. */
   language?: string;
+  /** The built-in Birthday month field (1–12) — validated server-side (parseBirthdayMonth). */
+  birthdayMonth?: unknown;
 }

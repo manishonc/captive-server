@@ -172,6 +172,8 @@ export interface ConnectFixture {
   language?: string | null;
   guestId?: string;
   legacy?: Record<string, unknown>;
+  /** The splash's Birthday month answer on this connect (saved on the guest doc too, like /create-user). */
+  birthdayMonth?: number | null;
 }
 
 /** What /create-user does, minus the parts Adaptive doesn't read: save a guest doc, then call the real hook. */
@@ -191,6 +193,7 @@ export async function connect(c: ConnectFixture): Promise<string> {
       ...(phoneE164 ? { phoneE164 } : {}),
       ...(c.phoneVerified ? { phoneVerified: true } : {}),
       ...(c.language ? { language: c.language } : {}),
+      ...(c.birthdayMonth ? { birthdayMonth: c.birthdayMonth } : {}),
       ...(c.legacy ?? {}),
       createdAt: new Date(),
     },
@@ -212,6 +215,7 @@ export async function connect(c: ConnectFixture): Promise<string> {
     phoneE164,
     emailVerified: false,
     phoneVerified: Boolean(c.phoneVerified),
+    birthdayMonth: c.birthdayMonth ?? null,
   });
   return ref.id;
 }

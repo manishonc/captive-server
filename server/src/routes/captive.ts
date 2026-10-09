@@ -10,6 +10,7 @@ import { authorizeGuest as unifiAuthorizeGuest, effectiveControllerUrl } from '.
 import { getVenueName } from '../services/venue';
 import { recordDeviceIdentity } from '../services/deviceRegistry';
 import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
+import { parseBirthdayMonth } from '../services/birthdayMonth';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
@@ -161,6 +162,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   // build). Left off the document entirely in that case rather than defaulted,
   // so audience filters can tell "chose English" from "we do not know".
   const guestLanguage = normalizeLanguage(req.body.language);
+  const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
 
   let wifiGuestId: string;
 
@@ -185,6 +187,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
       ...(guestLanguage ? { language: guestLanguage } : {}),
+      ...(birthdayMonth ? { birthdayMonth } : {}),
       ...verificationFields(gate),
     };
 
@@ -207,6 +210,8 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       // French is telling us they now want French. Absent stays absent — a
       // portal that sends nothing must not erase an earlier choice.
       ...(guestLanguage ? { language: guestLanguage } : {}),
+      // Same rule for the birthday month: a new answer replaces, a skip keeps.
+      ...(birthdayMonth ? { birthdayMonth } : {}),
       ...verificationFields(gate),
     };
     for (const [id, response] of Object.entries(splashFormResponses)) {
@@ -260,6 +265,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       apVendor,
       consentGiven: marketingOptIn,
       language: guestLanguage,
+      birthdayMonth,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,
@@ -914,6 +920,8 @@ const LOGIN_PAGE_DEFAULTS: LoginPageConfig = {
     email:     { enabled: true, label: '', required: true },
     // Matches pre-config behavior: phone is always shown but never validated.
     phone:     { enabled: true, label: '', required: false },
+    // Off until the owner switches it on; the portal builds the month picker itself.
+    birthdayMonth: { enabled: false, label: '', required: false },
   },
   buttonText: 'Continue',
   customFields: [],
@@ -969,6 +977,7 @@ function mergeLoginPage(docData: Record<string, any>): LoginPageConfig {
         lastName:  { ...LOGIN_PAGE_DEFAULTS.fields.lastName,  enabled: collectName, required: collectName },
         email:     { ...LOGIN_PAGE_DEFAULTS.fields.email,     enabled: collectEmail, required: collectEmail },
         phone:     { ...LOGIN_PAGE_DEFAULTS.fields.phone },
+        birthdayMonth: { ...LOGIN_PAGE_DEFAULTS.fields.birthdayMonth },
       },
     };
   }
@@ -1412,6 +1421,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   const marketingOptIn = marketingConsent?.given ?? false;
   const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
   const guestLanguage = normalizeLanguage(req.body.language);
+  const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
   let wifiGuestId: string;
 
   if (!existingWifiGuestId) {
@@ -1435,6 +1445,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       marketingConsent: marketingConsent || defaultConsent(),
       ...(Object.keys(splashFormResponses).length ? { splashFormResponses } : {}),
       ...(guestLanguage ? { language: guestLanguage } : {}),
+      ...(birthdayMonth ? { birthdayMonth } : {}),
       ...verificationFields(gate),
     };
 
@@ -1453,6 +1464,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
     const reconnectUpdates: Record<string, unknown> = {
       connectionCount: FieldValue.increment(1),
       ...(guestLanguage ? { language: guestLanguage } : {}),
+      ...(birthdayMonth ? { birthdayMonth } : {}),
       ...verificationFields(gate),
     };
     for (const [id, response] of Object.entries(splashFormResponses)) {
@@ -1504,6 +1516,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       apVendor: 'unifi',
       consentGiven: marketingOptIn,
       language: guestLanguage,
+      birthdayMonth,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,

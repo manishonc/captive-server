@@ -40,6 +40,8 @@
       'field.lastName.placeholder': 'Smith',
       'field.email.placeholder': 'jane@example.com',
       'field.phone.placeholder': '7911 123456',
+      'field.birthdayMonth.label': 'Birthday month',
+      'field.birthdayMonth.placeholder': 'Select a month',
       'consent.heading': 'We care about your privacy',
       'consent.subheading': 'Stay in touch with us and find out more about the best offers',
       // LEGAL COPY — see the note above the `de` block before touching these.
@@ -62,6 +64,7 @@
       'error.lastName': 'Please enter your last name.',
       'error.email': 'Please enter a valid email address.',
       'error.phone': 'Please enter a valid phone number.',
+      'error.birthdayMonth': 'Please choose your birthday month.',
       'error.fillIn': 'Please fill in: {0}',
       'error.generic': 'Something went wrong. Please try again.',
 
@@ -156,6 +159,8 @@
       'field.lastName.placeholder': 'Müller',
       'field.email.placeholder': 'anna@beispiel.ch',
       'field.phone.placeholder': '79 123 45 67',
+      'field.birthdayMonth.label': 'Geburtsmonat',
+      'field.birthdayMonth.placeholder': 'Monat wählen',
       'consent.heading': 'Ihre Privatsphäre ist uns wichtig',
       'consent.subheading': 'Bleiben Sie mit uns in Kontakt und erfahren Sie mehr über die besten Angebote',
       'consent.bodyParagraph.0': 'Ich willige ein, dass dieser Betrieb meine bei der WLAN-Portal-Registrierung angegebenen personenbezogenen Daten zu Marketingzwecken erhebt und verwendet. Mir ist bekannt, dass ich meine Einwilligung jederzeit widerrufen kann und dass die Rechtmässigkeit der bis zum Widerruf erfolgten Verarbeitung davon unberührt bleibt.',
@@ -176,6 +181,7 @@
       'error.lastName': 'Bitte geben Sie Ihren Nachnamen ein.',
       'error.email': 'Bitte geben Sie eine gültige E-Mail-Adresse ein.',
       'error.phone': 'Bitte geben Sie eine gültige Telefonnummer ein.',
+      'error.birthdayMonth': 'Bitte wählen Sie Ihren Geburtsmonat.',
       'error.fillIn': 'Bitte ausfüllen: {0}',
       'error.generic': 'Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut.',
 
@@ -251,6 +257,8 @@
       'field.lastName.placeholder': 'Rossi',
       'field.email.placeholder': 'giulia@esempio.ch',
       'field.phone.placeholder': '79 123 45 67',
+      'field.birthdayMonth.label': 'Mese di nascita',
+      'field.birthdayMonth.placeholder': 'Scegli il mese',
       'consent.heading': 'Teniamo alla tua privacy',
       'consent.subheading': 'Resta in contatto con noi e scopri le offerte migliori',
       'consent.bodyParagraph.0': 'Acconsento alla raccolta e all’utilizzo dei miei dati personali, forniti tramite la registrazione al portale WiFi, da parte di questa struttura per finalità di marketing. Sono consapevole di poter revocare il consenso in qualsiasi momento e che ciò non pregiudica la liceità del trattamento effettuato prima della revoca.',
@@ -271,6 +279,7 @@
       'error.lastName': 'Inserisci il tuo cognome.',
       'error.email': 'Inserisci un indirizzo email valido.',
       'error.phone': 'Inserisci un numero di telefono valido.',
+      'error.birthdayMonth': 'Scegli il tuo mese di nascita.',
       'error.fillIn': 'Compila: {0}',
       'error.generic': 'Qualcosa è andato storto. Riprova.',
 
@@ -346,6 +355,8 @@
       'field.lastName.placeholder': 'Dupont',
       'field.email.placeholder': 'marie@exemple.ch',
       'field.phone.placeholder': '79 123 45 67',
+      'field.birthdayMonth.label': 'Mois de naissance',
+      'field.birthdayMonth.placeholder': 'Choisir le mois',
       'consent.heading': 'Nous respectons votre vie privée',
       'consent.subheading': 'Restez en contact avec nous et découvrez nos meilleures offres',
       'consent.bodyParagraph.0': 'Je consens à la collecte et à l’utilisation de mes données personnelles, fournies lors de l’inscription au portail WiFi, par cet établissement à des fins de marketing. Je comprends que je peux retirer mon consentement à tout moment et que cela n’affecte pas la licéité du traitement effectué avant mon retrait.',
@@ -366,6 +377,7 @@
       'error.lastName': 'Veuillez saisir votre nom.',
       'error.email': 'Veuillez saisir une adresse e-mail valide.',
       'error.phone': 'Veuillez saisir un numéro de téléphone valide.',
+      'error.birthdayMonth': 'Veuillez choisir votre mois de naissance.',
       'error.fillIn': 'Veuillez remplir : {0}',
       'error.generic': 'Une erreur est survenue. Veuillez réessayer.',
 
