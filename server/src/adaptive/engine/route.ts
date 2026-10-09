@@ -47,6 +47,13 @@ interface GuestPayload {
   phoneE164?: string | null;
   emailVerified?: boolean;
   phoneVerified?: boolean;
+  /** The splash's Birthday month answer of this connect (1–12). */
+  birthdayMonth?: number | null;
+}
+
+/** A whole month 1–12, else null. */
+function monthOf(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 12 ? v : null;
 }
 
 export async function routeEvent(payload: { eventId: string; guest?: GuestPayload }, env: RouteEnv): Promise<void> {
@@ -179,6 +186,8 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     phoneE164 ? legacyPhoneStops(phoneE164) : { sms: false, whatsapp: false },
     email ? legacyEmailUnsubscribed([guest.email, g.email], email, venueId) : false,
   ]);
+  const freshMonth = monthOf(guest.birthdayMonth);
+  const savedMonth = monthOf(g.birthdayMonth);
   const resolved = await resolveContact({
     tenantUserId: ctx.tenantUserId,
     venueId,
@@ -194,6 +203,11 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     // and a reconnect can change the number under it. A contact keeps a flag it
     // earned earlier for the same number (resolve.ts).
     phoneVerified: Boolean(guest.phoneVerified),
+    // This connect's answer replaces the profile's month; one saved on the guest doc earlier
+    // (e.g. before the venue turned Adaptive on) only fills a profile that has none.
+    birthdayMonth: freshMonth !== null
+      ? { month: freshMonth, fresh: true }
+      : savedMonth !== null ? { month: savedMonth, fresh: false } : null,
     legacy: {
       smsStop: stops.sms || g.smsOptOut === true,
       whatsappStop: stops.whatsapp || g.whatsappOptOut === true,

@@ -100,10 +100,10 @@ export const SPLASH_INTERVIEW: InterviewStep[] = [
       },
       {
         key: 'loginPage.fields',
-        ask: 'Which details should guests give you — first name, last name, email, phone? And which of those are mandatory?',
+        ask: 'Which details should guests give you — first name, last name, email, phone, birthday month? And which of those are mandatory?',
         type: 'fields',
-        options: ['firstName', 'lastName', 'email', 'phone'],
-        note: 'These four are the only built-in fields. Email is what marketing campaigns need most; phone is shown but optional by default. Anything else has to be a custom field.',
+        options: ['firstName', 'lastName', 'email', 'phone', 'birthdayMonth'],
+        note: 'These five are the only built-in fields. Email is what marketing campaigns need most; phone is shown but optional by default. birthdayMonth is off by default: a Jan–Dec picker whose answer feeds the Adaptive Birthday journey — ask for it with fields.birthdayMonth, never as a custom text field. Anything else has to be a custom field.',
       },
       {
         key: 'loginPage.buttonText',

@@ -43,6 +43,12 @@ export interface ResolveInput {
   occurredAt: number;
   sourceEventId: string;
   consentTextHash?: string | null;
+  /**
+   * The splash's Birthday month (1–12). `fresh`: answered on this connect — it replaces the
+   * profile's month. Not fresh (an earlier answer kept on the guest doc): only fills a
+   * profile that has none, so it never overrides a later answer.
+   */
+  birthdayMonth?: { month: number; fresh: boolean } | null;
 }
 
 export interface ResolveResult {
@@ -257,6 +263,9 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
           lastClickChannel: null,
         },
         replyNoticeSentAt: null,
+        ...(input.birthdayMonth
+          ? { profile: { birthdayMonth: input.birthdayMonth.month, birthdayMonthAt: now, birthdayMonthVia: 'splash' } }
+          : {}),
         createdAt: new Date(),
         updatedAt: new Date(),
         schemaVersion: SCHEMA_VERSION,
@@ -285,6 +294,15 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
       if (input.lang) {
         set('lang', input.lang);
         set('langSource', 'splash');
+      }
+      const bm = input.birthdayMonth;
+      const savedMonth = contact!.profile?.birthdayMonth;
+      if (bm && (bm.fresh ? savedMonth !== bm.month : typeof savedMonth !== 'number')) {
+        pairs.push(
+          [new FieldPath('profile', 'birthdayMonth'), bm.month],
+          [new FieldPath('profile', 'birthdayMonthAt'), now],
+          [new FieldPath('profile', 'birthdayMonthVia'), 'splash'],
+        );
       }
       if (addGuest) set('guestIds', FieldValue.arrayUnion(input.guestId));
       for (const [ch, entry] of Object.entries(projectionUpdates)) {

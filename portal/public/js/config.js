@@ -36,6 +36,8 @@ var LOGIN_DEFAULTS_EN = {
     email:     { enabled: true, label: '', required: true },
     // Matches pre-config behavior: phone always shown, never validated.
     phone:     { enabled: true, label: '', required: false },
+    // No template carries it — applyBirthdayMonthField builds the month picker.
+    birthdayMonth: { enabled: false, label: '', required: false },
   },
   buttonText: 'Continue',
   customFields: [],
@@ -426,6 +428,7 @@ function normalizeLoginPage(cfg) {
         lastName:  { enabled: collectName,  label: '', required: collectName },
         email:     { enabled: collectEmail, label: '', required: collectEmail },
         phone:     { enabled: true, label: '', required: false },
+        birthdayMonth: { enabled: false, label: '', required: false },
       },
       buttonText: LOGIN_DEFAULTS.buttonText,
       customFields: [],
@@ -525,8 +528,92 @@ function applyPortalConfig(cfg) {
 // Show/hide/relabel the built-in splash fields, set the Continue button text,
 // and rebuild the configured custom fields. Idempotent — live preview re-runs
 // it on every config push, so everything toggles in BOTH directions.
+// The built-in Birthday month field. Unlike the other built-in fields no template
+// carries it, so it is built here — a <select> of the 12 months in the guest's
+// language, placed before #step1Error (present in every template) — and removed
+// when switched off. Rebuilt on every apply (language switches re-run this), keeping
+// the guest's pick. Templates style only text/email/tel inputs, so the select copies
+// the look of the page's own email (or name) input.
+var BIRTHDAY_MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+function monthNames(lang) {
+  try {
+    var fmt = new Intl.DateTimeFormat(lang, { month: 'long', timeZone: 'UTC' });
+    return BIRTHDAY_MONTHS_EN.map(function (_, i) {
+      var name = fmt.format(new Date(Date.UTC(2020, i, 15)));
+      return name.charAt(0).toUpperCase() + name.slice(1);
+    });
+  } catch (e) {
+    return BIRTHDAY_MONTHS_EN;
+  }
+}
+
+function copyInputLook(select) {
+  var ref = document.querySelector('#step1 input[type="email"]')
+    || document.querySelector('#step1 input[type="text"]');
+  if (!ref || !window.getComputedStyle) return;
+  var cs = window.getComputedStyle(ref);
+  ['fontFamily', 'fontSize', 'fontWeight', 'color', 'backgroundColor',
+    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    'borderTopStyle', 'borderRightStyle', 'borderBottomStyle', 'borderLeftStyle',
+    'borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor',
+    'borderRadius', 'paddingTop', 'paddingBottom', 'paddingLeft'].forEach(function (k) {
+    if (cs[k]) select.style[k] = cs[k];
+  });
+  // Room for the arrow drawn below (appearance:none removes the native one).
+  select.style.paddingRight = '36px';
+  select.style.backgroundImage = 'url("data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">'
+    + '<path d="M1 1l5 5 5-5" fill="none" stroke="' + (cs.color || '#555') + '" stroke-width="1.6"/></svg>') + '")';
+  select.style.backgroundRepeat = 'no-repeat';
+  select.style.backgroundPosition = 'right 14px center';
+}
+
+function applyBirthdayMonthField(field) {
+  var existing = document.getElementById('birthdayMonth');
+  var kept = existing ? existing.value : '';
+  var oldGroup = existing && existing.closest('.field-group');
+  if (oldGroup) oldGroup.parentNode.removeChild(oldGroup);
+  if (!field || !field.enabled) return;
+  var errEl = document.getElementById('step1Error');
+  if (!errEl) return;
+
+  var sampleGroup = document.querySelector('#step1 .field-group') || document.querySelector('.field-group');
+  var group = document.createElement('div');
+  group.className = sampleGroup ? sampleGroup.className : 'field-group';
+  var label = document.createElement('label');
+  label.className = 'field-label';
+  label.setAttribute('for', 'birthdayMonth');
+  // English markup, like the templates' own labels; applyLoginPage localises it.
+  label.textContent = 'Birthday month';
+  var select = document.createElement('select');
+  select.id = 'birthdayMonth';
+  select.name = 'birthdayMonth';
+  select.style.width = '100%';
+  select.style.boxSizing = 'border-box';
+  select.style.webkitAppearance = 'none';
+  select.style.appearance = 'none';
+  var first = document.createElement('option');
+  first.value = '';
+  first.textContent = field.placeholder || t('field.birthdayMonth.placeholder');
+  select.appendChild(first);
+  monthNames(ACTIVE_LANG).forEach(function (name, i) {
+    var opt = document.createElement('option');
+    opt.value = String(i + 1);
+    opt.textContent = name;
+    select.appendChild(opt);
+  });
+  if (kept) select.value = kept;
+  copyInputLook(select);
+  group.appendChild(label);
+  group.appendChild(select);
+  errEl.parentNode.insertBefore(group, errEl);
+}
+
 function applyLoginPage(cfg) {
   var lp = normalizeLoginPage(cfg);
+  applyBirthdayMonthField(lp.fields.birthdayMonth);
 
   Object.keys(lp.fields).forEach(function (id) {
     var f = lp.fields[id];
