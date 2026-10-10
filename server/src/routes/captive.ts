@@ -11,6 +11,9 @@ import { getVenueName } from '../services/venue';
 import { recordDeviceIdentity } from '../services/deviceRegistry';
 import { normalizeLanguage, resolveVariant } from '../services/guestLanguage';
 import { parseBirthdayMonth } from '../services/birthdayMonth';
+import { normalizeE164, normalizeEmail } from '../services/phone';
+import { checkFriendCode, knownAtVenue, referralOpenAt } from '../adaptive/referrals/store';
+import { pickLang } from '../adaptive/core/schemas';
 import { injectOpenPixel } from '../services/openPixel';
 import { interpolate } from '../services/mergeTags';
 import { buildUnsubscribeUrl } from '../services/unsubscribe';
@@ -76,6 +79,28 @@ async function buildSplashFormResponses(
   } catch (err) {
     console.error('[SPLASH RESPONSES ERROR]', err);
     return {};
+  }
+}
+
+/**
+ * PR A7: the friend's offer for a code typed on the splash, for the splash to say ("10% off today",
+ * or the offer's own words, in the guest's language); null if the code doesn't work here.
+ */
+async function friendOfferFor(
+  venueId: string,
+  code: string,
+  lang: string | null,
+  who: { tenantUserId: string | null; email: string | null; phoneE164: string | null },
+): Promise<{ label: string; kind: string; value: number } | null> {
+  try {
+    const r = await checkFriendCode(venueId, code, Date.now());
+    if (!r.ok || !r.friendOffer) return null;
+    // Someone who has been here before (any access point, email or number) gets no friend's offer.
+    if (await knownAtVenue({ venueId, ...who })) return null;
+    return { label: pickLang(r.friendOffer.label, (lang ?? 'en') as Parameters<typeof pickLang>[1]), kind: r.friendOffer.kind, value: r.friendOffer.value };
+  } catch (err) {
+    console.error('[FRIEND CODE CHECK ERROR]', err);
+    return null;
   }
 }
 
@@ -163,6 +188,17 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   // so audience filters can tell "chose English" from "we do not know".
   const guestLanguage = normalizeLanguage(req.body.language);
   const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
+  const friendCode = typeof req.body.friendCode === 'string' && req.body.friendCode.trim() ? req.body.friendCode.trim().slice(0, 40) : null;
+  // PR A7: a friend's code shows its offer only to someone new here (the worker decides whether it
+  // counts, once it knows the guest); a failed check just shows nothing.
+  const friendOffer =
+    friendCode && venueId && !existingWifiGuestId
+      ? await friendOfferFor(venueId, friendCode, guestLanguage, {
+          tenantUserId: apTenantUserId,
+          email: email ? normalizeEmail(email) || null : null,
+          phoneE164: gate.phoneE164 ?? (normalizeE164(phoneCountryCode || '', phone || '') || null),
+        })
+      : null;
 
   let wifiGuestId: string;
 
@@ -266,6 +302,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       consentGiven: marketingOptIn,
       language: guestLanguage,
       birthdayMonth,
+      friendCode,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,
@@ -294,7 +331,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
     ).catch((err) => console.error('[CAMPAIGN AUTOMATION ERROR]', err));
   }
 
-  res.json({ success: true, id: wifiGuestId });
+  res.json({ success: true, id: wifiGuestId, ...(friendOffer ? { friendOffer } : {}) });
 });
 
 async function scheduleSmsForEvent(
@@ -1127,9 +1164,12 @@ async function loadSavedSplashConfig(apmac: string): Promise<Record<string, unkn
   const configId = `venue_${ap.venueId}`;
 
   const configDoc = await db.collection('CaptivePortal_SplashScreenConfig').doc(configId).get();
-  if (!configDoc.exists) return { success: true, config: SPLASH_DEFAULTS };
+  // PR A7: the "Code from a friend" field shows while the venue runs Bring a friend.
+  const referral = { enabled: ap.venueId ? await referralOpenAt(ap.venueId) : false };
+  if (!configDoc.exists) return { success: true, config: { ...SPLASH_DEFAULTS, referral } };
 
   const config = buildEffectiveConfig(configDoc.data() || {});
+  config.referral = referral;
   // The portal validates verification tokens locally on the Aruba /submit path
   // (no backend round trip on the critical path). It needs the venue identity
   // to reject a token minted at a different venue — not secret, venueId is
@@ -1422,6 +1462,8 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   const splashFormResponses = await buildSplashFormResponses(venueId, req.body.splashResponses);
   const guestLanguage = normalizeLanguage(req.body.language);
   const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
+  // PR A7: the friend's code goes to the worker; the offer was shown by /create-user.
+  const friendCode = typeof req.body.friendCode === 'string' && req.body.friendCode.trim() ? req.body.friendCode.trim().slice(0, 40) : null;
   let wifiGuestId: string;
 
   if (!existingWifiGuestId) {
@@ -1517,6 +1559,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       consentGiven: marketingOptIn,
       language: guestLanguage,
       birthdayMonth,
+      friendCode,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,

@@ -45,6 +45,8 @@ export interface ConnectHookInput {
   phoneCountryCode: string | null;
   /** The splash's built-in Birthday month field (1–12), when the guest answered it now. */
   birthdayMonth?: number | null;
+  /** PR A7: a code a friend typed on the splash (counted by the worker, referrals/store.ts). */
+  friendCode?: string | null;
   /** From the verification gate of this request, when it ran. */
   phoneE164?: string | null;
   emailVerified?: boolean;
@@ -133,6 +135,7 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
         emailVerified: Boolean(input.emailVerified),
         phoneVerified: Boolean(input.phoneVerified),
         birthdayMonth: input.birthdayMonth ?? null,
+        friendCode: input.friendCode ?? null,
       },
     },
     tenantUserId: venue.tenantUserId,

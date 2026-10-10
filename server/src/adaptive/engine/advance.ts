@@ -231,6 +231,9 @@ export async function advance(
     }
     const next = { ...state, rev: expectedRev + 1 };
     const ended = ENDED_STATUSES.has(next.status);
+    // PR A7: a start that waited for this run (`reentry.queue`) begins now — read before any write.
+    const cvRef = db.collection(COL.contactVenues).doc(contactVenueId(inst.meta.contactId, inst.meta.venueId));
+    const queuedNow = ended ? (((await tx.get(cvRef)).get(new FieldPath('journeys', inst.meta.journeyKey, 'queued')) as string[] | undefined) ?? []) : [];
     const update = stateUpdate(next, now, ended ? retentionFrom(now) : null);
     if (swap.kind === 'swap' || swap.kind === 'stale') {
       if (swap.kind === 'swap') update.configVersion = swap.use;
@@ -245,7 +248,6 @@ export async function advance(
     for (const t of tasks) firestoreScheduler.scheduleInTx(tx, t);
     for (const e of events) appendEventInTx(tx, e);
     if (ended) {
-      const cvRef = db.collection(COL.contactVenues).doc(contactVenueId(inst.meta.contactId, inst.meta.venueId));
       tx.update(
         cvRef,
         new FieldPath('journeys', inst.meta.journeyKey, 'activeInstanceId'),
@@ -254,7 +256,19 @@ export async function advance(
         new Date(now),
         new FieldPath('journeys', inst.meta.journeyKey, 'lastExitReason'),
         next.exitReason ?? next.status,
+        ...(queuedNow.length ? [new FieldPath('journeys', inst.meta.journeyKey, 'queued'), queuedNow.slice(1)] : []),
       );
+      if (queuedNow.length) {
+        // The next waiting start: routed again for this journey only (engine/route.ts `requeue`).
+        firestoreScheduler.scheduleInTx(tx, {
+          dedupeKey: `requeue:${inst.id}:${queuedNow[0]}`,
+          kind: 'event_route',
+          dueAt: now,
+          payload: { eventId: queuedNow[0], requeue: { journeyKey: inst.meta.journeyKey } },
+          tenantUserId: inst.meta.tenantUserId,
+          venueId: inst.meta.venueId,
+        });
+      }
     }
     return true;
   });

@@ -89,6 +89,8 @@ export function sampleValues(ctx: SampleContext): RenderValues {
     'guestinfo.secret.wifiPassword': '••••••••',
     'guestinfo.secret.doorCode': '••••',
     'guestinfo.secret.keyInstructions': 'The key box is next to the door.',
+    // PR A7: the example guest's Bring-a-friend code.
+    'referral.code': 'ANNA-7K2Q',
   };
 
   // PR S: the scan journeys' occasion (a holiday, a slow time) for the example guest.

@@ -12,6 +12,59 @@ function birthdayMonthValue() {
   return n >= 1 && n <= 12 ? n : null;
 }
 
+// PR A7: the "Code from a friend" box, as typed (null when the venue doesn't show it or it's empty).
+function friendCodeValue() {
+  var el = document.getElementById('friendCode');
+  var v = el ? (el.value || '').trim() : '';
+  return v ? v.slice(0, 40) : null;
+}
+
+// The friend's offer from /create-user, as the card says it: "10% off today", or "Today: …" with
+// the offer's own words (a free item; an amount, whose value is in minor units with its currency
+// in the words).
+function friendOfferText(offer) {
+  if (offer.kind === 'percent' && offer.value > 0) return t('friend.percentToday', String(offer.value));
+  return t('friend.today', offer.label || '');
+}
+
+// The friend's code worked: show their offer before they go online (a Wi-Fi login page can close
+// the moment the guest is online, so this is the one sure moment to show it). Resolves on tap.
+function showFriendOffer(offer) {
+  return new Promise(function (resolve) {
+    var wrap = document.createElement('div');
+    wrap.id = 'friendOfferCard';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,0.45);';
+    var card = document.createElement('div');
+    card.style.cssText = 'background:#fff;color:#222;border-radius:16px;padding:24px;max-width:340px;width:100%;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,0.2);font-family:inherit;';
+    var title = document.createElement('h2');
+    title.style.cssText = 'margin:0 0 12px;font-size:20px;';
+    title.textContent = t('friend.title');
+    var line = document.createElement('p');
+    line.style.cssText = 'margin:0 0 8px;font-size:22px;font-weight:700;';
+    line.textContent = friendOfferText(offer);
+    var note = document.createElement('p');
+    note.style.cssText = 'margin:0 0 20px;font-size:14px;color:#555;';
+    note.textContent = t('friend.showStaff');
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText = 'width:100%;padding:14px;border:0;border-radius:10px;font-size:16px;font-weight:700;color:#fff;background:var(--primary, #1c2b4a);cursor:pointer;';
+    btn.textContent = t('friend.goOnline');
+    btn.addEventListener('click', function () {
+      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+      resolve();
+    });
+    card.appendChild(title);
+    card.appendChild(line);
+    card.appendChild(note);
+    card.appendChild(btn);
+    wrap.appendChild(card);
+    document.body.appendChild(wrap);
+    btn.focus();
+  });
+}
+
 // ── 3. Step 1 → Step 2 transition ─────────────────────────────────────────
 // Resolved per call, not cached in an object literal: the guest can switch
 // language after a failed submit, and a cached English message would survive it.
@@ -175,6 +228,7 @@ async function submitConsent(marketing) {
     dialCode:  document.getElementById('selectedCode').textContent,
     splashResponses: collectSplashResponses(),
     birthdayMonth: birthdayMonthValue(),
+    friendCode: friendCodeValue(),
     privacyPolicyConsent: privacyPolicyConsent,
     termsConsent: termsConsent,
     marketingConsent: marketingConsent,
@@ -664,6 +718,7 @@ async function completeSubmission(verificationToken) {
   var dialCode  = p.dialCode;
   var splashResponses = p.splashResponses;
   var birthdayMonth = p.birthdayMonth;
+  var friendCode = p.friendCode;
   var privacyPolicyConsent = p.privacyPolicyConsent;
   var termsConsent = p.termsConsent;
   var marketingConsent = p.marketingConsent;
@@ -685,6 +740,7 @@ async function completeSubmission(verificationToken) {
         marketingConsent,
         splashResponses,
         birthdayMonth,
+        friendCode,
         verificationToken,
         // Persisted on the guest record and reused for every later email/SMS/
         // WhatsApp we send them — see services/guestLanguage.ts.
@@ -692,6 +748,9 @@ async function completeSubmission(verificationToken) {
       }),
     });
     if (!res.ok) throw new Error('Server error');
+    // PR A7: a friend's code that works here comes back with its offer — shown before going online.
+    var created = await res.json().catch(function () { return {}; });
+    if (created && created.friendOffer && typeof created.friendOffer === 'object') await showFriendOffer(created.friendOffer);
 
     if (isUnifi()) {
       var authRes = await fetch('/api/unifi-authorize', {
@@ -709,6 +768,7 @@ async function completeSubmission(verificationToken) {
           marketingConsent,
           splashResponses,
           birthdayMonth,
+          friendCode,
           verificationToken,
           language: ACTIVE_LANG,
         }),

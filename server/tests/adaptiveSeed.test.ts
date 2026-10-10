@@ -56,7 +56,8 @@ test('every journey template passes its checks with no errors', () => {
   for (const [key, report] of Object.entries(plan.reports.journeys)) {
     assert(report.ok, `${key}: ${report.issues.map((i) => `${i.code} ${i.message}`).join('; ')}`);
   }
-  assertEqual(Object.keys(plan.reports.journeys).length, 12, 'journey count');
+  // 12, plus Bring a friend and the Friend reward (PR A7).
+  assertEqual(Object.keys(plan.reports.journeys).length, 14, 'journey count');
 });
 
 test('every playbook passes its checks with no errors', () => {

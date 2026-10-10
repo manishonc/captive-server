@@ -144,6 +144,10 @@ export function countsFor(e: RollupEvent): { both: Counts | null; venueOnly: Cou
       };
     case 'wifi.connected':
       return { both: null, venueOnly: { visits: { captures: 1 } } };
+    // PR A7: a friend signed up with a regular's code — "new captured guests" (the spec's KPI).
+    // A test run's friends count apart, like its sends.
+    case 'referral.joined':
+      return { both: null, venueOnly: test ? { dryRun: { referrals: { joined: 1 } } } : { referrals: { joined: 1 } } };
     default: {
       const status = MESSAGE_STATUS[e.type];
       if (!status) return { both: null, venueOnly: null };

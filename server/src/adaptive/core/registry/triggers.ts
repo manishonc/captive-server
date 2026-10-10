@@ -183,4 +183,6 @@ export const KNOWN_EVENTS = new Set([
   'booking.direct',
   // PR S: a scan found a new occasion (a scan journey's next run closes the open one).
   'scan.due',
+  // PR A7: a friend signed up with a regular's code (starts the regular's friend reward).
+  'referral.joined',
 ]);

@@ -30,6 +30,8 @@ export interface CreateUserRequestBody {
   language?: string;
   /** The built-in Birthday month field (1–12) — validated server-side (parseBirthdayMonth). */
   birthdayMonth?: unknown;
+  /** PR A7: "Code from a friend" (Bring a friend), as typed — checked server-side. */
+  friendCode?: unknown;
 }
 
 export interface MarketingSmsMessage {
@@ -310,4 +312,6 @@ export interface UnifiAuthorizeRequestBody {
   language?: string;
   /** The built-in Birthday month field (1–12) — validated server-side (parseBirthdayMonth). */
   birthdayMonth?: unknown;
+  /** PR A7: "Code from a friend" (Bring a friend), as typed — checked server-side. */
+  friendCode?: unknown;
 }

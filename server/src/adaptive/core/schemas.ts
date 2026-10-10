@@ -200,6 +200,10 @@ export const journeyDefinitionSchema = z.object({
     reentry: z.object({
       mode: z.enum(['never', 'after_exit', 'cooldown']),
       cooldown: durationSchema.optional(),
+      // `after_exit` only (PR A7): up to this many starts that arrive while a run is open wait
+      // their turn (ContactVenues `queued`) and start one by one as each run ends — e.g. one
+      // friend reward per friend, however close together the friends come.
+      queue: z.number().int().min(1).max(10).optional(),
     }),
   }),
   exitOn: z

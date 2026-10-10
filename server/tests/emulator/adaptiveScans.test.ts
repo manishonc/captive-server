@@ -111,8 +111,9 @@ async function main() {
     const r = await ensureAdaptiveSeed();
     assertEqual(r.problems, [], 'no problems');
     assertEqual(r.failed, [], 'nothing failed');
-    // The four v2s, the welcome v2 (open until its offer ends), then both playbooks v2 and v3.
-    assertEqual((r.versionsPublished ?? []).length, 9, `published: ${JSON.stringify(r.versionsPublished)}`);
+    // The four v2s, the welcome v2 (open until its offer ends), both playbooks v2 and v3, then
+    // Restaurant growth v4 (PR A7: Bring a friend).
+    assertEqual((r.versionsPublished ?? []).length, 10, `published: ${JSON.stringify(r.versionsPublished)}`);
     for (const key of ['win_back', 'birthday', 'quiet_hours_filler', 'holidays']) {
       const h = (await db.collection(COL.journeyTemplates).doc(key).get()).data()!;
       assertEqual([h.latestVersion, h.publishedVersion, h.availability], [2, 2, 'available'], key);
@@ -121,7 +122,7 @@ async function main() {
     }
     assertEqual(((await db.collection(COL.journeyTemplates).doc('quiet_hours_filler').get()).data()!.name as { en: string }).en, 'Slow-time filler', 'renamed');
     const rg = (await db.collection(COL.playbooks).doc('restaurant_growth').get()).data()!;
-    assertEqual([rg.latestVersion, rg.publishedVersion], [3, 3], 'Restaurant growth v3 (on top of v2)');
+    assertEqual([rg.latestVersion, rg.publishedVersion], [4, 4], 'Restaurant growth v4 (on top of v2 and v3)');
     const v2 = (await db.collection(COL.playbooks).doc('restaurant_growth').collection('versions').doc('2').get()).data()!;
     assert((v2.offerMenuDefaults as AnyDoc[]).some((o) => o.offerKey === 'twenty_pct'), '20% on the menu');
     const v3 = (await db.collection(COL.playbooks).doc('restaurant_growth').collection('versions').doc('3').get()).data()!;

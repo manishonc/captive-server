@@ -162,6 +162,7 @@
     { "collectionGroup": "CaptivePortal_BanditArms", "fieldPath": "facts", "indexes": [] },
     { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "waiting.variantPick", "indexes": [] },
     { "collectionGroup": "CaptivePortal_AgentRuns", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
-    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "waiting.slotPick", "indexes": [] }
+    { "collectionGroup": "CaptivePortal_JourneyInstances", "fieldPath": "waiting.slotPick", "indexes": [] },
+    { "collectionGroup": "CaptivePortal_ReferralCodes", "fieldPath": "expireAt", "ttl": true, "indexes": [] }
   ]
 }

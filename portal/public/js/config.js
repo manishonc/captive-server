@@ -611,9 +611,45 @@ function applyBirthdayMonthField(field) {
   errEl.parentNode.insertBefore(group, errEl);
 }
 
+// PR A7: "Code from a friend" — shown while the venue runs Bring a friend (the server says so in
+// `referral.enabled`). Optional, plain text, so every template styles it like its other inputs.
+// Rebuilt on every apply (language switches re-run this), keeping what the guest typed; placed
+// before #step1Error, after the Birthday month.
+function applyFriendCodeField(cfg) {
+  var existing = document.getElementById('friendCode');
+  var kept = existing ? existing.value : '';
+  var oldGroup = existing && existing.closest('.field-group');
+  if (oldGroup) oldGroup.parentNode.removeChild(oldGroup);
+  if (!(cfg && cfg.referral && cfg.referral.enabled === true)) return;
+  var errEl = document.getElementById('step1Error');
+  if (!errEl) return;
+
+  var sampleGroup = document.querySelector('#step1 .field-group') || document.querySelector('.field-group');
+  var group = document.createElement('div');
+  group.className = sampleGroup ? sampleGroup.className : 'field-group';
+  var label = document.createElement('label');
+  label.className = 'field-label';
+  label.setAttribute('for', 'friendCode');
+  label.textContent = t('field.friendCode.label');
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'friendCode';
+  input.name = 'friendCode';
+  input.maxLength = 20;
+  input.autocomplete = 'off';
+  input.setAttribute('autocapitalize', 'characters');
+  input.setAttribute('spellcheck', 'false');
+  input.placeholder = t('field.friendCode.placeholder');
+  input.value = kept;
+  group.appendChild(label);
+  group.appendChild(input);
+  errEl.parentNode.insertBefore(group, errEl);
+}
+
 function applyLoginPage(cfg) {
   var lp = normalizeLoginPage(cfg);
   applyBirthdayMonthField(lp.fields.birthdayMonth);
+  applyFriendCodeField(cfg);
 
   Object.keys(lp.fields).forEach(function (id) {
     var f = lp.fields[id];

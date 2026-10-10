@@ -104,6 +104,8 @@ export interface CardNumbers {
   visits: { total: number; first: number; revisits: number; captures: number };
   stays: { syncedInRange: number; changed: number; cancelled: number; linked: number; upcoming: number | null };
   skipped: Record<string, number>;
+  /** PR A7: friends who signed up with a regular's Bring-a-friend code (new guests). */
+  friendsJoined: number;
 }
 
 /**
@@ -144,6 +146,7 @@ export function cardNumbers(args: {
     visits: { total: n(visits.total), first: n(visits.first), revisits: n(visits.revisits), captures: n(visits.captures) },
     stays: { syncedInRange: n(stays.created), changed: n(stays.changed), cancelled: n(stays.cancelled), linked: n(stays.linked), upcoming: args.upcomingStays },
     skipped: Object.fromEntries(Object.entries((v.skipped ?? {}) as NumMap).map(([k, c]) => [k, n(c)])),
+    friendsJoined: n(((v.referrals ?? {}) as NumMap).joined),
   };
 }
 

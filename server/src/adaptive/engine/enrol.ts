@@ -67,6 +67,31 @@ function hasMarketingConsent(contact: ContactDoc, venueId: string): boolean {
   return Object.values(consentFor(contact, venueId)).some((c) => c?.state === 'granted');
 }
 
+/**
+ * PR A7: hand the turn to the next start waiting for this journey (`reentry.queue`) — when no run
+ * is open and one is queued: it is taken off the queue and routed again for this journey only.
+ * Used when a queued start couldn't begin, so the rest never wait for a run that won't come.
+ */
+export async function startNextQueued(args: { contactId: string; venueId: string; journeyKey: string; tenantUserId: string | null; now: number }): Promise<void> {
+  const cvRef = db.collection(COL.contactVenues).doc(contactVenueId(args.contactId, args.venueId));
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(cvRef);
+    if (!snap.exists) return;
+    const cvj = (snap.data() as ContactVenueDoc).journeys?.[args.journeyKey];
+    const queued = cvj?.queued ?? [];
+    if (cvj?.activeInstanceId || queued.length === 0) return;
+    tx.update(cvRef, new FieldPath('journeys', args.journeyKey, 'queued'), queued.slice(1), new FieldPath('updatedAt'), new Date());
+    firestoreScheduler.scheduleInTx(tx, {
+      dedupeKey: `requeue:next:${cvRef.id}:${queued[0]}`,
+      kind: 'event_route',
+      dueAt: args.now,
+      payload: { eventId: queued[0], requeue: { journeyKey: args.journeyKey } },
+      tenantUserId: args.tenantUserId,
+      venueId: args.venueId,
+    });
+  });
+}
+
 /** Enrol the guest in every switched-on journey this event starts. Returns the new instance ids. */
 export async function enrolForEvent(args: {
   ctx: VenueContext;
@@ -126,7 +151,15 @@ async function enrolOne(args: {
     if (instSnap.exists) return null;
     const cv = cvSnap.exists ? (cvSnap.data() as ContactVenueDoc) : null;
     const cvj = cv?.journeys?.[j.journeyKey];
-    if (cvj?.activeInstanceId) return null;
+    if (cvj?.activeInstanceId) {
+      // PR A7: a journey with a queue keeps this start for later — it begins when the open run
+      // ends (engine/advance.ts). Each event waits once; a full queue drops it as before.
+      const queued = cvj.queued ?? [];
+      if (reentry.mode === 'after_exit' && reentry.queue && queued.length < reentry.queue && !queued.includes(event.id)) {
+        tx.update(cvRef, new FieldPath('journeys', j.journeyKey, 'queued'), [...queued, event.id], new FieldPath('updatedAt'), new Date());
+      }
+      return null;
+    }
     if (reentry.mode === 'never' && (cvj?.entries ?? 0) > 0) return null;
     if (reentry.mode === 'cooldown' && reentry.cooldown) {
       const last = tsMs(cvj?.lastEnteredAt);
@@ -173,6 +206,8 @@ async function enrolOne(args: {
       lastEnteredAt: new Date(now),
       lastExitAt: cvj?.lastExitAt ?? null,
       lastExitReason: cvj?.lastExitReason ?? null,
+      // PR A7: the starts still waiting their turn (`reentry.queue`) stay queued — this one is no longer.
+      ...(cvj?.queued?.length ? { queued: cvj.queued.filter((id) => id !== event.id) } : {}),
     };
     if (cv) {
       tx.update(cvRef, new FieldPath('journeys', j.journeyKey), entry, new FieldPath('updatedAt'), new Date());
