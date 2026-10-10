@@ -63,6 +63,7 @@ const SLOT_WORDS: Record<string, string> = {
 const ANCHOR_WORDS: Record<string, string> = {
   'stay.checkInAt': 'arrival day',
   'stay.checkOutAt': 'checkout day',
+  'offer.expiresAt': 'the offer ends',
 };
 
 function outcomeWords(outcome: string): string {
@@ -90,7 +91,9 @@ const waitUntil: NodeContract<WaitUntilConfig> = {
   configSchema: z.object({
     at: hhmmSchema.optional(),
     day: z.enum(['same_or_next', 'next']).optional(),
-    anchor: z.enum(['stay.checkInAt', 'stay.checkOutAt']).optional(),
+    // `offer.expiresAt`: the end of the offer this run issued (`instance.vars.offerExpiresAt`), so a
+    // journey stays open while its offer can still be redeemed.
+    anchor: z.enum(['stay.checkInAt', 'stay.checkOutAt', 'offer.expiresAt']).optional(),
     offset: offsetSchema.optional(),
   }),
   outcomes: () => ['done', 'past'],

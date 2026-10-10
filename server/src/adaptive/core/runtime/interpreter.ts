@@ -88,7 +88,13 @@ function enterNode(nodeId: string, state: InstanceState, ctx: InterpreterContext
       );
       if (!c) return { fail: 'bad_step_config' };
       let target: number;
-      if (c.anchor) {
+      if (c.anchor === 'offer.expiresAt') {
+        // The offer this run issued: no offer, or it has ended, is `past`.
+        const ends = Number(state.vars?.offerExpiresAt);
+        if (!Number.isFinite(ends)) return { go: 'past' };
+        target = ends + offsetMs(c.offset);
+        if (target <= now) return { go: 'past' };
+      } else if (c.anchor) {
         if (!ctx.stay) return { fail: 'no_stay' };
         target = stayTarget(c, ctx.stay, ctx.venueTz);
         if (target <= now) return { go: 'past' };
@@ -198,7 +204,8 @@ function isAnchoredTimerWait(state: InstanceState, def: JourneyDefinition): bool
   const w = state.waiting;
   const node = def.nodes[state.cursor.nodeId];
   if (!w || w.kind !== 'timer' || w.nodeId !== state.cursor.nodeId || node?.type !== 'wait_until') return false;
-  return Boolean((node.config as { anchor?: unknown } | undefined)?.anchor);
+  const anchor = (node.config as { anchor?: unknown } | undefined)?.anchor;
+  return typeof anchor === 'string' && anchor.startsWith('stay.');
 }
 
 // ── The loop ─────────────────────────────────────────────────────────────────

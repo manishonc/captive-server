@@ -36,6 +36,7 @@ import { runGate, type GateInput } from '../src/adaptive/core/runtime/gate';
 import { buildDecision, explainDecision } from '../src/adaptive/core/runtime/decision';
 import { triggerMatches, entryKeyFor } from '../src/adaptive/core/runtime/triggers';
 import { phoneCountry } from '../src/adaptive/core/runtime/phoneCountry';
+import { welcomeSecondVisitV2 } from '../src/adaptive/seed/definitions/journeysWelcomeV2';
 
 let passed = 0;
 let failed = 0;
@@ -284,6 +285,44 @@ test('Stay guide: branch on nights, wait_until the stay moments, "past" skips ah
   const s2 = run(def, short.state, { kind: 'send_result', nodeId: 'welcome', outcome: 'sent', touch: null }, now, { stay: { ...stay, nights: 2 }, facts: factsFrom({ stay: { nights: 2 } }) });
   assertEqual(s2.state.cursor.nodeId, 'co_w', 'short stay → checkout wait');
   assertEqual(iso(s2.state.waiting!.untilAt!), iso(zonedTime(2026, 9, 26, 17, 0, TZ).getTime()), 'day before checkout, 17:00');
+});
+
+test('Welcome v2: after its last message it waits until the offer ends; a return then converts; past when the offer is gone', () => {
+  const def = journeyDefinitionSchema.parse(welcomeSecondVisitV2.definition);
+  const t0 = zonedTime(2026, 10, 13, 12, 40, TZ).getTime();
+  let r = run(def, freshState(def.start, t0), { kind: 'start' }, t0);
+  const ends = Number(r.state.vars.offerExpiresAt);
+  assertEqual(ends, t0 + 14 * DAY_MS, 'a 14-day offer');
+  r = run(def, r.state, { kind: 'wake', nodeId: 'd1' }, t0 + 15 * MINUTE_MS);
+  r = run(def, r.state, { kind: 'send_result', nodeId: 's1', outcome: 'sent', touch: null }, t0 + 15 * MINUTE_MS);
+  r = run(def, r.state, { kind: 'wake', nodeId: 'w1' }, t0 + 2 * DAY_MS);
+  assertEqual(r.state.cursor.nodeId, 's2_next', 'no reaction → follow-up');
+  const afterFollowUp = run(def, r.state, { kind: 'send_result', nodeId: 's2_next', outcome: 'sent', touch: null }, t0 + 2 * DAY_MS);
+  r = run(def, afterFollowUp.state, { kind: 'wake', nodeId: 'w2' }, t0 + 5 * DAY_MS);
+  assertEqual([r.state.status, r.state.cursor.nodeId, r.state.waiting?.untilAt], ['active', 'w_offer', ends], 'v1 ended here; v2 waits for the offer to end');
+
+  // Back on day 8: the redeem reaches the goal → the thank-you.
+  const redeemed = { id: 'e_redeem', type: 'offer.redeemed', occurredAt: t0 + 8 * DAY_MS, data: {} };
+  const back = run(def, r.state, { kind: 'event', event: redeemed }, t0 + 8 * DAY_MS);
+  assertEqual([back.state.cursor.nodeId, Boolean(back.state.goal)], ['thanks', true], 'day 8: converted, thank-you next');
+  // Nobody came back: it ends with the offer.
+  const over = run(def, r.state, { kind: 'wake', nodeId: 'w_offer' }, ends);
+  assertEqual(over.state.status, 'exhausted', 'ends as exhausted when the offer ends');
+
+  // A skipped follow-up (spacing, caps…) waits for the offer too, instead of ending at once.
+  const atFollowUp = { ...afterFollowUp.state, cursor: { nodeId: 's2_next', enteredAt: t0 + 2 * DAY_MS }, waiting: null };
+  const skip = run(def, atFollowUp, { kind: 'send_result', nodeId: 's2_next', outcome: 'skipped', touch: null }, t0 + 2 * DAY_MS);
+  assertEqual([skip.state.status, skip.state.cursor.nodeId], ['active', 'w_offer'], 'skipped follow-up → wait for the offer');
+
+  // A 1-day offer is already over when the last message has gone: past → ends at once.
+  const short = run(def, freshState(def.start, t0), { kind: 'start' }, t0, { slots: { offer: 'dessert', offer_days: 1 } });
+  const lateState = { ...short.state, cursor: { nodeId: 's2_next', enteredAt: t0 + 2 * DAY_MS }, waiting: null };
+  const late = run(def, lateState, { kind: 'send_result', nodeId: 's2_next', outcome: 'skipped', touch: null }, t0 + 2 * DAY_MS);
+  assertEqual(late.state.status, 'exhausted', 'offer over → past → ends');
+  // No offer on the run: past as well.
+  const noOffer = { ...lateState, vars: {} };
+  const none = run(def, noOffer, { kind: 'send_result', nodeId: 's2_next', outcome: 'skipped', touch: null }, t0 + 2 * DAY_MS);
+  assertEqual(none.state.status, 'exhausted', 'no offer → past → ends');
 });
 
 // ── Pickers ──────────────────────────────────────────────────────────────────

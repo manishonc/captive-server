@@ -218,7 +218,9 @@ async function main() {
     assertEqual((await applyConfigInFlight({ ...base, configVersion: 2, savedAt: now() })).marked, 0, 'v2 (late) marks none');
     assertEqual((await applyConfigInFlight({ ...base, configVersion: 3, savedAt: now() })).marked, 0, 'a replay marks none');
     assertEqual((await applyConfigInFlight({ ...base, installId: 'other_install', configVersion: 4, savedAt: now() })).marked, 0, 'another install’s guests are not touched');
-    assertEqual((await applyConfigInFlight({ ...base, configVersion: 5, savedAt: now(), templateVersions: { [A1]: 2, review_ask: 2 } })).marked, 0, 'values written for another template version are not applied');
+    // A template version the running guests are not on (they run the welcome's current version).
+    const other = Number(insts[0].templateVersion) + 1;
+    assertEqual((await applyConfigInFlight({ ...base, configVersion: 5, savedAt: now(), templateVersions: { [A1]: other, review_ask: 2 } })).marked, 0, 'values written for another template version are not applied');
     for (const i of insts) assertEqual((await db.collection(COL.journeyInstances).doc(i.id).get()).get('pendingConfigVersion'), 3, 'still 3');
   });
 
