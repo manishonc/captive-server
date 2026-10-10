@@ -286,6 +286,38 @@ async function main() {
     assertEqual((await logRows('ai.auto_fix')).length, 2, 'two fixes asked for, each logged');
   });
 
+  await test('Auto off (for now): Meta rejects an AI template, the AI writes its fix, and it waits in the ready list until a person sends it', async () => {
+    await fresh();
+    await connectAndSync();
+    await aiOn();
+    await writerSettings({ enabled: true, maxRunsPerDay: 40 });
+    await gapFillDoneToday();
+    const t = await suggestAndRun(OFFER, 'en');
+    const o0 = await overview();
+    assertEqual([o0.auto.on, o0.auto.ready, o0.auto.blocked], [false, [t.id], null], 'Auto off; the draft listed as ready');
+    // Nothing goes by itself: a person sends it.
+    assertEqual((await runWhatsAppTemplateTick()).auto, undefined, 'no Auto step');
+    assertEqual((await template(t.id)).stage, 'draft', 'still a draft');
+    assertEqual((await post(`/admin/whatsapp/templates/${t.id}/submit`, { baseVersion: 1 })).status, 200, 'sent by a person');
+    await review(t.id, 'REJECTED', { reason: 'INVALID_FORMAT' });
+    const asked = await runWhatsAppTemplateTick();
+    assertEqual([asked.aiFixes, asked.auto], [1, undefined], `a fix asked for ${JSON.stringify(asked)}`);
+    assertEqual((await runWhatsAppTemplateTick()).aiFixes, 0, 'once for this rejection');
+    const row = (await logRows('ai.auto_fix'))[0];
+    assertEqual(row.actor.kind, 'system', 'asked by HeidiFi, not Auto');
+    assert(/each fix waits for you to send it/.test(row.summary), row.summary);
+    await runUntil(now() + 5 * 60_000);
+    const fixed = await template(t.id);
+    assertEqual([fixed.version, fixed.ai?.kind, fixed.ai?.requestedBy, fixed.meta?.status], [2, 'fix', 'auto_fix', 'REJECTED'], 'fixed, not sent');
+    for (let i = 0; i < 3; i += 1) await runWhatsAppTemplateTick();
+    assertEqual([(await template(t.id)).meta?.status, (await template(t.id)).version], ['REJECTED', 2], 'the ticks never send it');
+    assertEqual((await overview()).auto.ready, [t.id], 'the fix is in the ready list');
+    assertEqual((await post(`/admin/whatsapp/templates/${t.id}/submit`, { baseVersion: 2 })).status, 200, 'a person sends the fix');
+    const sent = await template(t.id);
+    assertEqual([sent.meta?.status, sent.ai?.sentVersion, sent.ai?.autoSubmittedVersion ?? null], ['PENDING', 2, null], 'with Meta, sent by a person');
+    assertEqual((await overview()).auto.ready, [], 'nothing left to send');
+  });
+
   await test('Meta refuses the account: Auto stops and pauses an hour, the place goes back, the template isn’t parked', async () => {
     await fresh();
     await connectAndSync();

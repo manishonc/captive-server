@@ -18,8 +18,11 @@
  *  3. alerts waiting on templates → emailed (each once: `raiseAlert` keys them);
  *  4. the 08:00 (Zurich) summary, once a day, skipped when there is nothing to tell;
  *  5. a token that expires within 14 days (as the last Check connection saw it): one alert a day;
- *  6. PR W2b, while Auto is on: AI templates its rules allow → Meta, and the AI fixes it asks for
- *     (whatsapp/auto.ts) — on its own, after the alerts and the summary;
+ *  6. PR W2b: the AI fixes of AI templates Meta rejected (whatsapp/aiRequests.ts `planAutoFixes`);
+ *     each fix is a draft a person sends (Manish, 2026-10-10: nothing goes to Meta without a
+ *     click). Only while Auto is on (off for now; built, not enabled) the AI templates its rules
+ *     allow also go to Meta by themselves (whatsapp/auto.ts) — on its own, after the alerts and
+ *     the summary;
  *  7. PR W2: the daily AI gap-fill, after a complete sync.
  */
 
@@ -37,7 +40,7 @@ import { metaClient } from './source';
 import { checkContext, displayOf, loadPools, reportFor } from './context';
 import { decideDeleted, decideFromMeta, importedDoc, inferUse, viewOf } from './apply';
 import { connectionAlert, metaErrorDetail, revert } from './submit';
-import { planGapFill } from './aiRequests';
+import { planAutoFixes, planGapFill } from './aiRequests';
 import { runAuto } from './auto';
 import { readEngineSettings, waAutoOf } from '../store/engineSettings';
 import { MAX_AI_FIXES } from '../core/whatsapp/aiBrief';
@@ -252,6 +255,8 @@ export interface TickResult {
   aiQueued?: number;
   /** PR W2b: Auto — templates sent to Meta, AI fixes asked for, why it stopped. */
   auto?: { sent: number; fixes: number; stopped: string | null };
+  /** PR W2b, Auto off: AI fixes asked for (each waits for a person to send it). */
+  aiFixes?: number;
   reason?: string;
   repaired?: number;
   synced?: boolean;
@@ -309,6 +314,13 @@ export async function runWhatsAppTemplateTick(opts: { owner?: string } = {}): Pr
         if (r.lostLease) return { ...out, reason: 'lease_lost' };
       } catch (err) {
         await writeLog({ kind: 'auto.error', level: 'error', actor: AUTO_ACTOR, summary: `Auto failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null } });
+      }
+    } else if (wa.autoSubmit !== 'on' && (await renewLease(owner, LEASE_MS))) {
+      // Auto off: the AI still fixes what Meta rejected; each fix waits for a person to send it.
+      try {
+        out.aiFixes = await planAutoFixes(Date.now(), undefined, { autoOn: false });
+      } catch (err) {
+        await writeLog({ kind: 'ai.error', level: 'error', actor: SYSTEM, summary: `Asking the AI to fix rejected templates failed: ${(err as Error)?.name ?? 'Error'}`, detail: { name: (err as Error)?.name ?? null } });
       }
     }
     // PR W2: the daily gap-fill, right after a complete sync — on its own, so an error here never

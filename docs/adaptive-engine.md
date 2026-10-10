@@ -573,6 +573,12 @@ adds two journeys (`journeysReferral.ts`); the brief is `prd/pr-a7-brief.md`.
 
 ## WhatsApp Auto (PR W2b)
 
+**For now Auto stays off (Manish, 2026-10-10): nothing goes to Meta without a person's click.** The feature
+is built and tested but not enabled. With Auto off, the tick still asks the AI to fix AI templates Meta
+rejects (see "AI fixes" below; actor HeidiFi, `TickResult.aiFixes`): each fix is a draft that waits in the
+WhatsApp tab's "Ready to send" list (the overview's `auto.ready`, the same rules Auto would use) until a
+person clicks Send to Meta. Turning Auto on later is one step on Launch & health ("WA AUTO-SUBMIT ON").
+
 With Auto on, the WhatsApp template tick (every 2 minutes, after W1's alerts and the 08:00 summary, on its
 own: an error is logged as `auto.error` and keeps nothing else back) sends AI templates to Meta by itself and
 asks the AI to fix the ones Meta rejects. It messages nobody, so it ignores the guest-sending pause (Manish,
@@ -622,9 +628,10 @@ asks the AI to fix the ones Meta rejects. It messages nobody, so it ignores the 
   for), before the daily gap-fill takes the writer's runs (the same quota: runs left minus the 3 kept for
   Suggest). A run that ended for a passing reason (a deploy, the gate, the budget, a timeout…) is asked again,
   at most 3 times per rejection. It needs the AI switch and the writer's Scheduled runs, like the gap-fill (the
-  overview's `auto.fixesBlocked` says which is missing). A fix not sent to Meta yet is never fixed again: Suggest
-  refuses with `fix_unsent` and doesn't offer it; Auto sends the fix, and only Meta's next rejection opens the
-  next fix. `ai.auto_fix` logs each round.
+  overview's `auto.fixesBlocked` says which is missing). This runs every tick whether Auto is on or off. A fix
+  not sent to Meta yet is never fixed again: Suggest refuses with `fix_unsent` and doesn't offer it; the fix is
+  sent (by Auto when it is on, else by a person from the ready list), and only Meta's next rejection opens the
+  next fix. `ai.auto_fix` logs each round (by Auto, or by HeidiFi with "each fix waits for you to send it").
 - **The 08:00 summary** also lists what Auto sent and what the AI wrote since the last one (a day with only
   those still sends).
 

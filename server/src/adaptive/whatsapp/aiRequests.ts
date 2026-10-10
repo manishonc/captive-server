@@ -41,7 +41,7 @@ import {
 import type { PoolRow } from '../core/whatsapp/pools';
 import { checkContext, displayOf, loadPools, poolFor, reportFor } from './context';
 import { writerViewOf } from './aiDrafts';
-import { AUTO_ACTOR, inTransaction, listTemplates, opsInTx, readOps, readOpsInTx, updateOps, writeLog, type StoredTemplate, type WaActor, type WaOps } from './store';
+import { AUTO_ACTOR, SYSTEM, inTransaction, listTemplates, opsInTx, readOps, readOpsInTx, updateOps, writeLog, type StoredTemplate, type WaActor, type WaOps } from './store';
 import { autoFixCandidates } from '../core/whatsapp/auto';
 import { autoViewsFor } from './autoViews';
 
@@ -263,13 +263,13 @@ export async function queueWriterRun(args: {
     return id;
   });
   if (!taskId) return null;
-  const who = local.requestedBy === 'gap_fill' ? 'The daily gap-fill' : local.requestedBy === 'auto_fix' ? 'Auto' : 'A Suggest';
+  const who = local.requestedBy === 'gap_fill' ? 'The daily gap-fill' : local.requestedBy === 'auto_fix' ? (args.by.kind === 'auto' ? 'Auto' : 'HeidiFi') : 'A Suggest';
   await writeLog(
     {
       kind: 'ai.requested',
       level: local.requestedBy === 'suggest' ? 'info' : 'routine',
       actor: args.by,
-      summary: `${who} asked the AI for a ${local.kind} of “${args.request.pool.poolName}” (${local.lang.toUpperCase()})`,
+      summary: `${who} asked the AI for a ${local.kind} of “${args.request.pool.poolName}” (${local.lang.toUpperCase()})${local.requestedBy === 'auto_fix' ? ' after Meta rejected it' : ''}`,
       detail: { taskId, kind: local.kind, requestedBy: local.requestedBy, trigger: args.trigger, withheld: local.withheld, targetTemplateId: local.targetTemplateId },
     },
     { poolKey: local.use.poolKey, language: metaLanguageFor(local.lang), templateId: local.kind === 'fix' ? local.targetTemplateId : null },
@@ -343,13 +343,16 @@ export async function planGapFill(realNow: number = Date.now()): Promise<number>
 // ── PR W2b: the AI fixes Auto asks for ────────────────────────────────────────
 
 /**
- * With Auto on (the tick checks), ask the AI to fix the AI templates Meta rejected — one fix run per
- * rejection (`ops.autoFix`: the Meta change each template's last fix was asked for), at most 2 AI
- * fixes per template (Suggest's count too). Needs the AI switch, the writer's Scheduled runs and
- * budget; uses the writer's runs left minus the Suggest reserve (before the gap-fill). Returns how
- * many runs it queued. `snap`: the registry the tick already read.
+ * Every tick, ask the AI to fix the AI templates Meta rejected — one fix run per rejection
+ * (`ops.autoFix`: the Meta change each template's last fix was asked for), at most 2 AI fixes per
+ * template (Suggest's count too). Needs the AI switch, the writer's Scheduled runs and budget; uses
+ * the writer's runs left minus the Suggest reserve (before the gap-fill). Returns how many runs it
+ * queued. `snap`: the registry the tick already read. With Auto off (`autoOn: false`, for now:
+ * Manish, 2026-10-10) each fix is a draft a person sends; with Auto on, Auto sends it.
  */
-export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot): Promise<number> {
+export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot, opts: { autoOn: boolean } = { autoOn: true }): Promise<number> {
+  const actor = opts.autoOn ? AUTO_ACTOR : SYSTEM;
+  const who = opts.autoOn ? 'Auto' : 'HeidiFi';
   const s = snap ?? (await registrySnapshot());
   const candidates = autoFixCandidates(autoViewsFor(s.docs, s.pools, s.ops), s.ops.autoFix);
   if (!candidates.length) return 0;
@@ -371,7 +374,7 @@ export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot): P
       // Not one the AI can fix (its words say why): asked once for this rejection, never again.
       await updateOps(stamp(null));
       await writeLog(
-        { kind: 'ai.auto_fix_skipped', level: 'routine', actor: AUTO_ACTOR, summary: `Auto didn’t ask the AI to fix ${v.name} (${lang}): ${writerRefusalWords(req.refuse)}`, detail: { code: req.refuse } },
+        { kind: 'ai.auto_fix_skipped', level: 'routine', actor, summary: `${who} didn’t ask the AI to fix ${v.name} (${lang}): ${writerRefusalWords(req.refuse)}`, detail: { code: req.refuse } },
         { templateId: v.id, name: v.name, language: metaLanguageFor(lang), poolKey: use.poolKey },
       );
       continue;
@@ -380,7 +383,7 @@ export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot): P
       request: req,
       trigger: 'schedule',
       key: `wa:autofix:${v.id}:v${v.version}`,
-      by: AUTO_ACTOR,
+      by: actor,
       realNow,
       delayMs: queued * GAP_STAGGER_MS,
       extraOps: (taskId) => stamp(taskId),
@@ -391,9 +394,9 @@ export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot): P
     await writeLog({
       kind: 'ai.auto_fix',
       level: 'info',
-      actor: AUTO_ACTOR,
-      summary: `Auto asked the AI to fix ${queued} template${queued === 1 ? '' : 's'} Meta rejected`,
-      detail: { queued, candidates: candidates.length, runsLeft: status.runsLeft, reserve: SUGGEST_RESERVE },
+      actor,
+      summary: `${who} asked the AI to fix ${queued} template${queued === 1 ? '' : 's'} Meta rejected${opts.autoOn ? '' : ': each fix waits for you to send it to Meta'}`,
+      detail: { queued, candidates: candidates.length, runsLeft: status.runsLeft, reserve: SUGGEST_RESERVE, autoOn: opts.autoOn },
     });
   }
   return queued;

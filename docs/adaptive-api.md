@@ -340,8 +340,9 @@ Check connection saw it).
 **The AI writer (PR W2a)** — see docs/adaptive-engine.md "The WhatsApp template writer": Suggest queues one
 `wa_template_writer` run; the worker writes its answer as a draft (`origin: 'ai'`) exactly once, or logs why not
 (rejected by a check, no longer needed). The daily gap-fill runs in the tick after a complete sync when the
-writer's Scheduled runs are on. PR W2b: with WhatsApp Auto on (Launch & health, "WA AUTO-SUBMIT ON"), the tick
-sends AI templates that pass its rules to Meta by itself and asks the AI to fix the ones Meta rejects (log
+writer's Scheduled runs are on. PR W2b: the tick asks the AI to fix AI templates Meta rejects (each fix waits
+for a person to send it, from the overview's `auto.ready` list); only with WhatsApp Auto on (Launch & health,
+"WA AUTO-SUBMIT ON"; off for now) does it also send AI templates that pass its rules to Meta by itself (log
 kinds `auto.run`, `auto.left`, `auto.cap_reached`, `auto.stopped` (once a day per reason: `meta_account`,
 `meta_no_answer`, `meta_unavailable`, `meta_backoff`, `creates_hour`, `template_limit`, `rate_limited`),
 `auto.error`, `ai.auto_fix`, `ai.auto_fix_skipped`, `settings.auto_changed`).
