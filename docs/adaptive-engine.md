@@ -511,6 +511,22 @@ daily scan of each venue, not from a Wi-Fi event. Brief: `research/heidifi-adapt
   Birthday and the watchdog are equality-only; slow times read `visit.started` events on
   JourneyEvents(venueId, type, occurredAt desc). All are in the worker's index probe.
 
+## Welcome v2: open until the offer ends
+
+A return visit redeems an offer only for a **running** journey (`engine/route.ts`
+`wakeRunningJourneys`). Welcome → come back v1 ended as soon as it had nothing more to send — about
+3 days after a click, about 5 days without one, or right after a skipped follow-up — while its offer
+stays valid for the owner's "Valid for (days)" (14 by default, up to 90). A guest back on day 6–14
+got no thank-you and wasn't counted as "came back".
+
+v2 (`seed/definitions/journeysWelcomeV2.ts`) waits in `w_offer` — a `wait_until` anchored on
+`offer.expiresAt`, the end of the offer this run issued (`instance.vars.offerExpiresAt`) — after the
+follow-up, the last-chance message or a skipped follow-up, and ends as `exhausted` when the offer
+ends. No offer, or one already over, takes `past`. The goal window is 90 days (the longest offer).
+Restaurant growth v3 and Local business v3 pin it (`playbooksV3.ts`); a venue on an older version
+moves to v3 the next time its owner saves. The scan journeys (PR S) already stay open for their
+14-day offers (`delay 14d`).
+
 ## Signals coming back
 
 | Source | Adaptive effect |

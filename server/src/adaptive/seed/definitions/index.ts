@@ -13,6 +13,8 @@ import { PLAYBOOKS_V1 } from './playbooks';
 import { RESTAURANT_SCAN_JOURNEYS_V2 } from './journeysRestaurantV2';
 import { VARIANTS_SCAN } from './variantsScan';
 import { PLAYBOOK_VERSIONS } from './playbooksV2';
+import { welcomeSecondVisitV2 } from './journeysWelcomeV2';
+import { PLAYBOOK_VERSIONS_V3 } from './playbooksV3';
 
 export const SEED = {
   config: ADAPTIVE_CONFIG_V1,
@@ -20,9 +22,11 @@ export const SEED = {
   journeys: [...RESTAURANT_JOURNEYS, ...STAY_JOURNEYS, ...GUEST_INFO_JOURNEYS],
   variants: [...VARIANTS_V1, ...VARIANTS_SCAN],
   playbooks: PLAYBOOKS_V1,
-  // PR S: later versions the seed publishes next to the v1s (seed/versionUpgrades.ts).
-  journeyVersions: RESTAURANT_SCAN_JOURNEYS_V2,
-  playbookVersions: PLAYBOOK_VERSIONS,
+  // PR S: later versions the seed publishes next to the v1s (seed/versionUpgrades.ts), in order:
+  // a playbook version comes after the one before it and after the journey versions it pins.
+  // Then Welcome → come back v2 and the v3 playbooks that pin it (open until the offer ends).
+  journeyVersions: [...RESTAURANT_SCAN_JOURNEYS_V2, welcomeSecondVisitV2],
+  playbookVersions: [...PLAYBOOK_VERSIONS, ...PLAYBOOK_VERSIONS_V3],
 };
 
 export type { JourneySeed, PlaybookSeed, VariantSeedInput } from './types';

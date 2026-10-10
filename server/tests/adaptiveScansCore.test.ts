@@ -298,7 +298,7 @@ async function main() {
   });
 
   console.log('\nSeed versions');
-  await test('the seed publishes v2 of the four journeys, then the two playbooks, with no problems', () => {
+  await test('the seed publishes v2 of the four journeys and of the welcome, then the playbooks v2 and v3, with no problems', () => {
     const plan = buildSeedPlan(new Date('2026-10-08T00:00:00Z'));
     assertEqual(plan.problems, [], 'problems');
     assertEqual(plan.versions.map((v) => `${v.kind}:${v.key}@${v.version}`), [
@@ -306,12 +306,21 @@ async function main() {
       'journey:birthday@2',
       'journey:quiet_hours_filler@2',
       'journey:holidays@2',
+      'journey:welcome_second_visit@2',
       'playbook:restaurant_growth@2',
       'playbook:local_business@2',
+      'playbook:restaurant_growth@3',
+      'playbook:local_business@3',
     ], 'order');
     const rg = plan.versions.find((v) => v.key === 'restaurant_growth')!;
     assert(rg.pins!.some((p) => p.journeyKey === 'holidays' && p.templateVersion === 2), 'pins holidays v2');
-    assert(rg.pins!.some((p) => p.journeyKey === 'welcome_second_visit' && p.templateVersion === 1), 'keeps welcome v1');
+    assert(rg.pins!.some((p) => p.journeyKey === 'welcome_second_visit' && p.templateVersion === 1), 'v2 keeps welcome v1');
+    // v3: the welcome that stays open until its offer ends (journeysWelcomeV2.ts).
+    for (const key of ['restaurant_growth', 'local_business']) {
+      const v3 = plan.versions.find((v) => v.key === key && v.version === 3)!;
+      assert(v3.pins!.some((p) => p.journeyKey === 'welcome_second_visit' && p.templateVersion === 2), `${key} v3 pins welcome v2`);
+      assert(v3.pins!.some((p) => p.journeyKey === 'review_ask' && p.templateVersion === 1), `${key} v3 keeps the review ask v1`);
+    }
     assertEqual((plan.versions.find((v) => v.key === 'quiet_hours_filler')!.header.name as { en: string }).en, 'Slow-time filler', 'renamed');
     for (const [k, r] of Object.entries(plan.reports.versions)) assert(r.ok, `${k} passes its checks`);
   });

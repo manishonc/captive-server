@@ -95,7 +95,7 @@ async function main() {
   });
 
   let annaA1 = '';
-  await test('Anna (test run): SMS welcome at +15 min → email with new wording after 48 h → exhausted', async () => {
+  await test('Anna (test run): SMS welcome at +15 min → email with new wording after 48 h → open until the offer ends → exhausted', async () => {
     await fresh();
     const t0 = nextTuesday1240();
     await setClock(t0);
@@ -139,8 +139,12 @@ async function main() {
     assert(hour >= 14 && hour < 17, `afternoon slot (got ${hour}:00)`);
 
     await runUntil(t0 + 8 * DAY_MS);
+    // Welcome v2: no click → it waits until her 14-day offer ends (a return then would still count).
+    const waiting = (await db.collection(COL.journeyInstances).doc(annaA1).get()).data()!;
+    assertEqual([waiting.status, waiting.cursor.nodeId], ['active', 'w_offer'], 'no click → open until the offer ends');
+    await runUntil(t0 + 15 * DAY_MS);
     const after = (await db.collection(COL.journeyInstances).doc(annaA1).get()).data()!;
-    assertEqual(after.status, 'exhausted', 'no click → exhausted');
+    assertEqual(after.status, 'exhausted', 'offer over → exhausted');
     const cv = (await db.collection(COL.contactVenues).doc(`${contactId}_${A.venueId}`).get()).data()!;
     assertEqual(cv.journeys.welcome_second_visit.activeInstanceId, null, 'free for a later journey');
 
