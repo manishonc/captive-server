@@ -174,6 +174,8 @@ export interface ConnectFixture {
   legacy?: Record<string, unknown>;
   /** The splash's Birthday month answer on this connect (saved on the guest doc too, like /create-user). */
   birthdayMonth?: number | null;
+  /** PR A7: a code typed in "Code from a friend". */
+  friendCode?: string | null;
 }
 
 /** What /create-user does, minus the parts Adaptive doesn't read: save a guest doc, then call the real hook. */
@@ -216,6 +218,7 @@ export async function connect(c: ConnectFixture): Promise<string> {
     emailVerified: false,
     phoneVerified: Boolean(c.phoneVerified),
     birthdayMonth: c.birthdayMonth ?? null,
+    friendCode: c.friendCode ?? null,
   });
   return ref.id;
 }

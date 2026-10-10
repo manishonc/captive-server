@@ -34,6 +34,8 @@ export interface RenderInputs {
   links: Partial<Record<LinkKind, string>>;
   /** A stay journey's booking (read fresh), with the venue-level check-in/out times (D-C20). */
   stay?: { checkInAt: number; checkOutAt: number; nights: number; times: StayTimes } | null;
+  /** PR A7: the regular's Bring-a-friend code (or a same-length stand-in for pricing). */
+  referralCode?: string | null;
 }
 
 const GUEST_INFO_FIELDS = [
@@ -80,6 +82,7 @@ export function renderValues(i: RenderInputs): RenderValues {
   if (typeof i.vars.offerExpiresAt === 'number') values['offer.expiryDate'] = localDateForRender(new Date(i.vars.offerExpiresAt), i.tz);
 
   for (const [key, value] of Object.entries(i.slots)) values[`slot.${key}`] = slotText(value, i.lang, i.offers);
+  if (i.referralCode) values['referral.code'] = i.referralCode;
   // PR S: a scan journey's occasion — the holiday and its day, the slow time.
   Object.assign(values, occasionMergeValues(i.vars, i.lang));
 

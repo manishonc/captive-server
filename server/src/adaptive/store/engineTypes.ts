@@ -119,6 +119,8 @@ export interface ContactVenueJourney {
   lastEnteredAt: StoredTime;
   lastExitAt: StoredTime;
   lastExitReason: string | null;
+  /** PR A7: ids of the events waiting to start this journey once the open run ends (`reentry.queue`). */
+  queued?: string[];
 }
 
 export interface ContactVenueDoc {

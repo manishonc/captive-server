@@ -30,6 +30,8 @@ export const COL = {
   breakers: 'CaptivePortal_AdaptiveBreakers',
   /** Local sandbox only: messages the fake provider "sent". */
   sandboxOutbox: 'CaptivePortal_AdaptiveSandboxOutbox',
+  // Bring-a-friend (PR A7): one personal code per regular and venue
+  referralCodes: 'CaptivePortal_ReferralCodes',
   // Airbnb stays (PR C)
   stayFeeds: 'CaptivePortal_StayFeeds',
   stays: 'CaptivePortal_Stays',

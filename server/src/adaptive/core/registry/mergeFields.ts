@@ -56,6 +56,8 @@ const FIELDS = new Set([
   'holiday.name',
   'holiday.day',
   'slow.when',
+  // PR A7: the regular's Bring-a-friend code, minted at send time (referrals/store.ts).
+  'referral.code',
 ]);
 
 const SECRET_PREFIX = 'guestinfo.secret.';

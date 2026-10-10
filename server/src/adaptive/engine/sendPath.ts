@@ -55,6 +55,8 @@ import { DRY_RUN_LINKS, linkGates, missingReason, renderMessage, renderValues, v
 import { resolveStayTimes } from '../stays/times';
 import type { LoadedStay } from '../stays/store';
 import { renderText } from '../core/render';
+import { REFERRAL_CODE_STANDIN, friendOfferOf } from '../core/referrals';
+import { mintReferralCode } from '../referrals/store';
 import { platformLiveSendsSince, venueLiveSendsSince, venueServiceSendsSince } from './counts';
 import { instanceRef, type LoadedInstance } from './instanceStore';
 import type { EventInput } from './events';
@@ -476,7 +478,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const unsubscribeUrl = channel === 'email' && cfg.purpose === 'marketing' && mode === 'live' ? unsubscribeUrlFor(guestId, inst.meta.venueId, sendKey) : '';
   if (unsubscribeUrl) priceLinks.unsubscribe = unsubscribeUrl;
   else if (channel === 'email' && cfg.purpose === 'marketing' && mode === 'test') priceLinks.unsubscribe = DRY_RUN_LINKS.unsubscribe;
-  const valuesWith = (links: Partial<Record<LinkKind, string>>) =>
+  // PR A7: the Bring-a-friend code — a same-length stand-in until the gate says yes (then minted).
+  const valuesWith = (links: Partial<Record<LinkKind, string>>, referralCode: string = REFERRAL_CODE_STANDIN) =>
     renderValues({
       lang: vc.locale,
       tz,
@@ -489,6 +492,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       links,
       // Stay dates and nights, and the check-in/out times the stay was scheduled with (D-C20).
       stay: inst.meta.context.stayId && a.stay ? { checkInAt: a.stay.checkInAt, checkOutAt: a.stay.checkOutAt, nights: a.stay.nights, times: resolveStayTimes(guestInfo) } : null,
+      referralCode,
     });
   const values = valuesWith(priceLinks);
   const rendered = renderMessage(vc.content, channel, values);
@@ -562,8 +566,28 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   // ── 5. Outcome ──
   if (gate.verdict === 'defer' && gate.until !== null) return deferred(gate, decision, a, { intendedAt, slot, sendKey, common, tz, replay, bandit: banditBlock, picks });
 
+  // PR A7: the regular's code, minted only now that the gate said yes — a test run gets a real one
+  // too (nothing is sent, but the preview shows a code that works at the venue).
+  const usesCode = [...rendered.fieldsUsed, ...parseMergeExpressions(String((vc.content as { preheader?: string }).preheader ?? '')).map((e) => canonicalField(e.name))].includes('referral.code');
+  const referralCode =
+    gate.verdict === 'allow' && usesCode
+      ? await mintReferralCode({
+          tenantUserId: inst.meta.tenantUserId,
+          venueId: inst.meta.venueId,
+          contactId: inst.meta.contactId,
+          instanceId: inst.id,
+          firstName: contact.firstName ?? null,
+          mode,
+          friendOffer: friendOfferOf(a.pinned.slots.friend_offer, a.pinned.offers),
+          now,
+        })
+      : undefined;
+
+  // The stored preview names the real code (a test run's and a live send's alike).
+  const preview = referralCode ? renderMessage(vc.content, channel, maskSecretValues(valuesWith(previewLinks, referralCode))) : previewRendered;
+
   if (gate.verdict === 'allow' && mode === 'test') {
-    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: previewRendered, decision, replay, price, ladderPos: pick.ladderPos, contact, common, bandit: banditBlock });
+    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: preview, decision, replay, price, ladderPos: pick.ladderPos, contact, common, bandit: banditBlock });
   }
 
   if (gate.verdict === 'allow') {
@@ -584,8 +608,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       ladderPos: pick.ladderPos,
       contact,
       rendered,
-      previewRendered,
+      previewRendered: preview,
       valuesWith,
+      referralCode,
       price,
       providerCostMinor,
       rateCardVersion: creditConfig.rateCardVersion,
@@ -746,7 +771,9 @@ interface LiveArgs {
   contact: ContactDoc;
   rendered: { subject?: string; text: string; fieldsUsed: string[] };
   previewRendered: { subject?: string; text: string };
-  valuesWith: (links: Partial<Record<LinkKind, string>>) => Record<string, string | undefined>;
+  valuesWith: (links: Partial<Record<LinkKind, string>>, referralCode?: string) => Record<string, string | undefined>;
+  /** PR A7: the minted Bring-a-friend code, when the wording names it. */
+  referralCode?: string;
   price: number;
   providerCostMinor: number;
   rateCardVersion: number;
@@ -795,7 +822,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     guestId: d.guestId ?? '',
     bookingUrl: d.bookingUrl,
   });
-  const finalValues = d.valuesWith({ ...minted.urls, ...(d.unsubscribeUrl ? { unsubscribe: d.unsubscribeUrl } : {}) });
+  const finalValues = d.valuesWith({ ...minted.urls, ...(d.unsubscribeUrl ? { unsubscribe: d.unsubscribeUrl } : {}) }, d.referralCode);
   const final = renderMessage(d.content, channel, finalValues);
   if (final.missing.length) return block(missingReason(final.missing));
 

@@ -728,6 +728,37 @@ function eventSentence(c: Ctx, ev: TimelineEventInput, journeyKey: string | null
       return one(name ? t(l, `The guest told us their birthday month (${name}).`, `Der Gast hat den Geburtstagsmonat angegeben (${name}).`) : t(l, 'The guest told us their birthday month.', 'Der Gast hat den Geburtstagsmonat angegeben.'));
     }
 
+    // PR A7: Bring a friend. On the regular: a friend came with their code. On the friend: what
+    // happened with the code they typed (counted, or why not).
+    case 'referral.joined': {
+      const n = num(data.friendNumber);
+      return one(
+        n !== null
+          ? t(l, `A friend signed up with this guest's code (friend ${n} of 3).`, `Jemand hat sich mit dem Code dieses Gasts angemeldet (Freund ${n} von 3).`)
+          : t(l, "A friend signed up with this guest's code.", 'Jemand hat sich mit dem Code dieses Gasts angemeldet.'),
+      );
+    }
+
+    case 'referral.code_entered': {
+      const result = str(data.result);
+      if (result === 'ok') return one(t(l, "Signed up with a friend's code — it counts for the friend's reward.", 'Mit dem Code von Freunden angemeldet – zählt für deren Belohnung.'));
+      const why: Record<string, [string, string]> = {
+        unknown: ['the code is unknown', 'der Code ist unbekannt'],
+        other_venue: ['the code is for another place', 'der Code gilt für einen anderen Ort'],
+        expired: ['the code has expired', 'der Code ist abgelaufen'],
+        full: ['the code was already used by 3 friends', 'der Code wurde schon von 3 Freunden genutzt'],
+        own_code: ["it is the guest's own code", 'es ist der eigene Code des Gasts'],
+        not_new: ['the guest had been here before', 'der Gast war schon einmal hier'],
+        already_counted: ['the guest already counted for this code', 'der Gast hat für diesen Code schon gezählt'],
+      };
+      const w = (result && why[result]) || null;
+      return one(
+        w
+          ? t(l, `Typed a friend's code — not counted: ${w[0]}.`, `Code von Freunden eingegeben – zählt nicht: ${w[1]}.`)
+          : t(l, "Typed a friend's code — not counted.", 'Code von Freunden eingegeben – zählt nicht.'),
+      );
+    }
+
     default:
       return one(c.admin ? ev.type : t(l, 'Something else happened.', 'Etwas anderes ist passiert.'));
   }
@@ -885,6 +916,9 @@ const SAME_TIME_ORDER: Record<string, number> = {
   'stay.linked': 3,
   'stay.moment': 4,
   'scan.due': 4,
+  // PR A7: the friend's code is handled after their visit starts; their friend reward after it.
+  'referral.code_entered': 4,
+  'referral.joined': 4,
   'journey.not_started': 5,
   'journey.entered': 5,
   'journey.config_updated': 6,

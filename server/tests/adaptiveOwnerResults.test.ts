@@ -355,9 +355,15 @@ test('cardNumbers on an empty venue', () => {
       visits: { total: 0, first: 0, revisits: 0, captures: 0 },
       stays: { syncedInRange: 0, changed: 0, cancelled: 0, linked: 0, upcoming: null },
       skipped: {},
+      friendsJoined: 0,
     },
     'zeros',
   );
+});
+
+test('cardNumbers: friends who joined with a Bring-a-friend code (PR A7)', () => {
+  const c = cardNumbers({ venue: { referrals: { joined: 3 } }, returnConversions: 0, averageSpend: null, upcomingStays: null });
+  assertEqual(c.friendsJoined, 3, 'three friends');
 });
 
 test('the test-run card never includes live numbers', () => {

@@ -223,6 +223,8 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
     guestInfo,
     links,
     stay: isStay ? { checkInAt: at + DAY_MS, checkOutAt: at + 4 * DAY_MS + 2 * HOUR_MS, nights: 3, times: resolveStayTimes(guestInfo) } : null,
+    // PR A7: an example Bring-a-friend code (a test send mints none).
+    referralCode: 'ANNA-7K2Q',
   });
   const rendered = renderMessage(content.content, input.channel as Channel, values);
   if (rendered.missing.length) {

@@ -311,6 +311,8 @@ async function main() {
       'playbook:local_business@2',
       'playbook:restaurant_growth@3',
       'playbook:local_business@3',
+      // PR A7: Restaurant growth v4 adds Bring a friend.
+      'playbook:restaurant_growth@4',
     ], 'order');
     const rg = plan.versions.find((v) => v.key === 'restaurant_growth')!;
     assert(rg.pins!.some((p) => p.journeyKey === 'holidays' && p.templateVersion === 2), 'pins holidays v2');

@@ -499,11 +499,12 @@ test('the scan sees the adaptive source and its functions', () => {
 
 // ── enrolForEvent: the only three ways a journey starts ─────────────────────
 
-test('enrolForEvent is called exactly 4 times: route.ts ×2, moments.ts ×1, scans/trigger.ts ×1 (PR S)', () => {
+test('enrolForEvent is called exactly 5 times: route.ts ×3, moments.ts ×1, scans/trigger.ts ×1 (PR S, PR A7)', () => {
   const calls = callsOf('enrolForEvent');
-  assertEqual(perFile(calls), { 'engine/route.ts': 2, 'scans/trigger.ts': 1, 'stays/moments.ts': 1 }, `calls (${calls.map(where)})`);
+  assertEqual(perFile(calls), { 'engine/route.ts': 3, 'scans/trigger.ts': 1, 'stays/moments.ts': 1 }, `calls (${calls.map(where)})`);
   const fns = calls.map((r) => `${r.src.rel} ${enclosing(r.src, r.at).name}`).sort();
-  assertEqual(fns, ['engine/route.ts handleConnect', 'engine/route.ts handleVisitEnd', 'scans/trigger.ts handleScanTrigger', 'stays/moments.ts handleStayTrigger'], 'calling functions');
+  // PR A7: startContactJourneys (from startForContactEvent) — a friend joined (`referral.joined`) or a queued start's turn.
+  assertEqual(fns, ['engine/route.ts handleConnect', 'engine/route.ts handleVisitEnd', 'engine/route.ts startContactJourneys', 'scans/trigger.ts handleScanTrigger', 'stays/moments.ts handleStayTrigger'], 'calling functions');
 });
 
 test('enrolForEvent, linkStayOnConnect and recordConnect are never passed along, aliased or re-exported', () => {
@@ -531,6 +532,7 @@ test('each enrolForEvent call gets its mode from venueModeFor, after an off → 
   assertEqual(sites.sort(), [
     'engine/route.ts handleConnect: mode=mode from mode',
     'engine/route.ts handleVisitEnd: mode=mode from mode',
+    'engine/route.ts startContactJourneys: mode=mode from mode',
     'scans/trigger.ts handleScanTrigger: mode=mode from mode',
     'stays/moments.ts handleStayTrigger: mode=mode from current',
   ], 'where each mode comes from');

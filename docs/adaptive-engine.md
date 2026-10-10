@@ -527,6 +527,50 @@ Restaurant growth v3 and Local business v3 pin it (`playbooksV3.ts`); a venue on
 moves to v3 the next time its owner saves. The scan journeys (PR S) already stay open for their
 14-day offers (`delay 14d`).
 
+## Bring a friend (PR A7)
+
+The manager's spec §5 A7: "after 2nd revisit — dual-redemption code, both get the offer; friend's
+splash signup attributes the referral". Restaurant growth v4 (`seed/definitions/playbooksV4.ts`)
+adds two journeys (`journeysReferral.ts`); the brief is `prd/pr-a7-brief.md`.
+
+- **The invite** (`bring_a_friend`, off by default): on a guest's 3rd visit (`visit.started`
+  `visitNumber: { eq: 3 }`), once, one marketing message at the next morning slot. Its wording names
+  `{{referral.code}}` and the friend's offer (`{{slot.friend_offer}}`, default 10% off).
+- **The code** (`referrals/store.ts`, `CaptivePortal_ReferralCodes/{code}`): minted at send time,
+  only once the gate says yes, like the real links (`engine/sendPath.ts`; pricing uses a stand-in as
+  long as the longest code). A test run mints one too. `NAME-XXXX` (`core/referrals.ts`: the first
+  name's letters, 4 characters without 0/O/1/I/L), one per invite run, valid 60 days, for the
+  first 3 friends. The doc keeps the regular's contact id, the friend's offer, the counter and the
+  friends' contact ids — never a friend's contact details. The owner's Send test uses an example code.
+- **The friend** (splash): `GET /splash-config` says `referral.enabled` while the venue runs the
+  invite (`referralOpenAt`, cached a minute); the portal then shows an optional "Code from a friend"
+  box. `/create-user` checks a typed code for someone new — not at that access point by email, and
+  not a known guest of the venue by email or phone (`knownAtVenue`: ContactPoints → ContactVenues) —
+  and answers `friendOffer: {label, kind, value}`; the portal shows it on a card ("10% off today", or
+  "Today: " + the offer's own words — an amount's value is in minor units — "show this screen to
+  staff") **before** the guest goes online (a Wi-Fi login page can close the moment they are). Both
+  connect routes pass the code to the engine (`payload.guest.friendCode`).
+- **Counting** (`engine/route.ts` handleConnect → `attributeReferral`, one transaction on the code):
+  only on a new visit, not when the sign-up breaker tripped. It counts for a first visit at the
+  venue, by someone other than the regular, once per friend, while the code has room and hasn't
+  expired. Every typed code leaves `referral.code_entered` on the friend (`result`: ok, unknown,
+  other_venue, expired, full, own_code, not_new, already_counted; a retried task finds it and keeps
+  what was decided). A counted one adds `referral.joined` on the **regular** (`friendNumber`, the
+  friend's guest id — never their name or contact details) with an `event_route` task.
+- **The reward** (`friend_reward`, always on — it only runs on `referral.joined`): issue the offer
+  (default 10% off), one marketing message with the offer link, then open until the offer ends
+  (`wait_until offer.expiresAt`, like the welcome v2); a return visit redeems it → thank-you
+  (service) → `converted`.
+- **One reward per friend — the queue:** a journey runs once at a time per guest and venue. With
+  `entry.reentry.queue: n` (only `after_exit`), a start that arrives while a run is open is kept in
+  ContactVenues `journeys.<key>.queued` (event ids, at most n, each once) instead of being dropped;
+  when the run ends (`engine/advance.ts`, in the same transaction) the first one is routed again for
+  that journey only (`event_route` with `requeue: { journeyKey }` → `startForContactEvent`). A start
+  keeps the rest of the queue. A queued start that can't begin (switched off, no consent, the venue
+  off) hands the turn to the next one (`startNextQueued`), so nothing waits for a run that won't come.
+- **Numbers:** `referral.joined` adds `referrals.joined` on `_venue` (a test run under `dryRun`), the
+  spec's KPI "new captured guests per 100 sends"; the owner card has `friendsJoined`.
+
 ## Signals coming back
 
 | Source | Adaptive effect |
@@ -910,6 +954,10 @@ launches sending". When the account goes live, such a venue **waits for one clic
    TTL fields) — both in the Firebase console (Firestore → TTL policies, and Indexes → Single field → exemption).
    `CaptivePortal_Agents` and `CaptivePortal_AgentUsage` keep no `expireAt`. Don't exempt `AgentUsage`'s
    `byTenant`: the cms account delete finds an account's leftover shares with `byTenant.<account> > 0`.
+   PR A7 adds no composite index (codes are read by id; the lookup by `instanceId` is equality-only). Its one
+   entry is `CaptivePortal_ReferralCodes` `expireAt`: a TTL policy (a code's `expireAt` is 25 months after its
+   invite; it stops working after 60 days) with the field's own indexes off — in the Firebase console like
+   PR F2a's. Don't exempt `instanceId` or `tenantUserId` (minting and the cms account delete query them).
    Wait until every index shows **Enabled**.
 
 2. **Check** that `GUEST_OTP_PEPPER` is set on the `server` app. The identity key is derived from

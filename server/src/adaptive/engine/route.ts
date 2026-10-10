@@ -26,11 +26,12 @@ import { accountLiveSince, venueModeFor, type EngineSettings } from '../store/en
 import { tsMs } from '../store/time';
 import { appendEvent, loadEvent } from './events';
 import { enabledJourneys, loadContact, loadVenueContext, type VenueContext } from './context';
-import { enrolForEvent, type VisitFacts } from './enrol';
+import { enrolForEvent, startNextQueued, type VisitFacts } from './enrol';
 import { deliverEvent } from './advance';
 import { fromDoc } from './instanceStore';
 import { dayKey, raiseAlert } from './alerts';
 import { handleStayEvent, handleStayRelinked, handleStayUnlinked, linkStayOnConnect } from '../stays/link';
+import { attributeReferral } from '../referrals/store';
 
 export interface RouteEnv {
   now: number;
@@ -49,6 +50,8 @@ interface GuestPayload {
   phoneVerified?: boolean;
   /** The splash's Birthday month answer of this connect (1–12). */
   birthdayMonth?: number | null;
+  /** PR A7: the code a friend typed on the splash ("Code from a friend"), as typed. */
+  friendCode?: string | null;
 }
 
 /** A whole month 1–12, else null. */
@@ -56,10 +59,17 @@ function monthOf(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 12 ? v : null;
 }
 
-export async function routeEvent(payload: { eventId: string; guest?: GuestPayload }, env: RouteEnv): Promise<void> {
+export async function routeEvent(
+  payload: { eventId: string; guest?: GuestPayload; requeue?: { journeyKey: string } },
+  env: RouteEnv,
+): Promise<void> {
   const event = await loadEvent(payload.eventId);
   if (!event) return;
+  // PR A7: a start that waited for an open run of this journey (`reentry.queue`), now its turn.
+  if (payload.requeue?.journeyKey) return startForContactEvent(event, env, payload.requeue.journeyKey);
   if (event.type === 'wifi.connected') return handleConnect(event, payload.guest ?? {}, env);
+  // PR A7: a friend used a regular's code — starts (or queues) the regular's friend reward.
+  if (event.type === 'referral.joined') return startForContactEvent(event, env);
   // A booking's dates changed or it was cancelled (stays/sync.ts): to that stay's journeys.
   if (event.type === 'stay.changed' || event.type === 'stay.cancelled') return handleStayEvent(event, env, mustDeliver);
   // The owner unlinked a person from a stay (PR D): their stay journeys end.
@@ -67,6 +77,30 @@ export async function routeEvent(payload: { eventId: string; guest?: GuestPayloa
   if (event.type === 'stay.relinked') return handleStayRelinked(event, env, mustDeliver);
   // Events tied to one journey (message.*, ratings): the task retries if the journey is busy.
   if (event.instanceId) mustDeliver(await deliverEvent(event.instanceId, event, env));
+}
+
+/**
+ * A guest's own event that starts journeys (PR A7: `referral.joined`), for every switched-on
+ * journey it triggers or — a queued start — only the one named. The venue's mode when it happened
+ * decides test / live, as for a visit; nothing while that was off.
+ */
+async function startForContactEvent(event: EngineEvent, env: RouteEnv, onlyJourney?: string): Promise<void> {
+  if (!event.venueId || !event.contactId) return;
+  const ctx = await loadVenueContext(event.venueId);
+  const started = ctx ? await startContactJourneys(ctx, event, env, onlyJourney) : 0;
+  // A queued start that can't begin now (switched off, no consent, the venue off…) gives its turn
+  // to the next one waiting, so the rest of the queue never sticks without a run to end.
+  if (onlyJourney && started === 0) await startNextQueued({ contactId: event.contactId, venueId: event.venueId, journeyKey: onlyJourney, tenantUserId: ctx?.tenantUserId ?? null, now: env.now });
+}
+
+async function startContactJourneys(ctx: VenueContext, event: EngineEvent, env: RouteEnv, onlyJourney?: string): Promise<number> {
+  if (!ctx.marketing) return 0;
+  const mode = venueModeFor(env.settings, ctx.adaptive, event.occurredAt);
+  if (mode === 'off') return 0;
+  const contact = await loadContact(event.contactId!);
+  if (!contact || contact.status !== 'active') return 0;
+  const created = await enrolForEvent({ ctx, who: { contactId: event.contactId!, networkId: contact.networkId, contact }, event, mode, visit: null, now: env.now, onlyJourney });
+  return created.length;
 }
 
 /** A journey that stayed busy through the retries: fail the task so it is tried again, never drop the event. */
@@ -261,6 +295,21 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     if (tripped) console.warn('[ADAPTIVE] sign-up breaker tripped — no journeys started:', apId);
     else if (fresh) await enrolForEvent({ ctx, who: { contactId: resolved.contactId, networkId: resolved.networkId, contact }, event: started, mode, visit: visitFacts, now: env.now });
     else console.warn('[ADAPTIVE] connect handled late — no journeys started:', event.id);
+    // PR A7: a friend's code typed on the splash counts once the friend is known — a first visit
+    // here, someone else's code, the first 3 friends (referrals/store.ts). Not for a tripped breaker.
+    if (guest.friendCode && !tripped) {
+      await attributeReferral({
+        raw: guest.friendCode,
+        tenantUserId: ctx.tenantUserId,
+        venueId,
+        friendContactId: resolved.contactId,
+        friendGuestId: guestId,
+        isFirstVisit: visit.isFirstVisit,
+        visitId: visit.visitId,
+        at: event.occurredAt,
+        mode,
+      });
+    }
     // Why nothing started, for the guest's timeline and "explain this guest" (PR D). Not counted in the numbers.
     if (tripped || !fresh) {
       await appendEvent(
