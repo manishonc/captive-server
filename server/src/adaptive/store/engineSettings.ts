@@ -4,6 +4,8 @@
  * the alert address.
  *
  * PR F2a adds `agents` (the AI master switch, per account, and the monthly AI budget).
+ * PR W2b adds `whatsappTemplates` (Auto: the WhatsApp tick sends clean AI drafts to Meta itself,
+ * at most `maxPerDay` a day).
  *
  * Read raw — PR 1's `getAdaptiveConfig()` parses a fixed shape and drops these
  * keys. Anything missing or malformed reads as the SAFE value: launch `off`,
@@ -73,10 +75,21 @@ const settingsSchema = z.object({
       changedBy: z.string().nullable().optional(),
     })
     .catch({ mode: 'off', accounts: {}, monthlyBudgetUsd: 0 }),
+  // PR W2b: Auto — off unless HeidiFi turns it on. A missing cap is the default (10); one that
+  // can't be read is 0 (Auto sends nothing).
+  whatsappTemplates: z
+    .object({
+      autoSubmit: banditModeSchema.catch('off'),
+      maxPerDay: z.number().int().min(0).max(100).catch(0),
+      changedBy: z.string().nullable().optional(),
+    })
+    .catch({ autoSubmit: 'off', maxPerDay: 0 }),
 });
 
 /** PR F2a: the monthly AI budget when none was ever set (F-D5). */
 export const DEFAULT_AI_BUDGET_USD = 100;
+/** PR W2b: Auto's daily cap when none was ever set. */
+export const DEFAULT_WA_AUTO_PER_DAY = 10;
 
 export interface EngineSettings {
   launch: {
@@ -94,7 +107,12 @@ export interface EngineSettings {
   bandit?: { mode: BanditMode; accounts: Record<string, BanditMode>; changedBy: string | null };
   /** PR F2a: the AI agents' master switch (global + per account) and the monthly budget in USD. */
   agents?: { mode: AgentsMode; accounts: Record<string, AgentsMode>; monthlyBudgetUsd: number; changedBy: string | null };
+  /** PR W2b: Auto — the WhatsApp tick sends clean AI drafts to Meta by itself; at most `maxPerDay` a day. */
+  whatsappTemplates?: { autoSubmit: WaAutoSubmit; maxPerDay: number; changedBy: string | null };
 }
+
+/** PR W2b: `on` lets the WhatsApp tick send clean AI drafts to Meta (and ask the AI to fix rejected ones). */
+export type WaAutoSubmit = 'off' | 'on';
 
 /** PR F2a: `on` lets scheduled AI jobs run for an account (the admin's Test connection runs either way). */
 export type AgentsMode = 'off' | 'on';
@@ -107,6 +125,7 @@ export const SAFE_SETTINGS: EngineSettings = {
   paused: true,
   bandit: { mode: 'off', accounts: {}, changedBy: null },
   agents: { mode: 'off', accounts: {}, monthlyBudgetUsd: 0, changedBy: null },
+  whatsappTemplates: { autoSubmit: 'off', maxPerDay: 0, changedBy: null },
 };
 
 export function parseEngineSettings(data: Record<string, unknown> | undefined): EngineSettings {
@@ -119,6 +138,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     killSwitch: data.killSwitch ?? {},
     bandit: data.bandit ?? {},
     agents: agentsInput(data.agents),
+    whatsappTemplates: waTemplatesInput(data.whatsappTemplates),
   });
   return {
     launch: {
@@ -133,6 +153,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     paused: p.killSwitch.sendingPaused,
     bandit: { mode: p.bandit.mode, accounts: p.bandit.accounts, changedBy: p.bandit.changedBy ?? null },
     agents: { mode: p.agents.mode, accounts: p.agents.accounts, monthlyBudgetUsd: p.agents.monthlyBudgetUsd, changedBy: p.agents.changedBy ?? null },
+    whatsappTemplates: { autoSubmit: p.whatsappTemplates.autoSubmit, maxPerDay: p.whatsappTemplates.maxPerDay, changedBy: p.whatsappTemplates.changedBy ?? null },
   };
 }
 
@@ -142,6 +163,19 @@ function agentsInput(raw: unknown): unknown {
   if (typeof raw !== 'object' || Array.isArray(raw)) return raw;
   const o = raw as Record<string, unknown>;
   return Object.prototype.hasOwnProperty.call(o, 'monthlyBudgetUsd') ? o : { ...o, monthlyBudgetUsd: DEFAULT_AI_BUDGET_USD };
+}
+
+/** A missing `whatsappTemplates` block, or one without a cap, gets the default cap; anything else is parsed as is. */
+function waTemplatesInput(raw: unknown): unknown {
+  if (raw === undefined || raw === null) return { maxPerDay: DEFAULT_WA_AUTO_PER_DAY };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const o = raw as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(o, 'maxPerDay') ? o : { ...o, maxPerDay: DEFAULT_WA_AUTO_PER_DAY };
+}
+
+/** PR W2b: Auto's switch and cap (a settings object without them: off, 0). */
+export function waAutoOf(s: EngineSettings): { autoSubmit: WaAutoSubmit; maxPerDay: number; changedBy: string | null } {
+  return s.whatsappTemplates ?? { autoSubmit: 'off', maxPerDay: 0, changedBy: null };
 }
 
 

@@ -214,6 +214,29 @@ export interface WriterTemplateView {
   dismissedAtMs: number | null;
   /** The category it has: Meta's once Meta filed it, else the one asked for (null: unknown). */
   category: string | null;
+  /** PR W2b: the AI fixed it and the fix hasn't been to Meta yet (aiFixUnsentOf). */
+  aiFixUnsent?: boolean;
+}
+
+/** PR W2b: submit errors that only say Meta was unreachable or busy (nothing of the text was judged). */
+export const TRANSIENT_SUBMIT_ERRORS: ReadonlySet<string> = new Set(['rate_limited', 'unavailable', 'unknown', 'unknown_outcome']);
+/** PR W2b: submit errors about the account (the token, its permission, the account gone) — never about the text. */
+export const ACCOUNT_SUBMIT_ERRORS: ReadonlySet<string> = new Set(['setup', 'permission', 'not_found']);
+
+/**
+ * PR W2b: the AI fixed a template and the fix hasn't been to Meta yet (a second fix would answer the
+ * same rejection). `ai.sentVersion` is the version Meta last saw (stamped when a submit starts, put
+ * back when it never reached Meta or Meta was only unreachable). A template fixed before W2b (no
+ * `sentVersion` at all) falls back on Meta's change time: Meta's last word older than the fix.
+ */
+export function aiFixUnsentOf(
+  ai: { kind: string; appliedVersion: number; atMs: number | null; sentVersion?: number | null } | null,
+  version: number,
+  metaChangedAtMs: number | null,
+): boolean {
+  if (!ai || ai.kind !== 'fix' || ai.appliedVersion !== version) return false;
+  if (ai.sentVersion !== undefined) return ai.sentVersion !== version;
+  return !(metaChangedAtMs !== null && ai.atMs !== null && metaChangedAtMs > ai.atMs);
 }
 
 export interface WriterRequestInput {
@@ -242,7 +265,8 @@ export type WriterRefusal =
   | 'language_exists'
   | 'no_target'
   | 'fix_limit'
-  | 'other_language';
+  | 'other_language'
+  | 'fix_unsent';
 
 const WANTS: Record<'marketing' | 'utility', WaRequestable> = { marketing: 'MARKETING', utility: 'UTILITY' };
 
@@ -339,6 +363,7 @@ export function buildWriterRequest(i: WriterRequestInput): { brief: WriterBrief;
     const status = String(t.metaStatus ?? '').toUpperCase();
     if (t.stage !== 'submitted' || (status !== 'REJECTED' && status !== 'PAUSED')) return { refuse: 'not_rejected' };
     if (t.aiFixes >= MAX_AI_FIXES) return { refuse: 'fix_limit' };
+    if (t.aiFixUnsent) return { refuse: 'fix_unsent' };
     const body = clean(t.source.body);
     if (!body) return { refuse: 'not_ours' };
     current = { body, buttonText: t.source.button?.text ?? null };
@@ -714,7 +739,7 @@ export function suggestOptionsFor(cell: WriterTemplateView[], all: WriterTemplat
   }
   const fixable = live.find((t) => {
     const s = String(t.metaStatus ?? '').toUpperCase();
-    return t.source && t.stage === 'submitted' && (s === 'REJECTED' || s === 'PAUSED') && t.aiFixes < MAX_AI_FIXES;
+    return t.source && t.stage === 'submitted' && (s === 'REJECTED' || s === 'PAUSED') && t.aiFixes < MAX_AI_FIXES && !t.aiFixUnsent;
   });
   if (fixable) out.push({ kind: 'fix', templateId: fixable.id });
   out.push({ kind: 'alternative', templateId: null });
@@ -842,6 +867,8 @@ export function writerCodeWords(code: string): string {
       return `The AI fixed this template ${MAX_AI_FIXES} times already: a person decides now`;
     case 'other_language':
       return 'That template is in another language than the one asked for';
+    case 'fix_unsent':
+      return 'The AI’s fix hasn’t been sent to Meta yet — send it again first';
     case 'bad_params':
       return 'The request couldn’t be read';
     default:

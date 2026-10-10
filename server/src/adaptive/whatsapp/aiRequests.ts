@@ -41,7 +41,9 @@ import {
 import type { PoolRow } from '../core/whatsapp/pools';
 import { checkContext, displayOf, loadPools, poolFor, reportFor } from './context';
 import { writerViewOf } from './aiDrafts';
-import { inTransaction, listTemplates, opsInTx, readOps, readOpsInTx, updateOps, writeLog, type StoredTemplate, type WaActor, type WaOps } from './store';
+import { AUTO_ACTOR, SYSTEM, inTransaction, listTemplates, opsInTx, readOps, readOpsInTx, updateOps, writeLog, type StoredTemplate, type WaActor, type WaOps } from './store';
+import { autoFixCandidates } from '../core/whatsapp/auto';
+import { autoViewsFor } from './autoViews';
 
 export const WRITER_KEY = 'wa_template_writer';
 /** Of the writer's runs a day, this many are always left for "Suggest with AI" (the gap-fill takes the rest). */
@@ -245,6 +247,8 @@ export async function queueWriterRun(args: {
   by: WaActor;
   realNow: number;
   delayMs?: number;
+  /** PR W2b: more ops fields written with the task (Auto's "one fix per rejection" stamp), given the task id. */
+  extraOps?: (taskId: string) => Record<string, unknown>;
 }): Promise<string | null> {
   const { brief, local } = args.request;
   const cell = cellKeyOf(local.use.journeyKey, local.use.poolKey, local.lang);
@@ -255,17 +259,17 @@ export async function queueWriterRun(args: {
     if (mark?.taskId === ownId) return ownId;
     if (mark && LIVE_TASK_STATES.has((await taskStatusInTx(tx, mark.taskId)) ?? '')) return null;
     const id = firestoreScheduler.scheduleInTx(tx, task);
-    opsInTx(tx, { aiPending: { [cell]: { taskId: id, kind: local.kind, atMs: args.realNow, by: args.by.label ?? args.by.kind } } });
+    opsInTx(tx, { aiPending: { [cell]: { taskId: id, kind: local.kind, atMs: args.realNow, by: args.by.label ?? args.by.kind } }, ...(args.extraOps ? args.extraOps(id) : {}) });
     return id;
   });
   if (!taskId) return null;
-  const who = local.requestedBy === 'gap_fill' ? 'The daily gap-fill' : local.requestedBy === 'auto_fix' ? 'Auto' : 'A Suggest';
+  const who = local.requestedBy === 'gap_fill' ? 'The daily gap-fill' : local.requestedBy === 'auto_fix' ? (args.by.kind === 'auto' ? 'Auto' : 'HeidiFi') : 'A Suggest';
   await writeLog(
     {
       kind: 'ai.requested',
       level: local.requestedBy === 'suggest' ? 'info' : 'routine',
       actor: args.by,
-      summary: `${who} asked the AI for a ${local.kind} of “${args.request.pool.poolName}” (${local.lang.toUpperCase()})`,
+      summary: `${who} asked the AI for a ${local.kind} of “${args.request.pool.poolName}” (${local.lang.toUpperCase()})${local.requestedBy === 'auto_fix' ? ' after Meta rejected it' : ''}`,
       detail: { taskId, kind: local.kind, requestedBy: local.requestedBy, trigger: args.trigger, withheld: local.withheld, targetTemplateId: local.targetTemplateId },
     },
     { poolKey: local.use.poolKey, language: metaLanguageFor(local.lang), templateId: local.kind === 'fix' ? local.targetTemplateId : null },
@@ -331,6 +335,68 @@ export async function planGapFill(realNow: number = Date.now()): Promise<number>
       actor: { kind: 'system', uid: null, label: 'Daily gap-fill' },
       summary: `The daily gap-fill asked the AI for ${queued} missing template${queued === 1 ? '' : 's'} (${gaps.length} missing in all)`,
       detail: { queued, missing: gaps.length, runsLeft: status.runsLeft, reserve: SUGGEST_RESERVE },
+    });
+  }
+  return queued;
+}
+
+// ── PR W2b: the AI fixes Auto asks for ────────────────────────────────────────
+
+/**
+ * Every tick, ask the AI to fix the AI templates Meta rejected — one fix run per rejection
+ * (`ops.autoFix`: the Meta change each template's last fix was asked for), at most 2 AI fixes per
+ * template (Suggest's count too). Needs the AI switch, the writer's Scheduled runs and budget; uses
+ * the writer's runs left minus the Suggest reserve (before the gap-fill). Returns how many runs it
+ * queued. `snap`: the registry the tick already read. With Auto off (`autoOn: false`, for now:
+ * Manish, 2026-10-10) each fix is a draft a person sends; with Auto on, Auto sends it.
+ */
+export async function planAutoFixes(realNow: number, snap?: RegistrySnapshot, opts: { autoOn: boolean } = { autoOn: true }): Promise<number> {
+  const actor = opts.autoOn ? AUTO_ACTOR : SYSTEM;
+  const who = opts.autoOn ? 'Auto' : 'HeidiFi';
+  const s = snap ?? (await registrySnapshot());
+  const candidates = autoFixCandidates(autoViewsFor(s.docs, s.pools, s.ops), s.ops.autoFix);
+  if (!candidates.length) return 0;
+  const status = await writerStatus(realNow);
+  if (!status.aiOn || !status.scheduledOn || !status.budgetOk) return 0;
+  const pending = await livePendingCells(s.ops);
+  const quota = Math.max(0, status.runsLeft - SUGGEST_RESERVE);
+  let queued = 0;
+  for (const v of candidates) {
+    if (queued >= quota) break;
+    const use = v.use!;
+    const lang = v.lang!;
+    if (pending[cellKeyOf(use.journeyKey, use.poolKey, lang)]) continue;
+    const prev = s.ops.autoFix[v.id];
+    const tries = prev && prev.at === v.metaChangedAtMs ? prev.tries + 1 : 1;
+    const stamp = (taskId: string | null) => ({ autoFix: { [v.id]: { at: v.metaChangedAtMs, tries, taskId, retry: false } } });
+    const req = await writerRequestFor({ kind: 'fix', requestedBy: 'auto_fix', use, lang, templateId: v.id }, s);
+    if ('refuse' in req) {
+      // Not one the AI can fix (its words say why): asked once for this rejection, never again.
+      await updateOps(stamp(null));
+      await writeLog(
+        { kind: 'ai.auto_fix_skipped', level: 'routine', actor, summary: `${who} didn’t ask the AI to fix ${v.name} (${lang}): ${writerRefusalWords(req.refuse)}`, detail: { code: req.refuse } },
+        { templateId: v.id, name: v.name, language: metaLanguageFor(lang), poolKey: use.poolKey },
+      );
+      continue;
+    }
+    const taskId = await queueWriterRun({
+      request: req,
+      trigger: 'schedule',
+      key: `wa:autofix:${v.id}:v${v.version}`,
+      by: actor,
+      realNow,
+      delayMs: queued * GAP_STAGGER_MS,
+      extraOps: (taskId) => stamp(taskId),
+    });
+    if (taskId) queued += 1;
+  }
+  if (queued) {
+    await writeLog({
+      kind: 'ai.auto_fix',
+      level: 'info',
+      actor,
+      summary: `${who} asked the AI to fix ${queued} template${queued === 1 ? '' : 's'} Meta rejected${opts.autoOn ? '' : ': each fix waits for you to send it to Meta'}`,
+      detail: { queued, candidates: candidates.length, runsLeft: status.runsLeft, reserve: SUGGEST_RESERVE, autoOn: opts.autoOn },
     });
   }
   return queued;

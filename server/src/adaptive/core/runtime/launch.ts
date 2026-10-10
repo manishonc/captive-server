@@ -14,6 +14,8 @@
  *  - PR F2a: the AI agents' switch (global + per account) and the monthly AI budget, the same way:
  *    on is "AI ON", a higher budget is a loosened limit ("LOOSEN LIMITS"); off and a lower budget
  *    are one click.
+ *  - PR W2b: WhatsApp Auto (global only) and its daily cap: on is "WA AUTO-SUBMIT ON", a higher
+ *    cap is "LOOSEN LIMITS"; off and a lower cap are one click.
  */
 
 export type Mode = 'off' | 'test' | 'live';
@@ -37,6 +39,8 @@ export interface LaunchState {
   bandit?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch> };
   /** PR F2a: the AI agents (missing = off everywhere) and the monthly budget in USD. */
   agents?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch>; monthlyBudgetUsd: number };
+  /** PR W2b: WhatsApp Auto (missing = off) and its daily cap. */
+  whatsappTemplates?: { autoSubmit: BanditSwitch; maxPerDay: number };
 }
 
 export type BanditSwitch = 'off' | 'on';
@@ -53,6 +57,8 @@ export interface LaunchChange {
   bandit?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null> };
   /** PR F2a: `null` removes an account's AI override. */
   agents?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null>; monthlyBudgetUsd?: number };
+  /** PR W2b: WhatsApp Auto and its daily cap. */
+  whatsappTemplates?: { autoSubmit?: BanditSwitch; maxPerDay?: number };
 }
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -82,7 +88,13 @@ export function applyChange(before: LaunchState, c: LaunchChange): LaunchState {
     alertsEmail: c.alertsEmail === undefined ? before.alertsEmail : c.alertsEmail,
     bandit: applyBandit(before.bandit, c.bandit),
     ...(before.agents || c.agents ? { agents: applyAgents(before.agents, c.agents) } : {}),
+    ...(before.whatsappTemplates || c.whatsappTemplates ? { whatsappTemplates: applyWaTemplates(before.whatsappTemplates, c.whatsappTemplates) } : {}),
   };
+}
+
+function applyWaTemplates(before: LaunchState['whatsappTemplates'], c: LaunchChange['whatsappTemplates']): NonNullable<LaunchState['whatsappTemplates']> {
+  const w = before ?? { autoSubmit: 'off' as BanditSwitch, maxPerDay: 0 };
+  return { autoSubmit: c?.autoSubmit ?? w.autoSubmit, maxPerDay: c?.maxPerDay ?? w.maxPerDay };
 }
 
 function applyAgents(before: LaunchState['agents'], c: LaunchChange['agents']): NonNullable<LaunchState['agents']> {
@@ -149,7 +161,7 @@ export function nextLiveSince(before: LaunchState, after: Pick<LaunchState, 'def
   return ls;
 }
 
-export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on' | 'agents_on';
+export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on' | 'agents_on' | 'wa_auto_on';
 
 export interface ChangeSummary {
   /** Plain lines for the card: "tenant_x: test run → live". */
@@ -168,8 +180,9 @@ const PHRASES: Record<LooseningKind, string> = {
   loosen_limits: 'LOOSEN LIMITS',
   bandit_on: 'BANDIT ON',
   agents_on: 'AI ON',
+  wa_auto_on: 'WA AUTO-SUBMIT ON',
 };
-const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on', 'agents_on'];
+const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on', 'agents_on', 'wa_auto_on'];
 const MODE_WORDS: Record<Mode, string> = { off: 'off', test: 'test run', live: 'live' };
 
 export function summarizeChange(before: LaunchState, after: LaunchState): ChangeSummary {
@@ -235,6 +248,19 @@ export function summarizeChange(before: LaunchState, after: LaunchState): Change
     if (ba.monthlyBudgetUsd !== aa.monthlyBudgetUsd) {
       lines.push(`AI budget: $${ba.monthlyBudgetUsd} → $${aa.monthlyBudgetUsd} a month`);
       if (aa.monthlyBudgetUsd > ba.monthlyBudgetUsd) kinds.add('loosen_limits');
+    }
+  }
+  // PR W2b: WhatsApp Auto and its daily cap ("WhatsApp Auto" on the admin card).
+  if (before.whatsappTemplates || after.whatsappTemplates) {
+    const bw = before.whatsappTemplates ?? { autoSubmit: 'off' as BanditSwitch, maxPerDay: 0 };
+    const aw = after.whatsappTemplates ?? bw;
+    if (bw.autoSubmit !== aw.autoSubmit) {
+      lines.push(`WhatsApp Auto (send AI templates to Meta): ${bw.autoSubmit} → ${aw.autoSubmit}`);
+      if (aw.autoSubmit === 'on') kinds.add('wa_auto_on');
+    }
+    if (bw.maxPerDay !== aw.maxPerDay) {
+      lines.push(`WhatsApp Auto: ${bw.maxPerDay} → ${aw.maxPerDay} templates a day`);
+      if (aw.maxPerDay > bw.maxPerDay) kinds.add('loosen_limits');
     }
   }
   const loosening = ORDER.filter((k) => kinds.has(k));

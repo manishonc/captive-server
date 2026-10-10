@@ -146,9 +146,18 @@ export interface WaAiInfo {
   /** AI fixes made on this template so far. */
   fixes: number;
   at: string;
+  /** PR W2b: what the AI first wrote it as — an AI fix keeps it (an "alternative" is never Auto's). */
+  writtenAs?: 'new' | 'translation' | 'alternative' | null;
   /** Set by Auto (W2b) when it sent this version to Meta. */
   autoSubmittedAt?: string | null;
   autoSubmittedVersion?: number | null;
+  /** PR W2b: Auto's tries of `autoSubmittedVersion` (Meta unreachable: at most 3). */
+  autoAttempts?: number | null;
+  /**
+   * PR W2b: the version Meta last saw (set when a submit starts, put back to null when it never
+   * reached Meta). Absent on a template the AI touched before W2b; null: not sent since.
+   */
+  sentVersion?: number | null;
 }
 
 /** The `ai` field as a WaAiInfo (null when it isn't one — a template no AI touched). */
@@ -170,8 +179,12 @@ export function aiInfoOf(d: Pick<WaTemplateDoc, 'ai'>): WaAiInfo | null {
     appliedVersion: int(a.appliedVersion),
     fixes: int(a.fixes),
     at: str(a.at, 40),
+    writtenAs: ['new', 'translation', 'alternative'].includes(String(a.writtenAs)) ? (a.writtenAs as WaAiInfo['writtenAs']) : null,
     autoSubmittedAt: typeof a.autoSubmittedAt === 'string' ? a.autoSubmittedAt : null,
     autoSubmittedVersion: typeof a.autoSubmittedVersion === 'number' ? a.autoSubmittedVersion : null,
+    autoAttempts: typeof a.autoAttempts === 'number' ? a.autoAttempts : null,
+    // Absent stays absent (a template from before W2b); null and a number as stored.
+    ...(Object.prototype.hasOwnProperty.call(a, 'sentVersion') ? { sentVersion: typeof a.sentVersion === 'number' ? a.sentVersion : null } : {}),
   };
 }
 
@@ -454,6 +467,18 @@ export interface WaOps {
   aiPending: Record<string, { taskId: string; kind: string; atMs: number; by: string }>;
   /** PR W2: the daily gap-fill — the (UTC) day it last queued, and cells waiting after repeated rejections. */
   aiGapFill: { lastDay: string | null; cooldowns: Record<string, number>; rejects: Record<string, number> };
+  /** PR W2b: Auto's sends on one (UTC) day — counted in beginSubmit's transaction. */
+  autoSubmits: { day: string | null; count: number };
+  /**
+   * PR W2b: per template, the rejection (Meta's change, real ms) Auto last asked the AI to fix, its
+   * tries for that rejection and the task — one fix per rejection; a run that ended for a passing
+   * reason (a deploy, the gate, the budget) lets it ask again (`retry`), at most 3 tries.
+   */
+  autoFix: Record<string, AutoFixStamp>;
+  /** PR W2b: Auto waits until then after Meta failed it (no answer, unreachable, the account) — real ms. */
+  autoPauseUntilMs: number | null;
+  /** PR W2b: Auto's "left for now" log rows already written today (one per template, version and reason a day). */
+  autoNoted: { day: string | null; keys: string[] };
 }
 
 const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -483,7 +508,63 @@ export function parseOps(raw: Record<string, unknown> | undefined): WaOps {
     syncFailures: num(r.syncFailures, 0),
     aiPending: parsePending(r.aiPending),
     aiGapFill: parseGapFill(r.aiGapFill),
+    autoSubmits: (() => {
+      const a = (r.autoSubmits ?? {}) as Record<string, unknown>;
+      return { day: typeof a.day === 'string' ? a.day : null, count: num(a.count, 0) };
+    })(),
+    autoFix: (() => {
+      const out: Record<string, AutoFixStamp> = {};
+      if (r.autoFix && typeof r.autoFix === 'object') {
+        for (const [k, v] of Object.entries(r.autoFix as Record<string, unknown>)) {
+          if (typeof v === 'number' || v === null) out[k] = { at: v, tries: 1, taskId: null, retry: false };
+          else if (v && typeof v === 'object') {
+            const x = v as Record<string, unknown>;
+            out[k] = { at: typeof x.at === 'number' ? x.at : null, tries: num(x.tries, 1), taskId: typeof x.taskId === 'string' ? x.taskId : null, retry: x.retry === true };
+          }
+        }
+      }
+      return out;
+    })(),
+    autoPauseUntilMs: typeof r.autoPauseUntilMs === 'number' ? r.autoPauseUntilMs : null,
+    autoNoted: (() => {
+      const a = (r.autoNoted ?? {}) as Record<string, unknown>;
+      return { day: typeof a.day === 'string' ? a.day : null, keys: Array.isArray(a.keys) ? a.keys.filter((k): k is string => typeof k === 'string').slice(0, 500) : [] };
+    })(),
   };
+}
+
+/** PR W2b: Auto's fix request for one template (see WaOps.autoFix). */
+export interface AutoFixStamp {
+  at: number | null;
+  tries: number;
+  taskId: string | null;
+  retry: boolean;
+}
+
+/**
+ * PR W2b: an Auto send that never reached Meta gives its place back — the day's count (only on the
+ * day it was counted) and, for a create, the template count's own estimate (the next sync sets it).
+ */
+export async function refundAutoSend(day: string, create: boolean): Promise<void> {
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(opsRef());
+    const ops = parseOps(snap.exists ? (snap.data() as Record<string, unknown>) : undefined);
+    const patch: Record<string, unknown> = {};
+    if (ops.autoSubmits.day === day && ops.autoSubmits.count > 0) patch.autoSubmits = { day, count: ops.autoSubmits.count - 1 };
+    if (create && ops.templateCount !== null && ops.templateCount > 0) patch.templateCount = ops.templateCount - 1;
+    if (Object.keys(patch).length) tx.set(opsRef(), patch, { merge: true });
+  });
+}
+
+/** PR W2b: Auto's sends on this (UTC) day. */
+/** The UTC day Auto's cap counts in (yyyymmdd, like the AI budget's day; kept here so submit never reaches the brain). */
+export function autoDayOf(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+export function autoSubmitsToday(ops: WaOps, day: string): number {
+  return ops.autoSubmits.day === day ? ops.autoSubmits.count : 0;
 }
 
 function numberMap(v: unknown): Record<string, number> {
@@ -739,10 +820,15 @@ export function inTransaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T
  * Moves a draft (or a rejected/paused template being edited) to `submitting`, comparing
  * `baseVersion`, counting the create in this hour (Meta allows 100) — one transaction, so of two
  * clicks one wins and the other gets a 409.
+ *
+ * PR W2b, `auto`: Auto's send — in the same transaction it re-checks what can change under it (an
+ * AI template not edited by hand since, never an alternative, nothing else of its message and
+ * language with Meta, under the day's cap and the template limit), counts the day's sends, and
+ * stamps `ai.autoSubmittedAt`/`autoSubmittedVersion` (the summary and the badge read them).
  */
 export async function beginSubmit(
   id: string,
-  args: { baseVersion: number; by: WaActor; engineNow: number; realNow: number; maxCreatesPerHour: number },
+  args: { baseVersion: number; by: WaActor; engineNow: number; realNow: number; maxCreatesPerHour: number; auto?: { day: string; maxPerDay: number } },
 ): Promise<{ doc: StoredTemplate; kind: 'create' | 'edit' }> {
   return db.runTransaction(async (tx) => {
     const ref = templates().doc(id);
@@ -750,6 +836,8 @@ export async function beginSubmit(
     if (!snap.exists) throw notFound('No such template');
     const cur = decode(id, snap.data() as Record<string, unknown>);
     const ops = parseOps(opsSnap.exists ? (opsSnap.data() as Record<string, unknown>) : undefined);
+    // Auto: the rest of its message and language, read before any write.
+    const cell = args.auto && cur.use?.kind === 'adaptive' ? (await templatesOfMessageInTx(tx, cur.use)).filter((x) => x.id !== cur.id && x.lang === cur.lang && !x.dismissed) : [];
     if (cur.version !== args.baseVersion) throw staleTemplate();
     if (cur.dismissed) throw conflict('This template is dismissed — restore it first');
     const metaStatus = String(cur.meta?.status ?? '').toUpperCase();
@@ -761,10 +849,43 @@ export async function beginSubmit(
     const key = hourKey(args.realNow);
     const used = ops.createsHour.key === key ? ops.createsHour.count : 0;
     if (kind === 'create' && used >= args.maxCreatesPerHour) throw new HttpLikeTooMany();
+    let autoUsed = 0;
+    if (args.auto) {
+      const ai = aiInfoOf(cur);
+      // An alternative, or an AI fix from before W2b whose origin is unknown (it may be one), is never Auto's.
+      if (cur.origin !== 'ai' || !ai || ai.appliedVersion !== cur.version || ai.writtenAs === 'alternative' || (!ai.writtenAs && (ai.kind === 'alternative' || ai.kind === 'fix'))) {
+        throw new AutoRefused('not_eligible', 'Not one Auto sends (edited by hand, or an alternative)');
+      }
+      const withMeta = cell.some((x) => x.stage === 'submitting' || (x.stage === 'submitted' && ['PENDING', 'IN_REVIEW', 'PENDING_REVIEW', 'IN_APPEAL', 'APPEAL_REQUESTED'].includes(String(x.meta?.status ?? '').toUpperCase())));
+      if (withMeta) throw new AutoRefused('cell_busy', 'Another template of this message and language is with Meta');
+      autoUsed = ops.autoSubmits.day === args.auto.day ? ops.autoSubmits.count : 0;
+      if (autoUsed >= args.auto.maxPerDay) throw new AutoRefused('auto_cap', `Auto sends at most ${args.auto.maxPerDay} a day`);
+      // Room under Meta's limit (or none known): a create waits; the count moves with Auto's own creates.
+      if (kind === 'create' && (ops.templateCount === null || ops.templateCount + 1 > Math.floor(ops.templateLimit * 0.9))) {
+        throw new AutoRefused('template_limit', 'Near Meta’s template limit (or it is unknown): Auto waits for a person');
+      }
+    }
     const seq = cur.seq + 1;
     const submit: WaSubmitState = { kind, prevStage: cur.stage === 'draft' ? 'draft' : 'submitted', startedAtMs: args.engineNow, by: args.by };
-    tx.update(ref, { stage: 'submitting', submit, lastSubmitError: null, seq, updatedAt: new Date(), updatedBy: args.by.uid ?? args.by.kind });
+    const aiNow = aiInfoOf(cur);
+    // The version Meta is about to see (put back by revert() when it never got there).
+    const sentStamp = aiNow ? { 'ai.sentVersion': cur.version } : {};
+    const autoStamp = args.auto
+      ? {
+          'ai.autoSubmittedAt': new Date(args.realNow).toISOString(),
+          'ai.autoSubmittedVersion': cur.version,
+          'ai.autoAttempts': aiNow?.autoSubmittedVersion === cur.version ? (aiNow?.autoAttempts ?? 1) + 1 : 1,
+        }
+      : {};
+    tx.update(ref, { stage: 'submitting', submit, lastSubmitError: null, seq, updatedAt: new Date(), updatedBy: args.by.uid ?? args.by.kind, ...sentStamp, ...autoStamp });
     if (kind === 'create') tx.set(opsRef(), { createsHour: { key, count: used + 1 } }, { merge: true });
+    if (args.auto) {
+      tx.set(
+        opsRef(),
+        { autoSubmits: { day: args.auto.day, count: autoUsed + 1 }, ...(kind === 'create' && ops.templateCount !== null ? { templateCount: ops.templateCount + 1 } : {}) },
+        { merge: true },
+      );
+    }
     logInTx(
       tx,
       {
@@ -774,12 +895,23 @@ export async function beginSubmit(
         summary: kind === 'create' ? `Sending ${cur.name} (${cur.language}) to Meta for review` : `Sending the edited ${cur.name} (${cur.language}) to Meta for review`,
         from: cur.stage === 'draft' ? 'draft' : metaStatus.toLowerCase(),
         to: 'submitting',
-        detail: { category: cur.requestedCategory, kind },
+        detail: { category: cur.requestedCategory, kind, ...(args.auto ? { auto: true, autoToday: autoUsed + 1, maxPerDay: args.auto.maxPerDay } : {}) },
       },
       { templateId: id, name: cur.name, language: cur.language, poolKey: cur.use?.kind === 'adaptive' ? cur.use.poolKey : null, seq },
     );
     return { doc: { ...cur, stage: 'submitting', submit, seq }, kind };
   });
+}
+
+/** PR W2b: Auto's send refused inside its transaction (the API maps it: the cap and the limit 429, the rest 409). */
+export class AutoRefused extends Error {
+  constructor(
+    readonly code: 'auto_cap' | 'template_limit' | 'cell_busy' | 'not_eligible',
+    msg: string,
+  ) {
+    super(msg);
+    this.name = 'AutoRefused';
+  }
 }
 
 /** 429 for the hourly limit (the API maps it). */

@@ -571,6 +571,70 @@ adds two journeys (`journeysReferral.ts`); the brief is `prd/pr-a7-brief.md`.
 - **Numbers:** `referral.joined` adds `referrals.joined` on `_venue` (a test run under `dryRun`), the
   spec's KPI "new captured guests per 100 sends"; the owner card has `friendsJoined`.
 
+## WhatsApp Auto (PR W2b)
+
+**For now Auto stays off (Manish, 2026-10-10): nothing goes to Meta without a person's click.** The feature
+is built and tested but not enabled. With Auto off, the tick still asks the AI to fix AI templates Meta
+rejects (see "AI fixes" below; actor HeidiFi, `TickResult.aiFixes`): each fix is a draft that waits in the
+WhatsApp tab's "Ready to send" list (the overview's `auto.ready`, the same rules Auto would use) until a
+person clicks Send to Meta. Turning Auto on later is one step on Launch & health ("WA AUTO-SUBMIT ON").
+
+With Auto on, the WhatsApp template tick (every 2 minutes, after W1's alerts and the 08:00 summary, on its
+own: an error is logged as `auto.error` and keeps nothing else back) sends AI templates to Meta by itself and
+asks the AI to fix the ones Meta rejects. It messages nobody, so it ignores the guest-sending pause (Manish,
+2026-10-05); its brakes are its own switch and cap.
+
+- **The switch:** `AdaptiveConfig/global.whatsappTemplates {autoSubmit, maxPerDay, changedBy}` on Launch &
+  health (`PUT /admin/launch`): on needs "WA AUTO-SUBMIT ON", a higher cap "LOOSEN LIMITS"; off and a lower cap
+  are one click. Missing reads off/10, an unreadable cap 0, a damaged block off/0 (a change from there keeps the
+  cap at 0 until a person sets it). Each change also writes `settings.auto_changed` in the WhatsApp activity
+  log (by the admin; the sandbox route by HeidiFi). The tick reads the setting fresh, so a brake applies at the
+  next tick.
+- **What it sends** (`core/whatsapp/auto.ts` `autoQueue`, pure — the tick, the submit's re-check and the tab's
+  overview use the same rules): an AI template (`origin: 'ai'`) not edited by hand since (`ai.appliedVersion`),
+  never one the AI wrote as an alternative (`ai.writtenAs`, kept through AI fixes), every check passing with no
+  warning, its category the message's rule; a translation only once its English (the same name) is approved
+  or in review; one at a time per message × language, and a new draft never next to an approved template; a
+  draft, or an AI fix of a rejected template not sent yet ("not sent" = `ai.sentVersion`, the version Meta last
+  saw, isn't this one; templates from before W2b fall back to comparing the AI's time with Meta's last change).
+  Never again a version it sent — unless Meta was only unreachable (at most 3 tries, `ai.autoAttempts`, then
+  `no_answer`) or the account failed (that try doesn't count) — never one Meta refused for a reason a person has
+  to read, never an AI fix from before W2b whose first kind is unknown (`unknown_origin`: it may have been an
+  alternative). A paused approved template still counts as approved for its cell. English first, the oldest
+  first, at most 5 a tick within the tick's time, the lease renewed before each.
+- **How:** the button's own submit (`submitTemplate(…, AUTO_ACTOR, {requireNoWarnings, auto})`): Auto's rules
+  again on fresh reads, then `beginSubmit`'s transaction re-checks the template and its cell, counts the day's
+  sends against the cap (`ops.autoSubmits`, so two ticks at once can't pass it), keeps room under Meta's
+  template limit (90 %, counting its own creates) and uses at most 80 of Meta's 100 creates an hour, and stamps
+  `ai.autoSubmittedAt`/`autoSubmittedVersion`/`autoAttempts` (and, for every submit, `ai.sentVersion`). Only AI
+  templates whose first kind is known and not an alternative pass it (`not_eligible`). Meta asking us to slow
+  down stops it (and sets the backoff, for a create too).
+- **When Meta fails it:** whenever Meta never took the template (no answer, unreachable, the account, it changed
+  or went away meanwhile) the revert sets `ai.sentVersion` back to null and gives the day's place (and the
+  template count, for a create) back. An account error (the token, its permission, `not_found`) stops Auto at
+  once and pauses it an hour (`ops.autoPauseUntilMs`, `meta_paused`); no answer or Meta unreachable pauses it 10
+  minutes. A last sync that failed on the account blocks it too (`meta_account`). The hour's creates or the
+  template limit (also an unknown count) stop only new drafts: AI fixes (edits) still go. Each stop is said once
+  a day per reason (`auto.stopped`). After Meta approves, the template is used at once (`useEnabled`); one click
+  pauses it.
+- **What it leaves** goes to the activity log once a day per template, version and reason (`auto.left`,
+  routine): an alternative, edited by hand, a failing or warning check, another category, its English not
+  there yet, its cell busy or already approved, Meta refused it, no answer after 3 tries, a fix of unknown first
+  kind, sent already. The cap reached: `auto.cap_reached`
+  once a day. What it sent: `submit.started` by Auto, and one `auto.run` row a tick.
+- **AI fixes:** a rejected AI template (not an alternative, not edited by hand, under the 2 AI fixes) whose
+  rejection came after the AI's text gets one writer `fix` run per rejection (`requestedBy: 'auto_fix'`,
+  trigger `schedule`; `ops.autoFix[id] {at, tries, taskId, retry}` remembers the rejection each fix was asked
+  for), before the daily gap-fill takes the writer's runs (the same quota: runs left minus the 3 kept for
+  Suggest). A run that ended for a passing reason (a deploy, the gate, the budget, a timeout…) is asked again,
+  at most 3 times per rejection. It needs the AI switch and the writer's Scheduled runs, like the gap-fill (the
+  overview's `auto.fixesBlocked` says which is missing). This runs every tick whether Auto is on or off. A fix
+  not sent to Meta yet is never fixed again: Suggest refuses with `fix_unsent` and doesn't offer it; the fix is
+  sent (by Auto when it is on, else by a person from the ready list), and only Meta's next rejection opens the
+  next fix. `ai.auto_fix` logs each round (by Auto, or by HeidiFi with "each fix waits for you to send it").
+- **The 08:00 summary** also lists what Auto sent and what the AI wrote since the last one (a day with only
+  those still sends).
+
 ## Signals coming back
 
 | Source | Adaptive effect |
@@ -850,6 +914,8 @@ again everywhere (the gate too), so a later splash tick grants it.
 | `bandit.mode`, `bandit.accounts.<tenantUserId>` | `off` | PR F1: learning (the bandit) |
 | `agents.mode`, `agents.accounts.<tenantUserId>` | `off` | PR F2a: scheduled AI agent runs (the admin's Test connection runs either way) |
 | `agents.monthlyBudgetUsd` | 100 | PR F2a: the AI budget a month (0, or unreadable = every agent paused) |
+| `whatsappTemplates.autoSubmit` | `off` | PR W2b: WhatsApp Auto — the template tick sends AI templates to Meta by itself (on: "WA AUTO-SUBMIT ON") |
+| `whatsappTemplates.maxPerDay` | 10 | PR W2b: Auto's sends a (UTC) day, 0–100 (0, or unreadable = Auto sends nothing; higher: "LOOSEN LIMITS") |
 
 - Launch mode only decides which **new** guests start journeys. A guest keeps the mode they started
   with, so a test-run guest never gets a real message.
