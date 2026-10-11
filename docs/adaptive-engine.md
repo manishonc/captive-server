@@ -1102,6 +1102,14 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 `+reject`, `+timeout`, `+ratelimit` or `+authfail`; a phone ending `0000` (21610), `0001` (unknown),
 `0002` (try later) or `0003` (credentials refused).
 
+WhatsApp (PR PV): Adaptive's own WhatsApp adapter (`send/adapters/whatsapp.ts`, Meta's Cloud API, one
+POST, no retries) is used **only by the owner's WhatsApp Send test** (through `whatsappTestSend.ts`, kept
+out of `send/adapters/index.ts`) — the engine refuses WhatsApp (`whatsapp_off`), its adapter registry has
+no WhatsApp and the worker never even loads the sender until W3 (tests/adaptiveWhatsAppBoundary.test.ts). In the sandbox a WhatsApp test lands
+in the same outbox (`channel: whatsapp`, the template's name, language, values and the button's
+placeholder); a phone ending `0000` → 131026 (not on WhatsApp), `0001` → unknown, `0002` → try later,
+`0003` → 190 (setup), `0004` → 132001 (Meta doesn't know the template in that language).
+
 | Route | What it does |
 |---|---|
 | `POST /internal/adaptive/dev/clock` `{ "advance": "48h" }` or `{ "at": "2026-10-12T13:10:00Z" }` | Moves the fake clock (forward, or to a moment — never earlier than real time: activations are stamped in real time; `{ "reset": true }` goes back to it) |

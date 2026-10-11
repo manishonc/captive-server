@@ -16,7 +16,8 @@
  * schedule at the provider, which would break exactly-once).
  */
 
-export type ProviderName = 'brevo' | 'twilio' | 'sandbox';
+/** `meta`: WhatsApp's Cloud API (PR PV: the owner's WhatsApp Send test; the engine from W3). */
+export type ProviderName = 'brevo' | 'twilio' | 'sandbox' | 'meta';
 
 export interface OutboundEmail {
   kind: 'email';
@@ -39,7 +40,28 @@ export interface OutboundSms {
   sendKey: string;
 }
 
-export type Outbound = OutboundEmail | OutboundSms;
+/**
+ * One approved WhatsApp template (PR PV). WhatsApp only carries templates Meta approved: the
+ * name and language pick it, the values fill its `{{1}}`, `{{2}}`… in order, and the link
+ * button's variable is the short-link path (`s/<code>`).
+ */
+export interface OutboundWhatsApp {
+  kind: 'whatsapp';
+  /** E.164. */
+  to: string;
+  templateName: string;
+  /** Meta's language code of the template (`en`, `de`, or an imported `en_US`). */
+  language: string;
+  /** The body values in `{{n}}` order: never empty, never multi-line (Meta refuses both). */
+  bodyParams: string[];
+  /** Meta's index of the template's link button and the value of its variable. */
+  button: { index: number; param: string } | null;
+  /** The body as the guest reads it — kept by the sandbox outbox, never sent. */
+  previewText: string;
+  sendKey: string;
+}
+
+export type Outbound = OutboundEmail | OutboundSms | OutboundWhatsApp;
 
 export type ProviderResult =
   | { kind: 'accepted'; provider: ProviderName; providerMessageId: string | null; segments?: number | null }
@@ -57,7 +79,7 @@ export type ProviderResult =
   | { kind: 'unknown'; provider: ProviderName; reason: string };
 
 export interface ChannelAdapter {
-  channel: 'email' | 'sms';
+  channel: 'email' | 'sms' | 'whatsapp';
   provider: ProviderName;
   /** Credentials present (and, for the real providers, not in the local emulator stack). */
   ready(): boolean;

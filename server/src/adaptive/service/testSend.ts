@@ -38,10 +38,15 @@ import { modeFor, readEngineSettings } from '../store/engineSettings';
 import { loadCatalogue, templateVersion } from './catalogue';
 import { loadGuestInfo, loadVenueContext } from '../engine/context';
 import { linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from '../engine/renderSend';
-import { composeEmail, maskSecretValues, placeholderLink, smsFinalText } from '../send/compose';
+import { composeEmail, maskSecretValues, placeholderLink, SHORT_CODE_LENGTH, smsFinalText } from '../send/compose';
 import { renderText } from '../core/render';
 import { VISITOR_BASE_URL, validBookingUrl } from '../send/links';
 import { registerAdapters, type AdapterRegistry } from '../send/adapters';
+import type { ProviderResult } from '../send/adapters/types';
+import { whatsappTestAdapter } from '../send/adapters/whatsappTestSend';
+import { waBodyValues } from '../core/whatsapp/sendValues';
+import { loadWaPickContext, pickWaTemplate } from '../whatsapp/pick';
+import { writeLog } from '../whatsapp/store';
 import { resolveStayTimes } from '../stays/times';
 import { now, refreshClock } from '../engine/clock';
 import { getCreditConfig } from '../../services/credits';
@@ -58,30 +63,46 @@ export const testSendInputSchema = z.object({
   nodeId: z.string().min(1).max(64).optional(),
   /** PR S: the preview step's offer blank (Win-back's stages share one message step). */
   offerSlot: z.string().regex(/^[a-z][a-z0-9_]{0,40}$/).optional(),
-  channel: z.enum(['sms', 'email']),
+  channel: z.enum(['sms', 'email', 'whatsapp']),
   lang: z.enum(LANGS).optional(),
   recipientId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/),
 });
 
-/** The shared daily cap — the same doc and limit as `/internal/test-send`, but failing closed. */
-async function takeTestSend(tenantUserId: string): Promise<void> {
+/**
+ * PR PV: WhatsApp tests go out from HeidiFi's one WhatsApp number, which also carries every guest's
+ * login code — a number reported or blocked too often loses quality for everyone. So at most this
+ * many a day per account, whatever the shared cap says (even uncapped), counted in the same doc.
+ */
+export const WHATSAPP_TEST_DAILY_LIMIT = 10;
+
+/**
+ * The shared daily cap — the same doc and limit as `/internal/test-send`, but failing closed. A
+ * WhatsApp test also takes one of the account's WhatsApp tests (`whatsapp` in the same doc).
+ */
+async function takeTestSend(tenantUserId: string, opts: { whatsapp?: boolean } = {}): Promise<void> {
   const config = await getCreditConfig();
   const limit = Number(config.testSendDailyLimit) || 0;
-  if (limit <= 0) return; // 0 = uncapped (as the Campaign test send)
+  if (limit <= 0 && !opts.whatsapp) return; // 0 = uncapped (as the Campaign test send)
   const day = new Date().toISOString().slice(0, 10);
   const ref = db.collection(TEST_COUNTERS).doc(`${tenantUserId}_${day}`);
-  let allowed: boolean;
+  let outcome: 'ok' | 'cap' | 'whatsapp_cap';
   try {
-    allowed = await db.runTransaction(async (tx) => {
+    outcome = await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
-      if (Number(snap.data()?.count ?? 0) >= limit) return false;
-      tx.set(ref, { tenantUserId, day, count: FieldValue.increment(1), updatedAt: new Date() }, { merge: true });
-      return true;
+      if (limit > 0 && Number(snap.data()?.count ?? 0) >= limit) return 'cap';
+      if (opts.whatsapp && Number(snap.data()?.whatsapp ?? 0) >= WHATSAPP_TEST_DAILY_LIMIT) return 'whatsapp_cap';
+      tx.set(
+        ref,
+        { tenantUserId, day, count: FieldValue.increment(1), ...(opts.whatsapp ? { whatsapp: FieldValue.increment(1) } : {}), updatedAt: new Date() },
+        { merge: true },
+      );
+      return 'ok';
     });
   } catch {
     throw unavailable("Test sends can't be counted right now — try again in a minute");
   }
-  if (!allowed) throw tooManyRequests(`Daily test-send limit reached (${limit}/day). Try again tomorrow.`);
+  if (outcome === 'cap') throw tooManyRequests(`Daily test-send limit reached (${limit}/day). Try again tomorrow.`);
+  if (outcome === 'whatsapp_cap') throw tooManyRequests(`Daily WhatsApp test limit reached (${WHATSAPP_TEST_DAILY_LIMIT}/day). Try again tomorrow.`);
 }
 
 /** The venue's setup that has this journey: the running playbook first, then Guest info, then any other. */
@@ -168,11 +189,29 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
 
   const slots = jc.slots ?? {};
   const offers = setup.offerMenu ?? [];
-  const variant = cat.variants
-    .filter((v) => v.poolKey === pool && v.status === 'active' && variantEligible(v, slots))
-    .sort((a, b) => a.letter.localeCompare(b.letter))[0];
-  if (!variant) throw new ApiError('bad_request', 'There is no wording for this step with your settings');
+  // PR PV: WhatsApp sends the message's approved template, not a wording.
+  if (input.channel === 'whatsapp') {
+    return testSendWhatsApp({
+      tenantUserId,
+      venueId,
+      venueName: ctx?.venueName || venue.name || '',
+      tz: ctx?.tz ?? venue.timezone ?? 'Europe/Zurich',
+      definition: found.definition,
+      nodeId,
+      pool,
+      purpose,
+      slots,
+      offers,
+      input,
+    });
+  }
   const lang: Lang = input.lang ?? 'en';
+  const eligible = cat.variants
+    .filter((v) => v.poolKey === pool && v.status === 'active' && variantEligible(v, slots))
+    .sort((a, b) => a.letter.localeCompare(b.letter));
+  // PR PV: the first wording that has this channel — as the preview's versions show it.
+  const variant = eligible.find((v) => variantContent(v, input.channel as Channel, lang)) ?? eligible[0];
+  if (!variant) throw new ApiError('bad_request', 'There is no wording for this step with your settings');
   const content = variantContent(variant, input.channel as Channel, lang);
   if (!content) throw new ApiError('bad_request', `This step has no ${input.channel === 'sms' ? 'SMS' : 'email'} wording`);
 
@@ -268,5 +307,168 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
     to: input.channel === 'sms' ? maskedPhone(to) : maskedEmail(to),
     ...(sent ? {} : { problem: result.kind === 'rejected' ? `The provider refused it (${result.code})` : 'The provider did not confirm it' }),
     preview: { ...(masked.subject !== undefined ? { subject: masked.subject } : {}), text: masked.text },
+  };
+}
+
+// ── PR PV: WhatsApp ──────────────────────────────────────────────────────────
+
+interface WhatsAppTestInput {
+  tenantUserId: string;
+  venueId: string;
+  venueName: string;
+  tz: string;
+  definition: JourneyDefinition;
+  nodeId: string;
+  pool: string;
+  purpose: 'service' | 'marketing';
+  slots: Record<string, SlotValue>;
+  offers: Offer[];
+  input: z.infer<typeof testSendInputSchema>;
+}
+
+/** What the owner reads when WhatsApp didn't take the test. */
+export function whatsappTestProblem(r: ProviderResult): string {
+  if (r.kind === 'retry') return 'WhatsApp is busy right now. Try again in a minute.';
+  if (r.kind === 'unknown') return 'WhatsApp didn’t confirm this test. It may still arrive.';
+  if (r.kind !== 'rejected') return 'WhatsApp didn’t take this test.';
+  switch (r.code) {
+    case '131030':
+      return 'This number isn’t on the allowed list of HeidiFi’s WhatsApp app yet (Meta test mode).';
+    case '131026':
+      return 'WhatsApp couldn’t deliver to this number. Is WhatsApp set up on it?';
+    case '131049':
+      return 'WhatsApp held this marketing message back for this number. Try again tomorrow.';
+    case '131050':
+      return 'This number has stopped marketing messages from HeidiFi on WhatsApp.';
+    case '132001':
+      return 'WhatsApp doesn’t know this template in this language (any more). HeidiFi needs to check it.';
+    case '132015':
+      return 'WhatsApp has paused this template.';
+    case '132016':
+      return 'WhatsApp has disabled this template.';
+    default:
+      return r.config ? `WhatsApp sending isn’t set up correctly on the server (Meta code ${r.code}).` : `WhatsApp refused it: ${r.message} (code ${r.code})`;
+  }
+}
+
+/**
+ * Send test on WhatsApp (PR PV, D2): the message's APPROVED template — the asked language if
+ * approved, else English (whatsapp/pick.ts, W3's rule) — to a saved phone recipient. Values as the
+ * other tests (Anna, the venue's own), in the template's language; never empty, never multi-line.
+ * The link button carries the same placeholder as the other tests' links. Same rules as SMS and
+ * email: the shared daily cap (plus WHATSAPP_TEST_DAILY_LIMIT), no send record, no credits; not
+ * limited to the SMS countries. Every test lands in the WhatsApp activity log (W1's "log everything").
+ */
+async function testSendWhatsApp(a: WhatsAppTestInput) {
+  const { input } = a;
+  if (!a.definition.pools?.[a.pool]?.channels.includes('whatsapp')) throw new ApiError('bad_request', 'This message doesn’t go by WhatsApp');
+  const lang: Lang = input.lang ?? 'en';
+  const pick = pickWaTemplate(await loadWaPickContext(), { journeyKey: input.journeyKey, poolKey: a.pool }, lang, { approvedOnly: true });
+  const source = pick?.template.source;
+  const compiled = pick?.template.compiled;
+  if (!pick || !source || !compiled) {
+    throw new HttpError(422, 'validation_failed', 'This message has no approved WhatsApp template yet', { reason: 'whatsapp_template_missing' });
+  }
+
+  // The recipient: one of the account's saved test recipients, a phone number.
+  const recips = ((await db.collection(TEST_RECIPIENTS).doc(a.tenantUserId).get()).get('recipients') ?? []) as Array<{ id?: string; kind?: string; value?: string }>;
+  const r = recips.find((x) => x?.id === input.recipientId);
+  if (!r || typeof r.value !== 'string') throw new ApiError('bad_request', 'Pick one of your saved test recipients');
+  if (r.kind !== 'phone') throw new ApiError('bad_request', 'Pick a saved phone number for a WhatsApp test');
+  const to = normalizeE164('', r.value);
+  if (!to) throw new ApiError('bad_request', 'Save this number in international format (+41 … or 0041 …)');
+
+  await refreshClock();
+  const at = now();
+  const guestInfo = await loadGuestInfo(a.venueId);
+  const vars = { ...sampleOccasion(a.definition, a.slots, at, input.offerSlot), ...offerVars(a.definition, a.slots, a.offers, at, input.offerSlot) };
+  // The button's link, by the engine's link rules (a test shows what a guest would get).
+  const button = compiled.button;
+  if (button) {
+    // The asked language, as the SMS/email test and the engine (the guest's language): a German guest
+    // with only an English template still gets the German Guest info's links.
+    const gates = linkGates(guestInfo, lang, a.pool, typeof vars.offerKey === 'string', a.slots.booking_url);
+    const kind = button.field.slice('link.'.length);
+    const ok = kind === 'rating' || (kind === 'offer' && gates.offer) || (kind === 'hub' && gates.hub) || (kind === 'booking' && Boolean(validBookingUrl(gates.bookingRaw)));
+    if (!ok) throw new HttpError(422, 'validation_failed', 'Some values this message needs are missing', { missing: [button.field], reason: missingReason([button.field]) });
+  }
+  const isStay = a.definition.entry.trigger.type === 'stay.window';
+  const values = renderValues({
+    lang: pick.lang,
+    tz: a.tz,
+    contact: { firstName: 'Anna', lastName: 'Muster' },
+    venueName: a.venueName,
+    vars,
+    slots: a.slots,
+    offers: a.offers,
+    guestInfo,
+    links: {},
+    stay: isStay ? { checkInAt: at + DAY_MS, checkOutAt: at + 4 * DAY_MS + 2 * HOUR_MS, nights: 3, times: resolveStayTimes(guestInfo) } : null,
+    referralCode: 'ANNA-7K2Q',
+  });
+  const body = waBodyValues(source, compiled, values);
+  if (body.missing.length) {
+    throw new HttpError(422, 'validation_failed', 'Some values this message needs are missing', { missing: body.missing, reason: missingReason(body.missing) });
+  }
+
+  const adapter = whatsappTestAdapter(); // the sandbox in the local stack, Meta elsewhere
+  if (!adapter.ready()) throw unavailable('WhatsApp sending isn’t set up on the server');
+  await takeTestSend(a.tenantUserId, { whatsapp: true });
+  // Not a journey send key: a status webhook for it finds nothing to update.
+  const sendKey = `test_${randomBytes(12).toString('hex')}`;
+  // Meta's index of the link button we fill: our own templates have one button; a linked one may have more.
+  const metaIndex = pick.template.meta?.buttons?.findIndex((b) => b.type === 'URL') ?? -1;
+  // The tests' link placeholder (`s/xxxxxxxx`): the button's URL is the visitor host + this.
+  const placeholder = `s/${'x'.repeat(SHORT_CODE_LENGTH)}`;
+  const result = await adapter.send({
+    kind: 'whatsapp',
+    to,
+    templateName: pick.template.name,
+    language: pick.template.language,
+    bodyParams: body.params,
+    button: button ? { index: metaIndex >= 0 ? metaIndex : 0, param: placeholder } : null,
+    previewText: body.text,
+    sendKey,
+  });
+  const sent = result.kind === 'accepted';
+  const masked = maskedPhone(to);
+  await writeLog(
+    {
+      kind: sent ? 'test.sent' : 'test.not_sent',
+      level: sent ? 'info' : 'warn',
+      actor: { kind: 'system', uid: null, label: 'Owner test send' },
+      summary: sent
+        ? `An owner sent a test of ${pick.template.name} (${pick.template.language}) to ${masked}: Meta took it`
+        : `An owner’s test of ${pick.template.name} (${pick.template.language}) to ${masked} wasn’t sent: ${result.kind === 'rejected' ? `${result.code} ${result.message}` : result.reason}`,
+      detail: {
+        tenantUserId: a.tenantUserId,
+        venueId: a.venueId,
+        journeyKey: input.journeyKey,
+        nodeId: a.nodeId,
+        to: masked,
+        outcome: result.kind,
+        ...(result.kind === 'accepted' ? { messageId: result.providerMessageId } : {}),
+        ...(result.kind === 'rejected' ? { code: result.code, message: result.message, setup: result.config === true } : {}),
+        ...(result.kind === 'retry' || result.kind === 'unknown' ? { reason: result.reason } : {}),
+      },
+    },
+    { templateId: pick.template.id, name: pick.template.name, language: pick.template.language, poolKey: a.pool },
+  );
+  return {
+    sent,
+    channel: 'whatsapp' as const,
+    journeyKey: input.journeyKey,
+    nodeId: a.nodeId,
+    // The template's name stands in for the wording's.
+    variant: pick.template.name,
+    purpose: a.purpose,
+    wordingLang: pick.lang,
+    to: masked,
+    ...(sent ? {} : { problem: whatsappTestProblem(result) }),
+    preview: {
+      text: waBodyValues(source, compiled, maskSecretValues(values)).text,
+      footer: source.footer ?? null,
+      button: button ? { text: button.text } : null,
+    },
   };
 }
