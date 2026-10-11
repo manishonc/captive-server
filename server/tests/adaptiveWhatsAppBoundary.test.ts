@@ -97,8 +97,8 @@ const META = src('adaptive/whatsapp/meta.ts');
 const SANDBOX = src('adaptive/whatsapp/sandbox.ts');
 const SOURCE = src('adaptive/whatsapp/source.ts');
 const OLD_SENDER = src('services/whatsapp.ts');
-const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts', 'aiBrief.ts', 'auto.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
-const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts', 'aiDrafts.ts', 'aiRequests.ts', 'autoViews.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
+const CORE = ['template.ts', 'checks.ts', 'status.ts', 'pools.ts', 'aiBrief.ts', 'auto.ts', 'sendValues.ts'].map((f) => src(`adaptive/core/whatsapp/${f}`));
+const NO_META = ['store.ts', 'hints.ts', 'apply.ts', 'context.ts', 'log.ts', 'aiDrafts.ts', 'aiRequests.ts', 'autoViews.ts', 'pick.ts'].map((f) => src(`adaptive/whatsapp/${f}`)).filter((f) => existsSync(f));
 /** The code that calls a model (only the worker loads it): never reached from the template code. */
 const MODEL_CODE = ['run.ts', 'lane.ts', 'modelClient.ts', 'sandboxModel.ts'].map((f) => src(`adaptive/brain/${f}`));
 
@@ -169,6 +169,33 @@ test('submit, the connection and the webhook hint never reach the AI at all (onl
   for (const e of ['submit.ts', 'connection.ts', 'hints.ts'].map((x) => src(`adaptive/whatsapp/${x}`))) {
     const bad = [...reach(e)].filter((f) => f.startsWith(src('adaptive/brain/')));
     assert(!bad.length, `${rel(e)} reaches ${bad.map(rel).join(', ')}`);
+  }
+});
+
+const WA_SENDER = src('adaptive/send/adapters/whatsapp.ts');
+const WA_TEST_ADAPTER = src('adaptive/send/adapters/whatsappTestSend.ts');
+
+test('PR PV: the owner’s preview and WhatsApp Send test send through Adaptive’s own adapter — never the template client, the sandbox Meta or the old sender', () => {
+  for (const e of [src('adaptive/service/testSend.ts'), src('adaptive/service/previewVersions.ts'), WA_SENDER, WA_TEST_ADAPTER]) {
+    assert(existsSync(e), `missing ${rel(e)}`);
+    const r = reach(e);
+    for (const bad of [META, SANDBOX, SOURCE, OLD_SENDER]) assert(!r.has(bad), `${rel(e)} reaches ${rel(bad)}`);
+  }
+});
+
+test('PR PV: the engine never loads the WhatsApp sender (until W3 switches WhatsApp sending on)', () => {
+  const engine = ['adaptive/worker/main.ts', 'adaptive/worker/worker.ts', 'adaptive/engine/sendPath.ts', 'adaptive/send/dispatch.ts', 'adaptive/send/adapters/index.ts'].map(src);
+  for (const e of engine) {
+    assert(existsSync(e), `missing ${rel(e)}`);
+    const r = reach(e);
+    for (const bad of [WA_SENDER, WA_TEST_ADAPTER]) assert(!r.has(bad), `${rel(e)} reaches ${rel(bad)}`);
+  }
+});
+
+test('PR PV: the preview, the template pick and the owner’s test never reach the Adaptive send path', () => {
+  for (const e of [src('adaptive/whatsapp/pick.ts'), src('adaptive/service/previewVersions.ts'), src('adaptive/service/testSend.ts'), WA_TEST_ADAPTER]) {
+    const r = reach(e);
+    for (const bad of [src('adaptive/engine/sendPath.ts'), src('adaptive/send/dispatch.ts')]) assert(!r.has(bad), `${rel(e)} reaches ${rel(bad)}`);
   }
 });
 

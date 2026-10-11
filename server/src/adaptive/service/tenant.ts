@@ -64,6 +64,7 @@ import { getCreditConfig } from '../../services/credits';
 import { isLapsedForSending } from '../../services/entitlements';
 import { applyAudienceToStats } from './audience';
 import { launchAwareOverview } from './startSending';
+import { previewVersionsFor, type PreviewVersion } from './previewVersions';
 
 function asVenueType(t: string | null): VenueType {
   return (VENUE_TYPES as readonly string[]).includes(t ?? '') ? (t as VenueType) : 'other';
@@ -303,6 +304,8 @@ export interface PreviewMessage {
   preheader?: string;
   text: string;
   unknown: string[];
+  /** PR PV: the message on every channel it can go by (absent on the rating page). */
+  versions?: PreviewVersion[];
 }
 
 function contentFor(channels: ChannelContent, locales: Record<string, Partial<ChannelContent> | undefined>, lang: Lang, channel: 'sms' | 'email') {
@@ -361,6 +364,21 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
     }
     const sms = renderText((c as NonNullable<ChannelContent['sms']>).text, values);
     return { ...base, channel: 'sms' as const, variantName: variant.name, text: sms.text, unknown: sms.unknown };
+  });
+  // PR PV: each message on every channel it can go by (the engine picks the channel per guest).
+  const versions = await previewVersionsFor({
+    journeyKey: input.journeyKey,
+    definition: found.definition,
+    steps: found.definition.previewSteps,
+    cat,
+    lang: input.lang,
+    venueName,
+    slots,
+    offers: content.offerMenuDefaults,
+  });
+  messages.forEach((m, i) => {
+    const v = versions[i];
+    if (v) m.versions = v;
   });
   return { journeyKey: input.journeyKey, lang: input.lang, venueName, messages };
 }

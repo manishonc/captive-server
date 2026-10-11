@@ -13,6 +13,11 @@
  *   +timeout                    0001                    unknown   sandbox_timeout
  *   +ratelimit                  0002                    retry     sandbox_rate_limit (60 s)
  *   +authfail                   0003                    rejected  sandbox_auth_fail, config
+ *
+ * WhatsApp (PR PV: the owner's Send test), by the number's end: 0000 → rejected 131026 (not on
+ * WhatsApp), 0001 → unknown, 0002 → retry 130429 (60 s), 0003 → rejected 190, config; 0004 →
+ * rejected 132001 (Meta doesn't know the template in that language). The outbox doc keeps the
+ * template, its values and the text the guest would read.
  */
 
 import { db } from '../../../firebase';
@@ -39,6 +44,15 @@ function triggeredFailure(message: Outbound): ProviderResult | null {
     }
     return null;
   }
+  if (message.kind === 'whatsapp') {
+    const end = String(message.to ?? '').replace(/\D/g, '').slice(-4);
+    if (end === '0000') return { kind: 'rejected', provider, code: '131026', message: 'sandbox: message undeliverable (not on WhatsApp)' };
+    if (end === '0001') return { kind: 'unknown', provider, reason: 'sandbox_timeout' };
+    if (end === '0002') return { kind: 'retry', provider, reason: 'sandbox_rate_limit', retryAfterMs: SANDBOX_RETRY_AFTER_MS };
+    if (end === '0003') return { kind: 'rejected', provider, code: '190', message: 'sandbox: the access token has expired', config: true };
+    if (end === '0004') return { kind: 'rejected', provider, code: '132001', message: 'sandbox: template name does not exist in the translation' };
+    return null;
+  }
   const digits = String(message.to ?? '').replace(/\D/g, '');
   if (digits.endsWith('0000')) {
     return { kind: 'rejected', provider, code: '21610', message: 'sandbox: number has replied STOP', suppress: 'stop' };
@@ -53,12 +67,13 @@ function triggeredFailure(message: Outbound): ProviderResult | null {
   return null;
 }
 
-/** Shaped like the real ids: Brevo's `<…>` Message-ID, Twilio's `SM…`. */
+/** Shaped like the real ids: Brevo's `<…>` Message-ID, Twilio's `SM…`, WhatsApp's `wamid.…`. */
 function sandboxMessageId(message: Outbound): string {
+  if (message.kind === 'whatsapp') return `wamid.sbx.${message.sendKey}`;
   return message.kind === 'email' ? `<sbx.${message.sendKey}@sandbox.local>` : `SMsbx${message.sendKey.slice(3)}`;
 }
 
-export function createSandboxAdapter(channel: 'email' | 'sms'): ChannelAdapter {
+export function createSandboxAdapter(channel: 'email' | 'sms' | 'whatsapp'): ChannelAdapter {
   return {
     channel,
     provider: 'sandbox',
@@ -78,7 +93,20 @@ export function createSandboxAdapter(channel: 'email' | 'sms'): ChannelAdapter {
       const providerMessageId = sandboxMessageId(message);
       const segments = message.kind === 'sms' ? smsSegmentCount(message.body) : null;
       const doc =
-        message.kind === 'email'
+        message.kind === 'whatsapp'
+          ? {
+              channel: 'whatsapp' as const,
+              to: message.to,
+              templateName: message.templateName,
+              language: message.language,
+              bodyParams: message.bodyParams,
+              button: message.button,
+              text: message.previewText,
+              sendKey: message.sendKey,
+              providerMessageId,
+              at: new Date(),
+            }
+          : message.kind === 'email'
           ? {
               channel: 'email' as const,
               to: message.to,
