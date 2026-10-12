@@ -692,6 +692,9 @@ Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-w3-brief.md`. Journeys
   With `WHATSAPP_APP_SECRET` set, the legacy handler also ignores an unsigned START. Dead WhatsApp STOP/START
   signals have their own kinds (`whatsapp_stop` urgent). The refund ledger entry carries `refundOf` and the
   debit's cost (the cms analytics undo the consumption; the owner sees "Returned: WhatsApp message not delivered").
+  Delta round: a STOP from Meta's id before the first send is carried once the id is linked (`linkWhatsAppId`);
+  info messages need the guest's own WhatsApp yes (`guestSaidYes` — an owner's marketing stop keeps it); a failing
+  WhatsApp rule is reported before "no wording".
 - **Owner screens:** the overview and the preview answer `sendingChannels` (`['sms','email']`, + `'whatsapp'`
   when on); W01 (setup info) shows only while off.
 
