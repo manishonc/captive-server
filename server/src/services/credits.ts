@@ -28,6 +28,7 @@ import {
   availableTotal,
   channelKey,
   deriveTotals,
+  bumpDelta,
   drainAllowingNegative,
   normalizeChannelBalances,
   releaseFromKey,
@@ -750,6 +751,58 @@ export async function debitOne(opts: {
         note: 'Automation send',
       }),
     );
+  });
+}
+
+/**
+ * Gives back one automation debit (PR W3: a WhatsApp message Meta reported as not delivered).
+ * Idempotent on `refund_auto_{sendId}`; reverses exactly the buckets the debit
+ * `debit_auto_{sendId}` drained (its `channelDeltas`). An `adjustment` entry (+credits), so the
+ * analytics count it as given back, not as a Stripe refund. 'nothing' when there is no such debit.
+ */
+export async function refundOne(opts: { tenantUserId: string; sendId: string; note: string }): Promise<'refunded' | 'nothing'> {
+  const { tenantUserId, sendId, note } = opts;
+  const wRef = db.collection(WALLETS_COLLECTION).doc(tenantUserId);
+  const entryRef = wRef.collection(LEDGER).doc(`refund_auto_${sendId}`);
+  const debitRef = wRef.collection(LEDGER).doc(`debit_auto_${sendId}`);
+
+  return db.runTransaction(async (tx) => {
+    const [entrySnap, debitSnap, walletSnap] = await Promise.all([tx.get(entryRef), tx.get(debitRef), tx.get(wRef)]);
+    if (entrySnap.exists) return 'refunded' as const;
+    if (!debitSnap.exists) return 'nothing' as const;
+    const debit = debitSnap.data() ?? {};
+    const credits = Math.abs(Number(debit.credits) || 0);
+    if (!credits) return 'nothing' as const;
+    const wallet = normalize(walletSnap.exists ? walletSnap.data() : undefined, `refundOne ${sendId}`);
+
+    // The debit's movements, reversed (they were negative: they come back as positive).
+    const taken = (debit.channelDeltas ?? {}) as ChannelDeltas;
+    const deltas: ChannelDeltas = {};
+    for (const [key, buckets] of Object.entries(taken)) {
+      if (!wallet.channelBalances[key]) continue;
+      for (const bucket of ['subscription', 'purchased'] as const) {
+        const moved = Number(buckets?.[bucket]) || 0;
+        if (!moved) continue;
+        wallet.channelBalances[key][bucket] -= moved;
+        bumpDelta(deltas, key, bucket, -moved);
+      }
+    }
+    wallet.lifetimeSpentCredits = Math.max(0, wallet.lifetimeSpentCredits - credits);
+
+    tx.set(wRef, walletWrite(wallet), { merge: true });
+    tx.set(
+      entryRef,
+      baseEntry({
+        type: 'adjustment',
+        credits,
+        balanceAfter: wallet.balance,
+        channel: debit.channel ?? null,
+        channelDeltas: deltas,
+        sendId,
+        note,
+      }),
+    );
+    return 'refunded' as const;
   });
 }
 

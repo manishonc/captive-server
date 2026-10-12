@@ -19,6 +19,8 @@ import { evaluateCondition, factsFrom } from '../core/runtime/conditions';
 import { smsCheaperText, smsSafeText } from '../core/runtime/smsParts';
 import type { StayTimes } from '../stays/times';
 import { occasionMergeValues } from '../core/scans/occasions';
+import { waBodyValues } from '../core/whatsapp/sendValues';
+import type { WaCompiled, WaSource } from '../core/whatsapp/template';
 
 export type LinkKind = 'offer' | 'rating' | 'hub' | 'booking' | 'unsubscribe';
 
@@ -186,8 +188,26 @@ export function smsKeepsExact(field: string, value?: string): boolean {
 }
 
 /**
+ * PR W3: a WhatsApp "wording" — one approved template of the message (whatsapp/pick.ts
+ * `usableWaTemplates`). Meta sends the template; we fill its `{{1}}`, `{{2}}`… and the link button.
+ */
+export interface WaTemplateContent {
+  kind: 'wa_template';
+  templateId: string;
+  name: string;
+  /** Meta's language code of the template (`en`, `de`, an imported `en_US`). */
+  language: string;
+  source: Pick<WaSource, 'body' | 'footer'>;
+  compiled: Pick<WaCompiled, 'params' | 'button'>;
+  /** Meta's index of the link button we fill (our templates have one button). */
+  buttonIndex: number;
+}
+
+/**
  * Renders one channel's content. For email, merge values are HTML-escaped (a name
- * comes from a public form) and subjects are kept to one line.
+ * comes from a public form) and subjects are kept to one line. WhatsApp (PR W3): the
+ * template's body as the guest reads it (+ its footer); every `{{n}}` needs a value
+ * (one line, never empty) and the link button its link — else the field is missing.
  */
 export function renderMessage(content: any, channel: Channel, values: RenderValues): RenderedMessage {
   const missing = new Set<string>();
@@ -215,7 +235,25 @@ export function renderMessage(content: any, channel: Channel, values: RenderValu
     const body = fill(String(content.body ?? ''), content.bodyFormat === 'html');
     return { subject, text: body, missing: [...missing], fieldsUsed: [...fields] };
   }
-  return { text: '', missing: ['whatsapp'], fieldsUsed: [] };
+  if (channel === 'whatsapp') {
+    const c = content as WaTemplateContent | null;
+    if (!c || c.kind !== 'wa_template' || !c.source || !c.compiled) return { text: '', missing: ['whatsapp'], fieldsUsed: [] };
+    const body = waBodyValues(c.source, c.compiled, values);
+    const fields = new Set(c.compiled.params.map((p) => p.field));
+    const missing = new Set(body.missing);
+    const button = c.compiled.button?.field;
+    if (button) {
+      fields.add(button);
+      if (!values[button]) missing.add(button);
+    }
+    return { text: [body.text, c.source.footer].filter(Boolean).join('\n'), missing: [...missing], fieldsUsed: [...fields] };
+  }
+  return { text: '', missing: [channel], fieldsUsed: [] };
+}
+
+/** PR W3: Meta's values for a rendered WhatsApp template (`renderMessage` said nothing is missing). */
+export function whatsappParams(content: WaTemplateContent, values: RenderValues): string[] {
+  return waBodyValues(content.source, content.compiled, values).params;
 }
 
 /**

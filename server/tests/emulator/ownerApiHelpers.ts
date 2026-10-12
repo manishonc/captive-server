@@ -71,7 +71,7 @@ export async function mountApi(): Promise<Api> {
 }
 
 /** An alive worker entry on `AdaptiveConfig/engine_status` (this code's version, this API's key unless told otherwise). */
-export async function seedWorkerHeartbeat(opts: { id?: string; version?: string; keyFingerprint?: string | null; ageMs?: number } = {}): Promise<void> {
+export async function seedWorkerHeartbeat(opts: { id?: string; version?: string; keyFingerprint?: string | null; ageMs?: number; channels?: Record<string, boolean> } = {}): Promise<void> {
   const id = opts.id ?? 'test_worker';
   await db
     .collection(COL.config)
@@ -85,6 +85,8 @@ export async function seedWorkerHeartbeat(opts: { id?: string; version?: string;
             version: opts.version ?? ENGINE_RUNTIME_VERSION,
             keyFingerprint: opts.keyFingerprint === undefined ? keyFingerprint() : opts.keyFingerprint,
             state: 'running',
+            // PR W3: which channels have their provider keys (the WhatsApp sending switch reads it).
+            ...(opts.channels ? { channels: opts.channels } : {}),
           },
         },
       },

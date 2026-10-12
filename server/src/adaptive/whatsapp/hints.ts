@@ -22,6 +22,26 @@ import { HINT_COALESCE_MS, SYSTEM, logInTx, readOps } from './store';
 
 export const TEMPLATE_FIELDS = ['message_template_status_update', 'template_category_update', 'message_template_quality_update'] as const;
 
+/** PR W3: at most one "Meta sent a message notice" write per process in this time. */
+const MESSAGES_SEEN_EVERY_MS = 10 * 60_000;
+let messagesSeenWrittenAt = 0;
+
+/**
+ * PR W3: Meta sent us a WhatsApp message notice (a status or an inbound message) — proof that the
+ * `messages` webhook field is subscribed, which the WhatsApp sending switch needs (`messagesSeenAt`
+ * on the operations doc). Unverified like every notice here; at most one write every 10 minutes.
+ */
+export async function noteWhatsAppMessagesSeen(realNow = Date.now()): Promise<void> {
+  if (realNow - messagesSeenWrittenAt < MESSAGES_SEEN_EVERY_MS) return;
+  messagesSeenWrittenAt = realNow;
+  await db.collection(COL.config).doc(WHATSAPP_DOC_ID).set({ messagesSeenAt: new Date(realNow) }, { merge: true });
+}
+
+/** Test seam. */
+export function __resetMessagesSeen(): void {
+  messagesSeenWrittenAt = 0;
+}
+
 /** At most one log line per template (and one for all unknown names) in this time. */
 const LOG_EVERY_MS = 10 * 60_000;
 

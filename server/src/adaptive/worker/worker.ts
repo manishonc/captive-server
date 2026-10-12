@@ -85,7 +85,7 @@ export class AdaptiveWorker {
   readonly id = `${hostname()}-${process.pid}-${randomBytes(3).toString('hex')}`;
 
   constructor() {
-    // Brevo / Twilio (or the local sandbox) — only the worker sends.
+    // Brevo / Twilio / Meta WhatsApp (or the local sandbox) — only the worker sends.
     registerAdapters(channelAdapters);
   }
   private running = false;
@@ -396,6 +396,12 @@ export class AdaptiveWorker {
               errors: this.errors,
               // PR F2a: the AI lane — busy, last run, and whether the relay env is set (booleans only).
               ai: this.aiLane.status(),
+              // PR W3: which channels have their provider keys here (booleans only; the WhatsApp switch needs it).
+              channels: {
+                email: Boolean(channelAdapters.email?.ready()),
+                sms: Boolean(channelAdapters.sms?.ready()),
+                whatsapp: Boolean(channelAdapters.whatsapp?.ready()),
+              },
             },
           },
           indexCheck: this.indexes ? { ok: this.indexes.ok, missing: this.indexes.missing, at: new Date() } : null,

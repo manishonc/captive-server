@@ -51,7 +51,8 @@ export interface MintContext {
   instanceId: string | null;
   contactId: string;
   variantId: string | null;
-  channel: 'sms' | 'email';
+  /** PR W3: WhatsApp too (its link button carries the code). */
+  channel: 'sms' | 'email' | 'whatsapp';
   /** A guest doc of this person (the resolver's context field). */
   guestId: string;
   bookingUrl: string | null;
@@ -70,8 +71,14 @@ function pageUrl(venueId: string, page: 'offer' | 'info', code: string): string 
   return `${VISITOR_BASE_URL}/${encodeURIComponent(venueId)}/${page}?s=${code}`;
 }
 
-/** Creates the short links; returns their URLs by kind and the codes (stored on the send). */
-export async function mintLinks(kinds: JourneyLinkKind[], ctx: MintContext): Promise<{ urls: Partial<Record<JourneyLinkKind, string>>; codes: string[] }> {
+/**
+ * Creates the short links; returns their URLs by kind, the codes (stored on the send) and — PR W3,
+ * for a WhatsApp link button, whose variable is `s/<code>` — the code by kind.
+ */
+export async function mintLinks(
+  kinds: JourneyLinkKind[],
+  ctx: MintContext,
+): Promise<{ urls: Partial<Record<JourneyLinkKind, string>>; codes: string[]; byKind: Partial<Record<JourneyLinkKind, string>> }> {
   const entries = await Promise.all(
     kinds.map(async (kind) => {
       const base = {
@@ -102,6 +109,7 @@ export async function mintLinks(kinds: JourneyLinkKind[], ctx: MintContext): Pro
   return {
     urls: Object.fromEntries(entries.map(([k, code]) => [k, shortLinkUrl(VISITOR_BASE_URL, code)])),
     codes: entries.map(([, code]) => code),
+    byKind: Object.fromEntries(entries),
   };
 }
 

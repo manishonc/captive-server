@@ -110,6 +110,9 @@ async function tenantVenueMap(tenantUserId: string): Promise<Record<string, Time
   return out;
 }
 
+/** What a STOP to our SMS sender writes as the SMS consent's source (engine/optouts.ts, the legacy import). */
+const SMS_STOP_SOURCES = new Set(['sms_keyword', 'provider_stop', 'import_legacy']);
+
 /** Per channel at one venue: yes / no / no answer, and whether the owner stopped it. */
 function consentChips(contact: ContactDoc, venueId: string) {
   const byCh = contact.marketingConsent?.[venueScope(venueId)] ?? {};
@@ -120,7 +123,14 @@ function consentChips(contact: ContactDoc, venueId: string) {
     ownerStopped: e?.ownerStopped === true || (!e && stoppedAll),
     at: iso(e?.at),
   });
-  return Object.fromEntries(CHANNELS.map((c) => [c, chip(byCh[c])])) as Record<Channel, ReturnType<typeof chip>>;
+  const chips = Object.fromEntries(CHANNELS.map((c) => [c, chip(byCh[c])])) as Record<Channel, ReturnType<typeof chip>>;
+  // PR W3 (W3-D1): an SMS STOP ends WhatsApp marketing too — the WhatsApp "yes" reads "no" (the engine
+  // blocks it: core/runtime/whatsappRules.ts). A START gives the SMS yes back, and with it this one.
+  const sms = byCh.sms;
+  if (sms?.state === 'revoked' && SMS_STOP_SOURCES.has(String(sms.source ?? '')) && chips.whatsapp?.state === 'yes') {
+    chips.whatsapp = { ...chips.whatsapp, state: 'no', at: iso(sms.at) };
+  }
+  return chips;
 }
 
 // ── Guests list ──────────────────────────────────────────────────────────────

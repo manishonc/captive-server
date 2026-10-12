@@ -20,6 +20,7 @@ import { checkSystem, runGate, type GateInput, type GateResult, type RuleCheck, 
 import { checkChannel, pickChannel, type ChannelCheck, type ChannelFacts, type ChannelRule } from './pickers';
 import { ENGINE_RUNTIME_VERSION } from './version';
 import { checkBanditBlock, readBanditBlock } from './bandit';
+import { WHATSAPP_CHANNEL_REASONS } from './whatsappRules';
 
 export const REPLAY_VERSION = 1;
 /** A snapshot stays under this (the decision itself stays under 2 KB). */
@@ -202,7 +203,11 @@ export function systemGate(pre: RuleCheck): GateResult {
  * (has an address, not switched off).
  */
 export function noChannelFor(checks: ChannelCheck[], ladder: Channel[]): { rule: RuleName; reason: string; fact: string } | undefined {
-  const reachable = checks.filter((c) => !c.ok && ladder.includes(c.channel) && c.reason !== 'no_address' && c.reason !== 'whatsapp_off');
+  // PR W3: WhatsApp's own channel rules (off, limited, US, unreachable) are HeidiFi's/Meta's, not the guest's reachability.
+  const reachable = checks
+    .filter((c) => !c.ok && ladder.includes(c.channel) && c.reason !== 'no_address' && !(WHATSAPP_CHANNEL_REASONS as readonly string[]).includes(c.reason ?? ''))
+    // PR W3: WhatsApp blocked by the guest's SMS STOP (W3-D1) is the guest's stop, like a revoked yes.
+    .map((c) => (c.reason === 'blocked:sms_stop' ? { ...c, reason: 'consent_revoked' } : c));
   const onlyAudience = reachable.length > 0 && reachable.every((c) => c.reason === 'audience');
   if (onlyAudience) return { rule: 'channel_rules', reason: 'audience', fact: 'the owner chose to message verified guests only' };
   // Every channel this guest has lacks a yes: say it's consent, not "no channel could be used".

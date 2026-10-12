@@ -1,7 +1,7 @@
 /**
  * WhatsApp adapter for Adaptive Campaigns (see types.ts for the contract): Adaptive's own client for
- * Meta's Cloud API messages endpoint. PR PV: only the owner's Send test uses it — the engine still
- * refuses WhatsApp (`whatsapp_off` in engine/sendPath.ts) until W3 switches it on.
+ * Meta's Cloud API messages endpoint. PR PV: the owner's Send test; PR W3: the engine too (while the
+ * launch setting `whatsappSending` is on — else engine/sendPath.ts says `whatsapp_off`).
  *
  * One request per send, never more:
  *  - one POST to `/{WHATSAPP_PHONE_NUMBER_ID}/messages`, `type: template` (outside a conversation the
@@ -20,6 +20,7 @@
  *     codes, the spam limit on our number (131048)               phone number id is wrong or not ours)
  *   5xx, codes 1, 2, 131000, 131016, no answer, a 2xx without an id → unknown (it may have left)
  *   every other refusal (template, parameter, number)       → rejected, with Meta's words
+ *     (131050, the person stopped our marketing in WhatsApp, also `suppress: 'stop'` — PR W3)
  *
  * Its own Graph version constant: whatsapp/meta.ts is the template client, and only
  * whatsapp/source.ts may import it (tests/adaptiveWhatsAppBoundary.test.ts). Keep the two in step.
@@ -101,7 +102,8 @@ export function classifyWhatsAppAnswer(status: number, json: unknown, headers: H
     return { kind: 'rejected', provider, code: codeText, message, config: true };
   }
   if (status >= 500 || (code !== null && UNKNOWN_CODES.has(code))) return { kind: 'unknown', provider, reason: `meta_${codeText}` };
-  if (status >= 400 || e) return { kind: 'rejected', provider, code: codeText, message };
+  // PR W3: 131050 = the person stopped our marketing in WhatsApp → a WhatsApp STOP for the number.
+  if (status >= 400 || e) return { kind: 'rejected', provider, code: codeText, message, ...(code === 131050 ? { suppress: 'stop' as const } : {}) };
   return { kind: 'unknown', provider, reason: `meta_http_${status}` };
 }
 

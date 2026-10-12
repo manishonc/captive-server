@@ -418,7 +418,8 @@ test('the modules are pure: their runtime imports load no firebase', () => {
   assertEqual(runtimeImports(join(SRC, 'adaptive/core/owner/deadTasks.ts')), [], 'deadTasks imports nothing');
   assertEqual(
     runtimeImports(join(SRC, 'adaptive/engine/renderSend.ts')).sort(),
-    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/scans/occasions', '../core/schemas'],
+    // PR W3: + the WhatsApp template values (pure core) — renderMessage renders an approved template.
+    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/scans/occasions', '../core/schemas', '../core/whatsapp/sendValues'],
     'renderSend runtime imports',
   );
   for (const rel of ['adaptive/core/owner/deadTasks.ts', 'adaptive/core/runtime/decision.ts', 'adaptive/core/runtime/replay.ts', 'adaptive/engine/renderSend.ts']) {

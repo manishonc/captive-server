@@ -10,6 +10,7 @@
  *   message.sent (live)              → sends.{ch}.sent, bySlot, byVariant, and
  *                                      credits.{ch} (marketing) or utility (service)
  *   message.delivered/opened/clicked/bounced/failed/unknown → sends.{ch}.*
+ *   credits.refunded (PR W3: WhatsApp Meta didn't deliver) → credits.{ch} − the amount
  *   send.skipped / send.blocked      → skipped{reason}
  *   send.dry_run and every event of a test-run guest → dryRun{…} (same shape), so a
  *                                      test run never shows up in sends or credits
@@ -132,6 +133,8 @@ export function countsFor(e: RollupEvent): { both: Counts | null; venueOnly: Cou
       else c.credits = { [channel]: num(decision.credits?.price) };
       return { both: { dryRun: c }, venueOnly: null };
     }
+    case 'credits.refunded':
+      return wrap({ credits: { [channel]: -num(e.data.credits) } });
     case 'send.skipped':
     case 'send.blocked': {
       const decision = e.data.decision as { reason?: string | null } | undefined;

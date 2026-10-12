@@ -35,7 +35,8 @@ import { venueHasSomethingOn } from '../core/runtime/hold';
 import { now as engineNow, refreshClock } from '../engine/clock';
 import { getEngineStatus } from './engine';
 import { accountNameOf } from '../core/owner/accountName';
-import { adminActor, SYSTEM, writeLog } from '../whatsapp/store';
+import { adminActor, readOps, SYSTEM, writeLog } from '../whatsapp/store';
+import { loadWaPickContext, usableWaTemplateCount } from '../whatsapp/pick';
 
 const modeSchema = z.enum(['off', 'test', 'live']);
 const tenantKey = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, 'not a valid account id');
@@ -80,6 +81,8 @@ export const launchChangeSchema = z
       .object({ autoSubmit: z.enum(['off', 'on']).optional(), maxPerDay: z.number().int().min(0).max(100).optional() })
       .strict()
       .optional(),
+    // PR W3: journeys send WhatsApp (one switch for the platform).
+    whatsappSending: z.object({ mode: z.enum(['off', 'on']).optional() }).strict().optional(),
   })
   .strict();
 
@@ -103,7 +106,59 @@ function stateOf(s: EngineSettings): LaunchState {
     bandit: { mode: s.bandit?.mode ?? 'off', accounts: s.bandit?.accounts ?? {} },
     agents: { mode: s.agents?.mode ?? 'off', accounts: s.agents?.accounts ?? {}, monthlyBudgetUsd: s.agents?.monthlyBudgetUsd ?? 0 },
     whatsappTemplates: { autoSubmit: s.whatsappTemplates?.autoSubmit ?? 'off', maxPerDay: s.whatsappTemplates?.maxPerDay ?? 0 },
+    whatsappSending: { mode: s.whatsappSending?.mode ?? 'off' },
   };
+}
+
+/** PR W3: Meta's message notices must be this fresh for WhatsApp sending to be turned on. */
+const WA_NOTICES_FRESH_MS = 7 * 24 * 3600_000;
+
+/**
+ * PR W3: what WhatsApp sending needs, each with whether it holds — shown on the admin card, and
+ * turning it on is refused while one fails: the worker has the WhatsApp keys, Meta's message
+ * notices arrive (the `messages` webhook field), and at least one template is approved and in use.
+ */
+export async function whatsappSendingChecks(): Promise<Array<{ key: 'worker_keys' | 'meta_notices' | 'approved_template'; ok: boolean; text: string }>> {
+  const [status, ops, count] = await Promise.all([
+    getEngineStatus(),
+    readOps(),
+    loadWaPickContext().then(usableWaTemplateCount),
+  ]);
+  const alive = status.workers.filter((w) => w.alive);
+  const keysOk = alive.length > 0 && alive.every((w) => (w as { channels?: { whatsapp?: unknown } }).channels?.whatsapp === true);
+  const seen = ops.messagesSeenAtMs;
+  const noticesOk = seen !== null && Date.now() - seen <= WA_NOTICES_FRESH_MS;
+  return [
+    {
+      key: 'worker_keys',
+      ok: keysOk,
+      text: keysOk
+        ? 'The adaptive-worker has the WhatsApp keys'
+        : alive.length
+          ? 'The adaptive-worker has no WhatsApp keys (WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN)'
+          : 'No adaptive-worker is running',
+    },
+    {
+      key: 'meta_notices',
+      ok: noticesOk,
+      text: noticesOk
+        ? `Meta sent a WhatsApp message notice ${new Date(seen!).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+        : "No WhatsApp message notice from Meta in the last 7 days (subscribe the app's messages webhook field; a WhatsApp Send test makes one)",
+    },
+    {
+      key: 'approved_template',
+      ok: count > 0,
+      text: count > 0 ? `${count} approved template${count === 1 ? '' : 's'} in use` : 'No approved WhatsApp template is in use yet',
+    },
+  ];
+}
+
+async function whatsappSendingProblemsOr503(): Promise<string[]> {
+  try {
+    return (await whatsappSendingChecks()).filter((c) => !c.ok).map((c) => c.text);
+  } catch {
+    throw new HttpError(503, 'engine_status_unknown', 'Could not check what WhatsApp sending needs — reload and try again');
+  }
 }
 
 function iso(ms: number | null | undefined): string | null {
@@ -207,6 +262,14 @@ export async function getLaunch() {
     warnings.push('Could not read the engine status');
   }
   if (!settings.alerts.email) warnings.push('No alert email is set: HeidiFi gets no Adaptive alerts');
+  // PR W3: what WhatsApp sending needs (a failed read is a warning, never the card).
+  const waChecks = await whatsappSendingChecks().catch(() => {
+    warnings.push('Could not check what WhatsApp sending needs');
+    return null;
+  });
+  if (settings.whatsappSending?.mode === 'on' && waChecks?.some((c) => !c.ok)) {
+    warnings.push(`WhatsApp sending is on, but: ${waChecks.filter((c) => !c.ok).map((c) => c.text).join('; ')}`);
+  }
   // PR W2b: WhatsApp Auto that can't act.
   const wa = settings.whatsappTemplates;
   if (wa?.autoSubmit === 'on' && wa.maxPerDay === 0) warnings.push('WhatsApp Auto is on with a cap of 0 a day: nothing is sent to Meta');
@@ -248,6 +311,12 @@ export async function getLaunch() {
       maxPerDay: settings.whatsappTemplates?.maxPerDay ?? 0,
       changedBy: settings.whatsappTemplates?.changedBy ?? null,
     },
+    // PR W3: journeys send WhatsApp — the switch and what it needs (checked on every read).
+    whatsappSending: {
+      mode: settings.whatsappSending?.mode ?? 'off',
+      changedBy: settings.whatsappSending?.changedBy ?? null,
+      checks: waChecks,
+    },
     accountNames: names,
     waitingForStartSending: waiting,
     warnings,
@@ -263,7 +332,8 @@ export async function checkLaunch(body: unknown) {
   const after = applyChange(before, input.change as LaunchChange);
   const summary = summarizeChange(before, after);
   const goesLive = summary.loosening.includes('default_live') || summary.loosening.includes('account_live');
-  return { summary, blockers: goesLive ? await goLiveProblemsOr503() : [] };
+  const waOn = summary.loosening.includes('wa_send_on');
+  return { summary, blockers: [...(goesLive ? await goLiveProblemsOr503() : []), ...(waOn ? await whatsappSendingProblemsOr503() : [])] };
 }
 
 export interface ApplyOptions {
@@ -284,6 +354,11 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
   const blockers = goesLive && !opts.sandbox ? await goLiveProblemsOr503() : [];
   if (blockers.length) throw new HttpError(409, 'engine_not_ready', `Going live is refused: ${blockers.join('; ')}`, { blockers });
   const gateChecked = goesLive && !opts.sandbox;
+  // PR W3: WhatsApp sending only once the worker, Meta's notices and a template are there.
+  const waTurnsOn = Boolean(firstLook?.loosening.includes('wa_send_on'));
+  const waBlockers = waTurnsOn && !opts.sandbox ? await whatsappSendingProblemsOr503() : [];
+  if (waBlockers.length) throw new HttpError(409, 'whatsapp_not_ready', `Turning WhatsApp sending on is refused: ${waBlockers.join('; ')}`, { blockers: waBlockers });
+  const waChecked = waTurnsOn && !opts.sandbox;
 
   const realNow = Date.now();
   const result = await db.runTransaction(async (tx) => {
@@ -300,6 +375,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
     // first look didn't see (e.g. that read failed), refuse rather than skip it.
     const txGoesLive = summary.loosening.includes('default_live') || summary.loosening.includes('account_live');
     if (txGoesLive && !opts.sandbox && !gateChecked) throw new HttpError(503, 'engine_status_unknown', 'Could not confirm the worker is ready — reload and try again');
+    if (summary.loosening.includes('wa_send_on') && !opts.sandbox && !waChecked) throw new HttpError(503, 'engine_status_unknown', 'Could not check what WhatsApp sending needs — reload and try again');
     // Only the brake (pause, off, test, lower limits, fewer countries) goes through on a stale card.
     const brakeOnly = !loosens && before.alertsEmail === after.alertsEmail;
     if (!brakeOnly && !opts.sandbox) {
@@ -352,6 +428,10 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
       set(['whatsappTemplates', 'maxPerDay'], after.whatsappTemplates!.maxPerDay);
       set(['whatsappTemplates', 'changedBy'], by);
     }
+    if (input.change.whatsappSending && after.whatsappSending?.mode !== before.whatsappSending?.mode) {
+      set(['whatsappSending', 'mode'], after.whatsappSending!.mode);
+      set(['whatsappSending', 'changedBy'], by);
+    }
     set(['version'], next);
     set(['updatedAt'], new Date(realNow));
     set(['updatedBy'], by);
@@ -378,6 +458,7 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         bandit: before.bandit ?? null,
         agents: before.agents ?? null,
         whatsappTemplates: before.whatsappTemplates ?? null,
+        whatsappSending: before.whatsappSending ?? null,
       },
       after: {
         default: after.default,
@@ -392,12 +473,16 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
         bandit: after.bandit ?? null,
         agents: after.agents ?? null,
         whatsappTemplates: after.whatsappTemplates ?? null,
+        whatsappSending: after.whatsappSending ?? null,
       },
     });
     const waBefore = before.whatsappTemplates ?? { autoSubmit: 'off' as const, maxPerDay: 0 };
     const waAfter = after.whatsappTemplates ?? waBefore;
     const autoChanged = waBefore.autoSubmit !== waAfter.autoSubmit || waBefore.maxPerDay !== waAfter.maxPerDay ? { before: waBefore, after: waAfter } : null;
-    return { changed: true as const, summary, version: next, autoChanged, by };
+    const sendingBefore = before.whatsappSending?.mode ?? 'off';
+    const sendingAfter = after.whatsappSending?.mode ?? sendingBefore;
+    const sendingChanged = sendingBefore !== sendingAfter ? { before: sendingBefore, after: sendingAfter } : null;
+    return { changed: true as const, summary, version: next, autoChanged, sendingChanged, by };
   });
   // PR W2b: WhatsApp Auto changed — the WhatsApp activity log says so too (never fails the save).
   if (result.changed && 'autoChanged' in result && result.autoChanged) {
@@ -413,6 +498,20 @@ export async function applyLaunchChange(body: unknown, opts: ApplyOptions) {
           : `Auto’s cap changed: ${b.maxPerDay} → ${a.maxPerDay} templates a day`,
       from: b.autoSubmit,
       to: a.autoSubmit,
+      detail: { before: b, after: a },
+    }).catch(() => undefined);
+  }
+  // PR W3: WhatsApp sending switched — the WhatsApp activity log says so too (never fails the save).
+  if (result.changed && 'sendingChanged' in result && result.sendingChanged) {
+    const { before: b, after: a } = result.sendingChanged;
+    const actor = opts.actor.kind === 'seed' ? SYSTEM : await adminActor(result.by);
+    await writeLog({
+      kind: 'settings.sending_changed',
+      level: 'info',
+      actor,
+      summary: a === 'on' ? 'WhatsApp sending turned on: journeys now send approved templates' : 'WhatsApp sending turned off: journeys use SMS and email',
+      from: b,
+      to: a,
       detail: { before: b, after: a },
     }).catch(() => undefined);
   }

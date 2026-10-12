@@ -70,7 +70,7 @@ export type ProviderResult =
       provider: ProviderName;
       code: string;
       message: string;
-      /** Twilio 21610 ("unsubscribed") → STOP-block the number everywhere. */
+      /** Twilio 21610 ("unsubscribed") → STOP-block the number everywhere (WhatsApp 131050: its WhatsApp, PR W3). */
       suppress?: 'stop' | null;
       /** An account/credentials problem (401/403, Twilio 20003): not the guest's fault. */
       config?: boolean;

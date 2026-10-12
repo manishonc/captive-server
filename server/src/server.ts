@@ -29,7 +29,14 @@ import { startWhatsAppTemplateJob } from './jobs/whatsappTemplates';
 const app = express();
 const PORT = 4000;
 
-app.use(bodyParser.json());
+// PR W3: Meta's webhook keeps its raw body, so its X-Hub-Signature-256 can be checked (routes/whatsappWebhook.ts).
+app.use(
+  bodyParser.json({
+    verify: (req, _res, buf) => {
+      if (String((req as { url?: string }).url ?? '').startsWith('/webhook/whatsapp')) (req as { rawBody?: Buffer }).rawBody = buf;
+    },
+  }),
+);
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use('/', captiveRoutes);
 app.use('/schedule-sms', smsRoutes);

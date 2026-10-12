@@ -249,6 +249,14 @@ PR F2a (the AI foundation, docs/adaptive-engine.md "The AI agents"): `GET /admin
 the AI agents on (the default or an account) needs "AI ON", a higher budget "LOOSEN LIMITS"; off and a lower
 budget are the brake (one click). The admin UI is the "AI agents" card on Launch & health.
 
+PR W3 (WhatsApp sending, docs/adaptive-engine.md "WhatsApp sending"): `GET /admin/launch` also returns
+`whatsappSending { mode, changedBy, checks: [{ key: worker_keys|meta_notices|approved_template, ok, text }] | null }`;
+`PUT /admin/launch` (and `POST /admin/launch/check`) take `change.whatsappSending { mode?: 'off'|'on' }` — on needs
+"WHATSAPP ON" (loosening `wa_send_on`) and is refused with `409 whatsapp_not_ready` `{ blockers }` while a check
+fails (the check answers them as `blockers`); off is one click. `POST /dev/launch` takes `whatsappSending` (sandbox:
+no phrase, no checks). The owner overview (`GET /tenants/:t/overview`) and the preview answer
+`sendingChannels: ('sms'|'email'|'whatsapp')[]`.
+
 PR W2b (WhatsApp Auto, docs/adaptive-engine.md "WhatsApp Auto"): `GET /admin/launch` also returns
 `whatsappTemplates { autoSubmit, maxPerDay, changedBy }` (and warns when Auto is on with a cap of 0, or with the
 AI agents off); `PUT /admin/launch` also takes `change.whatsappTemplates { autoSubmit?: 'off'|'on', maxPerDay?: 0–100 }`
@@ -371,7 +379,7 @@ Reads are by id, the whole small registry, or newest first by one field: no comp
 | WhatsApp template (PR W1; errors block Send to Meta, warnings are shown) | T01 name · T02 language · T03 category asked · T04 the message's rule · T05 one category per name · T06 length (warn: worst case) · T07 footer length · T08 fields allowed, once, well formed · T09 not first/last/side by side · T10 words per field (warn under 3) · T11 defaults + date formats · T12 the button link (also Meta's registered one) · T13 names the venue · T14 no links/emails/phones · T15 STOP in the footer · T16 template limit · T17 name locked · T18 duplicate text · T19 utility: no offer fields (warn: promotional words, emoji) · T20 STOP footer on marketing (warn on utility) · T21 formatting · T22 creates this hour · T23 Meta's text differs from ours (body, footer, our link button; not while a rejected/paused template is being edited — nor Meta's old registered button, T12) · T24 Meta's template has parts this tab doesn't handle — a header, media, or a button needing a value we don't fill (coupon code, a second link with a variable…); linking refused, the detail lists them as `unhandled` |
 | Playbook (admin Check / publish) | K01 shape · K02 kind locked · P01 name · P02 journeys · P03 required ⇒ on · P04 newest pin (warn) · P05 questions (warn) · P06 pinned version exists · P07 coming soon ⇒ off · V04 offers & defaults · V07 wording (warn) · V09 venue types · V10 same trigger (warn) · V14 info playbook |
 | Journey template (seed / CI) | V01 graph · V02 pools · V03 caps · V04 offer blanks · V05 high value · V06 trigger config · V08 channel diff · V14 info journey · V16 registry |
-| Owner setup (save / turn on) | S01 venue · S02 journeys on/off · S03 blanks · S04 playbook offered · F01 time zone · F02 account active · F03 overlap acknowledged · W01 WhatsApp later (info) · W02 stay calendar (warn) |
+| Owner setup (save / turn on) | S01 venue · S02 journeys on/off · S03 blanks · S04 playbook offered · F01 time zone · F02 account active · F03 overlap acknowledged · W01 WhatsApp isn't switched on yet (info; only while WhatsApp sending is off, PR W3) · W02 stay calendar (warn) |
 
 ## Seed
 

@@ -6,6 +6,7 @@
  * PR F2a adds `agents` (the AI master switch, per account, and the monthly AI budget).
  * PR W2b adds `whatsappTemplates` (Auto: the WhatsApp tick sends clean AI drafts to Meta itself,
  * at most `maxPerDay` a day).
+ * PR W3 adds `whatsappSending` (journeys may send WhatsApp — their approved templates; one switch).
  *
  * Read raw — PR 1's `getAdaptiveConfig()` parses a fixed shape and drops these
  * keys. Anything missing or malformed reads as the SAFE value: launch `off`,
@@ -84,6 +85,10 @@ const settingsSchema = z.object({
       changedBy: z.string().nullable().optional(),
     })
     .catch({ autoSubmit: 'off', maxPerDay: 0 }),
+  // PR W3: journeys send WhatsApp — off unless HeidiFi turns it on; a bad value is off.
+  whatsappSending: z
+    .object({ mode: banditModeSchema.catch('off'), changedBy: z.string().nullable().optional() })
+    .catch({ mode: 'off' }),
 });
 
 /** PR F2a: the monthly AI budget when none was ever set (F-D5). */
@@ -109,6 +114,8 @@ export interface EngineSettings {
   agents?: { mode: AgentsMode; accounts: Record<string, AgentsMode>; monthlyBudgetUsd: number; changedBy: string | null };
   /** PR W2b: Auto — the WhatsApp tick sends clean AI drafts to Meta by itself; at most `maxPerDay` a day. */
   whatsappTemplates?: { autoSubmit: WaAutoSubmit; maxPerDay: number; changedBy: string | null };
+  /** PR W3: `on` = journeys send WhatsApp where a message has an approved template (one switch for all accounts). */
+  whatsappSending?: { mode: 'off' | 'on'; changedBy: string | null };
 }
 
 /** PR W2b: `on` lets the WhatsApp tick send clean AI drafts to Meta (and ask the AI to fix rejected ones). */
@@ -126,6 +133,7 @@ export const SAFE_SETTINGS: EngineSettings = {
   bandit: { mode: 'off', accounts: {}, changedBy: null },
   agents: { mode: 'off', accounts: {}, monthlyBudgetUsd: 0, changedBy: null },
   whatsappTemplates: { autoSubmit: 'off', maxPerDay: 0, changedBy: null },
+  whatsappSending: { mode: 'off', changedBy: null },
 };
 
 export function parseEngineSettings(data: Record<string, unknown> | undefined): EngineSettings {
@@ -139,6 +147,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     bandit: data.bandit ?? {},
     agents: agentsInput(data.agents),
     whatsappTemplates: waTemplatesInput(data.whatsappTemplates),
+    whatsappSending: data.whatsappSending ?? {},
   });
   return {
     launch: {
@@ -154,6 +163,7 @@ export function parseEngineSettings(data: Record<string, unknown> | undefined): 
     bandit: { mode: p.bandit.mode, accounts: p.bandit.accounts, changedBy: p.bandit.changedBy ?? null },
     agents: { mode: p.agents.mode, accounts: p.agents.accounts, monthlyBudgetUsd: p.agents.monthlyBudgetUsd, changedBy: p.agents.changedBy ?? null },
     whatsappTemplates: { autoSubmit: p.whatsappTemplates.autoSubmit, maxPerDay: p.whatsappTemplates.maxPerDay, changedBy: p.whatsappTemplates.changedBy ?? null },
+    whatsappSending: { mode: p.whatsappSending.mode, changedBy: p.whatsappSending.changedBy ?? null },
   };
 }
 
@@ -178,6 +188,10 @@ export function waAutoOf(s: EngineSettings): { autoSubmit: WaAutoSubmit; maxPerD
   return s.whatsappTemplates ?? { autoSubmit: 'off', maxPerDay: 0, changedBy: null };
 }
 
+/** PR W3: do journeys send WhatsApp? (a settings object without the switch: no). */
+export function whatsappSendingOn(s: EngineSettings): boolean {
+  return s.whatsappSending?.mode === 'on';
+}
 
 /** PR F1: the bandit for one account — its override, else the global mode (missing = off). */
 export function banditModeFor(settings: EngineSettings, tenantUserId: string | null | undefined): BanditMode {

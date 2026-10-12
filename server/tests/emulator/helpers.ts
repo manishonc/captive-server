@@ -15,6 +15,7 @@ import { AdaptiveWorker } from '../../src/adaptive/worker/worker';
 import { COL, CONFIG_DOC_ID } from '../../src/adaptive/store/collections';
 import { zonedTime, localParts, DAY_MS } from '../../src/adaptive/core/runtime/time';
 import { __clearRollupArming } from '../../src/adaptive/rollups/rollup';
+import { __clearWaPickCache } from '../../src/adaptive/whatsapp/pick';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST || process.env.ADAPTIVE_SANDBOX !== '1') {
   console.error('Run these through tests/emulator/run.sh (emulator + sandbox only).');
@@ -62,6 +63,7 @@ export async function resetEmulator(): Promise<void> {
 
 export function clearCaches(): void {
   clearEngineSettingsCache();
+  __clearWaPickCache();
   __clearConnectCaches();
   __clearLegacyCaches();
   invalidateCatalogue();

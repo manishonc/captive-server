@@ -18,7 +18,9 @@ import { shouldAdvanceStatus } from '../services/deliveryStatus';
 import { classifyInbound, setChannelOptOut } from '../services/optOut';
 import { sendWhatsAppText } from '../services/whatsapp';
 import { runAdaptiveHook } from '../adaptive/ingest/hook';
-import { TEMPLATE_FIELDS, noteTemplateHints, type TemplateHintInput } from '../adaptive/whatsapp/hints';
+import { TEMPLATE_FIELDS, noteTemplateHints, noteWhatsAppMessagesSeen, type TemplateHintInput } from '../adaptive/whatsapp/hints';
+import { adaptiveOnInboundWhatsApp, adaptiveOnWhatsAppStatus } from '../adaptive/ingest/signals';
+import { metaSignatureValid } from '../services/metaSignature';
 
 const router = Router();
 
@@ -53,7 +55,11 @@ router.post('/', async (req: Request, res: Response) => {
     const entries = body?.entry as Array<Record<string, unknown>>;
     if (!entries?.length) return;
 
+    // PR W3: signed by Meta (needs WHATSAPP_APP_SECRET) — only then may an inbound START give consent back.
+    const signatureChecked = metaSignatureValid((req as { rawBody?: Buffer }).rawBody, req.headers['x-hub-signature-256']);
     const templateHints: TemplateHintInput[] = [];
+    // PR W3: Meta sent a message notice (status or inbound) — the WhatsApp sending switch needs one.
+    let messagesSeen = false;
     for (const entry of entries) {
       const changes = entry?.changes as Array<Record<string, unknown>>;
       if (!changes?.length) continue;
@@ -73,12 +79,18 @@ router.post('/', async (req: Request, res: Response) => {
         // ── Delivery / read status updates ───────────────────────────────────
         const statuses = value?.statuses as Array<Record<string, unknown>>;
         if (statuses?.length) {
+          messagesSeen = true;
           for (const status of statuses) {
             const wamid         = status?.id as string;
             const statusValue   = status?.status as string; // sent | delivered | read | failed
             const errorData     = status?.errors as unknown;
 
             if (!wamid || !statusValue) continue;
+
+            // PR W3: an Adaptive journey's WhatsApp message (looked up by its wamid; not ours → nothing).
+            const firstError = Array.isArray(errorData) ? (errorData[0] as Record<string, unknown> | undefined) : undefined;
+            const errorCode = firstError?.code !== undefined && firstError?.code !== null ? String(firstError.code).slice(0, 20) : null;
+            runAdaptiveHook('whatsapp status', () => adaptiveOnWhatsAppStatus({ wamid: String(wamid), status: String(statusValue), errorCode }));
 
             try {
               const snapshot = await db
@@ -123,6 +135,7 @@ router.post('/', async (req: Request, res: Response) => {
         // ── Inbound messages: honor opt-out keywords + quick-reply buttons ──
         const messages = value?.messages as Array<Record<string, unknown>>;
         if (messages?.length) {
+          messagesSeen = true;
           for (const msg of messages) {
             console.log('[WHATSAPP WEBHOOK] Inbound message from %s: type=%s', msg?.from, msg?.type);
             const from = String(msg?.from ?? '').trim(); // digits, no leading +
@@ -142,6 +155,11 @@ router.post('/', async (req: Request, res: Response) => {
 
             const kind = classifyInbound(text);
             if (!kind) continue;
+            // PR W3: Adaptive's own WhatsApp STOP (a START gives nothing back without a signature).
+            if (kind === 'stop' || kind === 'start') {
+              const messageId = String(msg?.id ?? '');
+              runAdaptiveHook('whatsapp inbound', () => adaptiveOnInboundWhatsApp({ from, kind, messageId, signatureChecked }));
+            }
 
             try {
               if (kind === 'stop') {
@@ -168,6 +186,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
     // Template notices (PR W1): one hook for the whole body — repeats dropped, at most 10, one at a time.
     if (templateHints.length) runAdaptiveHook('whatsapp template', () => noteTemplateHints(templateHints));
+    if (messagesSeen) runAdaptiveHook('whatsapp notices', () => noteWhatsAppMessagesSeen());
   } catch (err) {
     console.error('[WHATSAPP WEBHOOK ERROR]', err);
   }
