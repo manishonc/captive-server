@@ -26,6 +26,9 @@
  *  - Verification round: any later charge call finishes an interrupted refund; a failed send never
  *    charged still comes off the daily numbers; the owner's timeline has no bookkeeping line; a STOP
  *    from Meta's WhatsApp id reaches the number we sent to (Mexico's +521…).
+ *  - Delta round: a STOP from that id before the first send is carried to the number after it; WhatsApp's
+ *    own rule (unverified) wins over "no template"; the owner's stop keeps the guest's WhatsApp yes for
+ *    info messages.
  */
 
 import express from 'express';
@@ -66,6 +69,7 @@ import { sendKeyFor } from '../../src/adaptive/core/runtime/ids';
 import { DAY_MS, HOUR_MS, MINUTE_MS } from '../../src/adaptive/core/runtime/time';
 import { adaptiveOnInboundWhatsApp, adaptiveOnWhatsAppStatus } from '../../src/adaptive/ingest/signals';
 import { chargeSend } from '../../src/adaptive/send/dispatch';
+import { guestSaidYes } from '../../src/adaptive/identity/resolve';
 import { applyPhoneStart, applyPhoneStop } from '../../src/adaptive/engine/optouts';
 import { contactPointId } from '../../src/adaptive/identity/key';
 import { parseEngineSettings, whatsappSendingOn } from '../../src/adaptive/store/engineSettings';
@@ -527,6 +531,38 @@ async function main() {
     await adaptiveOnInboundWhatsApp({ from: '5215512345678', kind: 'stop', messageId: 'wamid.in.mx.1' });
     await runDue();
     assertEqual((await point(pointId)).suppression?.whatsapp?.reason, 'stop', 'the number we send to is blocked');
+  });
+
+  console.log('\nDelta round (PR W3)\n');
+
+  await test('a STOP from Meta’s WhatsApp id before our first send is carried to the number once the id is known', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    await adaptiveOnInboundWhatsApp({ from: '5215598765432', kind: 'stop', messageId: 'wamid.in.mx.early' });
+    await runDue();
+    await connect({ venue: W, firstName: 'Diego', phone: '5598765432', phoneCountryCode: '+52', phoneVerified: true, consent: true, language: 'en' });
+    await runDue();
+    await advance(15 * MINUTE_MS);
+    await runDue();
+    const p = await point(contactPointId('phone', '+525598765432'));
+    assertEqual([p.whatsappWaIdOf, p.suppression?.whatsapp?.reason], [contactPointId('phone', '+5215598765432'), 'stop'], 'linked, and the earlier STOP now blocks the number');
+  });
+
+  await test('WhatsApp’s own rule wins over "no template": an unverified number reads whatsapp_unverified, not no_wording', async () => {
+    await fresh({ whatsapp: 'on' });
+    const g = await welcomed({ phone: ukPhone(), verified: false });
+    assertEqual([g.s1, waReason(g.events)], [null, 'whatsapp_unverified'], 'its own reason');
+    const v = await welcomed({ phone: ukPhone() });
+    assertEqual([v.s1, waReason(v.events)], [null, 'no_wording'], 'a verified guest: there is no template');
+  });
+
+  await test('the owner’s stop keeps the guest’s WhatsApp yes for info messages (marketing stays stopped)', async () => {
+    const t = new Date();
+    assertEqual(guestSaidYes({ state: 'granted', at: t, eventId: 'e' }), true, 'yes');
+    assertEqual(guestSaidYes({ state: 'revoked', at: t, eventId: 'e', revokedVia: 'owner', ownerStopped: true, ownerPrior: 'granted' }), true, 'owner stop after a yes');
+    assertEqual(guestSaidYes({ state: 'revoked', at: t, eventId: 'e', revokedVia: 'owner', ownerStopped: true, ownerPrior: 'none' }), false, 'owner stop without a yes');
+    assertEqual(guestSaidYes({ state: 'revoked', at: t, eventId: 'e', revokedVia: 'channel', source: 'whatsapp_keyword' }), false, 'the guest’s STOP');
+    assertEqual(guestSaidYes(undefined), false, 'no answer');
   });
 
   await api.close();

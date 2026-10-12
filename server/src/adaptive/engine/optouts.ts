@@ -175,6 +175,20 @@ function waKeywordTimes(point: ContactPointDoc | null): { stop: number; start: n
 }
 
 /**
+ * PR W3: Meta's own WhatsApp id for a number we send to differs from it (Mexico's 521…): remember the
+ * id's point on the number's point (`whatsappWaIdOf`, a STOP from the id applies here too), and carry
+ * a WhatsApp STOP that already came from the id (before this number's first send). Safe to repeat.
+ */
+export async function linkWhatsAppId(pointId: string, waIdPointId: string, ref: Record<string, unknown> = {}): Promise<void> {
+  if (pointId === waIdPointId) return;
+  await db.collection(COL.contactPoints).doc(pointId).set({ whatsappWaIdOf: waIdPointId }, { merge: true });
+  const alias = (await db.collection(COL.contactPoints).doc(waIdPointId).get()).data() as ContactPointDoc | undefined;
+  if (alias?.suppression?.whatsapp?.reason === 'stop') {
+    await applyWhatsAppStop(pointId, 'whatsapp_keyword', waKeywordTimes(alias).stop || Date.now(), { ...ref, fromWaId: true });
+  }
+}
+
+/**
  * PR W3: a WhatsApp STOP for a phone (`at` = when it arrived: an inbound STOP, or Meta's 131050).
  * Blocks WhatsApp on the number for every owner (one shared sender) and revokes WhatsApp consent
  * wherever it was given (`revokedVia: 'channel'`). Ignored if a later START was applied.

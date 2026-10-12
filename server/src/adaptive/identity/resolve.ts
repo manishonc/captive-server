@@ -377,3 +377,12 @@ export function consentState(e: ConsentEntry | undefined): 'granted' | 'revoked'
   if (e.state === 'revoked' && !e.revokedVia && e.source === 'owner_resume') return 'none';
   return e.state === 'granted' ? 'granted' : 'revoked';
 }
+
+/**
+ * PR W3: did the guest themselves say yes to this channel — also when the owner has since stopped
+ * marketing (the guest's yes is kept: `ownerPrior`)? An info message by WhatsApp needs this (Meta
+ * wants an opt-in for every template); the owner's stop concerns marketing only.
+ */
+export function guestSaidYes(e: ConsentEntry | undefined): boolean {
+  return e?.state === 'granted' || (e?.state === 'revoked' && e.revokedVia === 'owner' && e.ownerPrior === 'granted');
+}

@@ -29,14 +29,14 @@ import { DAY_MS, MINUTE_MS } from '../core/runtime/time';
 import { eventIdFor } from '../core/runtime/ids';
 import { parseEngineSettings } from '../store/engineSettings';
 import { CONFIG_DOC_ID } from '../store/collections';
-import { consentFor, consentState } from '../identity/resolve';
+import { consentFor, consentState, guestSaidYes } from '../identity/resolve';
 import { contactPointId } from '../identity/key';
 import { tsMs } from '../store/time';
 import { debitOne, onCreditsSpent, refundOne } from '../../services/credits';
 import { firestoreScheduler, LEASE_MS } from '../queue/firestoreQueue';
 import { appendEvent, appendEventInTx, eventDoc, eventRef, type EventInput } from '../engine/events';
 import { instanceRef, stateUpdate, type LoadedInstance } from '../engine/instanceStore';
-import { applyPhoneStop, applyWhatsAppHold, applyWhatsAppStop } from '../engine/optouts';
+import { applyPhoneStop, applyWhatsAppHold, applyWhatsAppStop, linkWhatsAppId } from '../engine/optouts';
 import { whatsappBlocked, whatsappFailureEffect } from '../core/runtime/whatsappRules';
 import type { Channel } from '../core/constants';
 import { raiseAlert, dayKey } from '../engine/alerts';
@@ -126,7 +126,7 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
         blocked:
           p.channel === 'whatsapp'
             ? whatsappBlocked(point, p.purpose) ??
-              (p.purpose === 'service' && consentState(consentFor(contact, inst.meta.venueId).whatsapp) !== 'granted' ? 'whatsapp_no_optin' : null)
+              (p.purpose === 'service' && !guestSaidYes(consentFor(contact, inst.meta.venueId).whatsapp) ? 'whatsapp_no_optin' : null)
             : point?.suppression?.[p.channel]?.reason ?? null,
         lowRatingAt: tsMs(cv.lowRatingAt),
       },
@@ -254,12 +254,6 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
       if (typeof result.segments === 'number') update.smsSegments = result.segments;
       tx.update(sendRef(sendKey), update);
       if (!eSnap.exists) tx.set(eventRef(ev.id), ev.doc);
-      // PR W3: Meta delivers to another WhatsApp id than the number we sent to (Mexico's 521…, older
-      // Brazilian numbers): remember it (hashed, like every point id), so the guest's STOP from that id finds this number.
-      const waId = result.recipientId ?? null;
-      if (p.channel === 'whatsapp' && p.pointId && waId && waId !== p.message.to.replace(/\D/g, '')) {
-        tx.set(db.collection(COL.contactPoints).doc(p.pointId), { whatsappWaIdOf: contactPointId('phone', `+${waId}`) }, { merge: true });
-      }
       // A plain reply to this number is matched to its last live SMS.
       if (p.channel === 'sms' && p.pointId) {
         tx.set(
@@ -297,6 +291,15 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
       // daily numbers count from it) if the try below fails too.
       await scheduleChargeRepair(p.inst.meta.tenantUserId, p.inst.meta.venueId, sendKey, p.now);
       await ensureSentEvent(sendKey).catch((err) => console.warn('[ADAPTIVE] message.sent not written:', sendKey, (err as Error)?.message || err));
+    }
+    // PR W3: Meta delivers to another WhatsApp id than the number we sent to (Mexico's 521…, older
+    // Brazilian numbers): link it (hashed, like every point id), so the guest's STOP from that id finds this
+    // number — and a STOP that came from it before this first send applies now.
+    const waId = result.recipientId ?? null;
+    if (p.channel === 'whatsapp' && p.pointId && waId && waId !== p.message.to.replace(/\D/g, '')) {
+      await linkWhatsAppId(p.pointId, contactPointId('phone', `+${waId}`), { sendKey }).catch((err) =>
+        console.warn('[ADAPTIVE] WhatsApp id not linked:', sendKey, (err as Error)?.message || err),
+      );
     }
     await chargeSend(sendKey).catch((err) => {
       console.error('[ADAPTIVE] debit failed after a send — the queued repair will charge it:', sendKey, (err as Error)?.message || err);

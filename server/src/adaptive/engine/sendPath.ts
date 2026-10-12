@@ -34,7 +34,7 @@ import { phoneCountry } from '../core/runtime/phoneCountry';
 import type { LastTouch } from '../core/runtime/types';
 import { ENGINE_VERSION, SCHEMA_VERSION } from '../core/constants';
 import { sha256Hex } from '../core/checksum';
-import { consentFor, consentState } from '../identity/resolve';
+import { consentFor, consentState, guestSaidYes } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
 import { banditModeFor, whatsappSendingOn, type EngineSettings } from '../store/engineSettings';
 import { whatsappBlocked, whatsappRuleFail } from '../core/runtime/whatsappRules';
@@ -303,7 +303,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         limitedUntil: tsMs(cpPhone?.whatsappLimitedUntil),
         unreachableUntil: tsMs(cpPhone?.whatsappUnreachableUntil),
         verified: Boolean(contact.phoneVerified),
-        optedIn: consentState(consent.whatsapp) === 'granted',
+        optedIn: guestSaidYes(consent.whatsapp),
         now,
       });
     } else if (channel === 'sms') {
@@ -320,8 +320,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       suppressed: wa ? whatsappBlocked(cpPhone, cfg.purpose) : cp?.suppression?.[channel]?.reason ?? null,
       // WhatsApp's own "verified number only" is a WhatsApp rule (`whatsapp_unverified`), not the owner's audience.
       audienceOk: wa ? true : audience === 'all' || Boolean(verified),
-      // While WhatsApp is off, the switch is the reason (its templates aren't looked at).
-      hasWording: wa ? !waOn || waVariants.length > 0 : variants.some((v) => Boolean(variantContent(v, channel, lang))),
+      // While WhatsApp is off — or another WhatsApp rule fails (unverified, no opt-in…) — that rule is the
+      // reason, not the wording (checkChannel tests wording first).
+      hasWording: wa ? !waOn || ruleFail !== null || waVariants.length > 0 : variants.some((v) => Boolean(variantContent(v, channel, lang))),
       ruleFail,
     };
   };
