@@ -221,7 +221,8 @@ export function preflightTurnOn(
     issues.push(info('W01', 'WhatsApp isn’t used yet — SMS and email are used until WhatsApp is switched on'));
   }
   if (opts.needsStayCalendar) {
-    issues.push(warning('W02', 'Stay messages wait until your booking calendar is linked (coming with stay messages)'));
+    // The same words as the cms owner copy (ownerCopy.ts W02_GENERIC): stay messages ship since PR C.
+    issues.push(warning('W02', "Stay messages start once the booking calendar is linked. You can add the link in the Venues step or on the venue's card."));
   }
   return issues;
 }
