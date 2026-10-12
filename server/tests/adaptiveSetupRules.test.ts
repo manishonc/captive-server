@@ -178,6 +178,8 @@ test('F01–F03: time zone, lapsed account and unacknowledged overlap block turn
   assert(!errs.some((e) => e.includes('venues.d')), `d is fine ${errs}`);
   assert(issues.some((i) => i.code === 'W01' && i.severity === 'info'), 'W01 info');
   assert(issues.some((i) => i.code === 'W02' && i.severity === 'warning'), 'W02 warning');
+  const w02 = issues.find((i) => i.code === 'W02')!;
+  assert(w02.message.startsWith('Stay messages start once the booking calendar is linked') && !w02.message.includes('coming'), `W02 says stay messages start with the calendar: ${w02.message}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
