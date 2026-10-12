@@ -6,6 +6,9 @@
  *        every owner (one shared sender) + SMS consent revoked wherever it was
  *        given, `revokedVia: 'channel'` so a splash tick can't undo it.
  *  START → the STOP block lifted and exactly the scopes STOP took re-granted.
+ *  WhatsApp (PR W3): the same for a STOP / START sent on WhatsApp and Meta's 131050 — the
+ *        number's WhatsApp block + WhatsApp consent (`waKeywordAt` orders them). An SMS STOP
+ *        also ends WhatsApp *marketing*, read at send time (core/runtime/whatsappRules.ts).
  *  Email: the unsubscribe link / Brevo "unsubscribed" → email consent revoked for
  *        that venue; Brevo "spam" → the same + the address blocked for everyone.
  */
@@ -16,6 +19,7 @@ import type { ContactDoc, ContactPointDoc } from '../store/engineTypes';
 import { SCHEMA_VERSION } from '../core/constants';
 import { tsMs } from '../store/time';
 import { heldStartScopes, revokedScopesBy, stopScopes, writeConsentChanges, writeSuppression, type ConsentChange, type ConsentSource } from '../identity/consent';
+import { WA_LIMITED_MS, WA_UNREACHABLE_MS } from '../core/runtime/whatsappRules';
 
 const STOP_SOURCES = ['sms_keyword', 'provider_stop', 'import_legacy'];
 
@@ -136,6 +140,150 @@ export async function applyPhoneStart(pointId: string, at: number, ref: Record<s
           channel: 'sms' as const,
           action: 'grant' as const,
           source: 'sms_keyword' as const,
+          sourceRef: { ...ref, heldByOwnerStop: true },
+          heldByOwnerStop: true,
+        })),
+      ];
+      granted += writeConsentChanges(tx, c.id, c.doc, changes, at).length;
+    }
+    return granted;
+  });
+}
+
+const WA_STOP_SOURCES = ['whatsapp_keyword', 'meta_stop', 'import_legacy'];
+
+/**
+ * PR W3: Meta's 131049 (marketing held back: 24 h) or 131026 (can't get WhatsApp: 30 days) — no
+ * WhatsApp (marketing) to the number until then. Only ever later: a repeated or older notice never
+ * shortens it. Nothing when the number isn't known.
+ */
+export async function applyWhatsAppHold(pointId: string, effect: 'limited' | 'unreachable', at: number): Promise<void> {
+  const field = effect === 'limited' ? 'whatsappLimitedUntil' : 'whatsappUnreachableUntil';
+  const until = at + (effect === 'limited' ? WA_LIMITED_MS : WA_UNREACHABLE_MS);
+  const ref = db.collection(COL.contactPoints).doc(pointId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || (tsMs(snap.get(field)) ?? 0) >= until) return;
+    tx.update(ref, { [field]: new Date(until), updatedAt: new Date() });
+  });
+}
+
+/** When the last WhatsApp STOP / START for a number arrived (PR W3). */
+function waKeywordTimes(point: ContactPointDoc | null): { stop: number; start: number } {
+  const k = (point as unknown as { waKeywordAt?: { stop?: unknown; start?: unknown } } | null)?.waKeywordAt;
+  return { stop: tsMs(k?.stop) ?? tsMs(point?.suppression?.whatsapp?.at) ?? 0, start: tsMs(k?.start) ?? 0 };
+}
+
+/**
+ * PR W3: Meta's own WhatsApp id for a number we send to differs from it (Mexico's 521…): remember the
+ * id's point on the number's point (`whatsappWaIdOf`, a STOP from the id applies here too), and carry
+ * a WhatsApp STOP that already came from the id (before this number's first send). Safe to repeat.
+ */
+export async function linkWhatsAppId(pointId: string, waIdPointId: string, ref: Record<string, unknown> = {}): Promise<void> {
+  if (pointId === waIdPointId) return;
+  await db.collection(COL.contactPoints).doc(pointId).set({ whatsappWaIdOf: waIdPointId }, { merge: true });
+  const alias = (await db.collection(COL.contactPoints).doc(waIdPointId).get()).data() as ContactPointDoc | undefined;
+  if (alias?.suppression?.whatsapp?.reason === 'stop') {
+    await applyWhatsAppStop(pointId, 'whatsapp_keyword', waKeywordTimes(alias).stop || Date.now(), { ...ref, fromWaId: true });
+  }
+}
+
+/**
+ * PR W3: a WhatsApp STOP for a phone (`at` = when it arrived: an inbound STOP, or Meta's 131050).
+ * Blocks WhatsApp on the number for every owner (one shared sender) and revokes WhatsApp consent
+ * wherever it was given (`revokedVia: 'channel'`). Ignored if a later START was applied.
+ */
+export async function applyWhatsAppStop(pointId: string, source: 'whatsapp_keyword' | 'meta_stop', at: number, ref: Record<string, unknown> = {}): Promise<number> {
+  return db.runTransaction(async (tx) => {
+    const cpRef = db.collection(COL.contactPoints).doc(pointId);
+    const cpSnap = await tx.get(cpRef);
+    const point = cpSnap.exists ? (cpSnap.data() as ContactPointDoc) : null;
+    const contacts = await readContacts(tx, point);
+    if (waKeywordTimes(point).start > at) return 0; // the guest said START after this STOP
+    if (!point) {
+      tx.set(cpRef, {
+        kind: 'phone',
+        networkId: null,
+        tenantContacts: {},
+        suppression: { whatsapp: { reason: 'stop', source, at: new Date(at) } },
+        waKeywordAt: { stop: new Date(at) },
+        hardBounceCount: 0,
+        lastBounceAt: null,
+        verifiedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        schemaVersion: SCHEMA_VERSION,
+      });
+    } else {
+      tx.set(
+        cpRef,
+        {
+          ...(point.suppression?.whatsapp ? {} : { suppression: { whatsapp: { reason: 'stop', source, at: new Date(at), sendKey: (ref.sendKey as string) ?? null } } }),
+          waKeywordAt: { stop: new Date(Math.max(at, waKeywordTimes(point).stop)) },
+          updatedAt: new Date(),
+        },
+        { merge: true },
+      );
+    }
+    let revoked = 0;
+    for (const c of contacts) {
+      const changes: ConsentChange[] = stopScopes(c.doc, 'whatsapp').map((venueId) => ({
+        venueId,
+        channel: 'whatsapp',
+        action: 'revoke',
+        source,
+        revokedVia: 'channel',
+        sourceRef: ref,
+      }));
+      revoked += writeConsentChanges(tx, c.id, c.doc, changes, at).length;
+    }
+    return revoked;
+  });
+}
+
+/** PR W3: a WhatsApp START — lifts a WhatsApp STOP block and re-grants what a STOP took. */
+export async function applyWhatsAppStart(pointId: string, at: number, ref: Record<string, unknown> = {}): Promise<number> {
+  return db.runTransaction(async (tx) => {
+    const cpRef = db.collection(COL.contactPoints).doc(pointId);
+    const cpSnap = await tx.get(cpRef);
+    if (!cpSnap.exists) {
+      tx.set(cpRef, {
+        kind: 'phone',
+        networkId: null,
+        tenantContacts: {},
+        suppression: {},
+        waKeywordAt: { start: new Date(at) },
+        hardBounceCount: 0,
+        lastBounceAt: null,
+        verifiedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        schemaVersion: SCHEMA_VERSION,
+      });
+      return 0;
+    }
+    const point = cpSnap.data() as ContactPointDoc;
+    const contacts = await readContacts(tx, point);
+    const times = waKeywordTimes(point);
+    if (times.stop > at || times.start >= at) return 0;
+    const lift = point.suppression?.whatsapp?.reason === 'stop';
+    const { whatsapp: _stop, ...rest } = point.suppression ?? {};
+    tx.update(cpRef, { ...(lift ? { suppression: rest } : {}), 'waKeywordAt.start': new Date(at), updatedAt: new Date() });
+    let granted = 0;
+    for (const c of contacts) {
+      const changes: ConsentChange[] = [
+        ...revokedScopesBy(c.doc, 'whatsapp', WA_STOP_SOURCES).map((venueId) => ({
+          venueId,
+          channel: 'whatsapp' as const,
+          action: 'grant' as const,
+          source: 'whatsapp_keyword' as const,
+          sourceRef: ref,
+        })),
+        ...heldStartScopes(c.doc, 'whatsapp', WA_STOP_SOURCES).map((venueId) => ({
+          venueId,
+          channel: 'whatsapp' as const,
+          action: 'grant' as const,
+          source: 'whatsapp_keyword' as const,
           sourceRef: { ...ref, heldByOwnerStop: true },
           heldByOwnerStop: true,
         })),

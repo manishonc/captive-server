@@ -158,7 +158,7 @@ The temporary token on the API Setup page expires — use a System User token in
 7. Meta sends an account's notices only to apps **subscribed to the account** (`/{WABA_ID}/subscribed_apps`,
    API only — no button in Meta's consoles). The WhatsApp tab shows it as **Notices from Meta: on / off**
    and **Turn on notices** makes that one call with the server's token. Delivery receipts for `messages`
-   (PR W3) need the same subscription.
+   (PR W3: Adaptive's WhatsApp journeys) need the same subscription.
 
 ### 4b. WhatsApp templates in Adaptive Campaigns (PR W1)
 
@@ -175,7 +175,24 @@ Admin → Captive Portal → **Adaptive Campaigns → WhatsApp**. No new environ
   server's tick), drafts and checks new ones (T01–T22, docs/adaptive-api.md), sends them to Meta with
   one click and logs every step. It never deletes at Meta.
 - The template calls use Graph **v25.0** (`adaptive/whatsapp/meta.ts`); the old sender
-  (`services/whatsapp.ts`, v19.0) is untouched until PR W3.
+  (`services/whatsapp.ts`, v19.0, the Marketing tab and the Campaign Manager) stays as it is.
+
+### 4c. WhatsApp sending from Adaptive journeys (PR W3)
+
+Journeys send each message's approved template (docs/adaptive-engine.md "WhatsApp sending"). Before
+turning it on:
+
+1. Coolify → **adaptive-worker** → environment: add **`WHATSAPP_PHONE_NUMBER_ID`** and
+   **`WHATSAPP_ACCESS_TOKEN`** — the same values as the server app's (`docker-compose.adaptive-worker.yml`
+   lists them). Redeploy the worker; its heartbeat then reports WhatsApp ready.
+2. Make sure Meta sends **`messages`** notices (step 5 + step 7): a WhatsApp Send test on an owner's
+   "See what guests get" makes one (`messagesSeenAt` in `CaptivePortal_AdaptiveConfig/whatsapp`).
+3. At least one template approved and in use (the WhatsApp tab's coverage).
+4. Admin → Adaptive Campaigns → **Launch & health → WhatsApp sending → Turn on**, type **WHATSAPP ON**.
+   The card shows the three checks; Turn off is one click.
+5. Optional: **`WHATSAPP_APP_SECRET`** on the server app (Meta app → App settings → Basic → App secret).
+   With it, the webhook's `X-Hub-Signature-256` is checked, and a guest's WhatsApp **START** gives their
+   WhatsApp messages back. Without it a START isn't applied by Adaptive (a STOP always is).
 
 ### 5. Create Message Templates
 

@@ -102,7 +102,8 @@ async function main() {
     const f = fakeFetch({ status: 200, body: { messaging_product: 'whatsapp', contacts: [{ input: '41791234567', wa_id: '41791234567' }], messages: [{ id: 'wamid.HBgL123' }] } });
     const lines: string[] = [];
     const r = await adapter(f.impl, { log: (l) => lines.push(l) }).send(MSG);
-    assertEqual(r, { kind: 'accepted', provider: 'meta', providerMessageId: 'wamid.HBgL123' }, 'accepted');
+    // PR W3: Meta's own id of the recipient comes back too (inbound STOPs use it).
+    assertEqual(r, { kind: 'accepted', provider: 'meta', providerMessageId: 'wamid.HBgL123', recipientId: '41791234567' }, 'accepted');
     assertEqual(f.calls.length, 1, 'one call');
     assertEqual(f.calls[0].url, `https://graph.facebook.com/${WA_SEND_GRAPH_VERSION}/123456789012345/messages`, 'url');
     assertEqual(WA_SEND_GRAPH_VERSION, 'v25.0', 'the template client’s version');
@@ -169,6 +170,15 @@ async function main() {
     }
     const missing = classifyWhatsAppAnswer(404, metaError(404, 132001, 'x', { error_data: { details: 'template name (hf_x_1) does not exist in de' } }).body, null) as { message: string };
     assertEqual(missing.message, 'template name (hf_x_1) does not exist in de', 'Meta’s details win over the generic message');
+  });
+
+  await test('PR W3: Meta’s recipient id (wa_id) — kept when it is digits, dropped otherwise or when missing', () => {
+    const ok = classifyWhatsAppAnswer(200, { contacts: [{ input: '+525512345678', wa_id: '5215512345678' }], messages: [{ id: 'wamid.mx' }] }, null) as Record<string, unknown>;
+    assertEqual(ok.recipientId, '5215512345678', 'Mexico: Meta’s own id');
+    const odd = classifyWhatsAppAnswer(200, { contacts: [{ wa_id: '+52 55 1234' }], messages: [{ id: 'wamid.x' }] }, null) as Record<string, unknown>;
+    assertEqual(odd.recipientId, null, 'not digits');
+    const none = classifyWhatsAppAnswer(200, { messages: [{ id: 'wamid.y' }] }, null) as Record<string, unknown>;
+    assertEqual(none.recipientId, null, 'no contacts');
   });
 
   await test('the rate answer carries Retry-After', () => {

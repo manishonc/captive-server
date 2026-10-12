@@ -635,6 +635,69 @@ asks the AI to fix the ones Meta rejects. It messages nobody, so it ignores the 
 - **The 08:00 summary** also lists what Auto sent and what the AI wrote since the last one (a day with only
   those still sends).
 
+## WhatsApp sending (PR W3)
+
+Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-w3-brief.md`. Journeys send WhatsApp — each message's
+**approved template** — once HeidiFi switches it on; messages without one keep going by SMS and email.
+
+- **The switch** — launch setting `whatsappSending { mode, changedBy }` on `AdaptiveConfig/global` (missing or
+  bad = off; one switch for every account). On is a loosening (`wa_send_on`, phrase **WHATSAPP ON**) and is
+  refused (`409 whatsapp_not_ready`) unless: a running worker reports WhatsApp ready (its heartbeat's
+  `channels.whatsapp`: the worker has `WHATSAPP_PHONE_NUMBER_ID` + `WHATSAPP_ACCESS_TOKEN`); Meta sent a WhatsApp
+  message notice in the last 7 days (`AdaptiveConfig/whatsapp.messagesSeenAt`, stamped by the webhook on any
+  status or inbound message, at most every 10 minutes — the `messages` field is subscribed; a WhatsApp Send test
+  makes one); at least one template is approved and in use. Off is one click. `GET /admin/launch` shows the three
+  checks (`whatsappSending.checks`).
+- **The channel** (`engine/sendPath.ts`, rules in `core/runtime/whatsappRules.ts`): the guest's phone; WhatsApp
+  consent (granted with the phone at connect); the number's WhatsApp block — and for **marketing** an SMS STOP
+  too (`blocked:sms_stop`); a **verified** phone only (whatever the owner picked for SMS); then `whatsapp_off`,
+  `whatsapp_unreachable` (Meta's 131026: 30 days), `whatsapp_us_marketing` (+1 numbers, marketing),
+  `whatsapp_limited` (131049: 24 h, marketing), `channel_not_ready`. While off, `whatsapp_off` is the reason
+  (templates aren't read). Ladders are unchanged (restaurant welcome and review ask: SMS → email → WhatsApp).
+- **The wording is the template** (`whatsapp/pick.ts` `usableWaTemplates`): the usable templates of the message
+  in the guest's language, else English — id `wa:<name>:<language>`, letters W1, W2… in rotation; the bandit
+  never draws them (its learner only compares SMS/email wordings). The worker reads the registry at most once a
+  minute (`cachedWaPickContext`). `renderMessage(content, 'whatsapp', values)` renders the body (+ footer); every
+  `{{n}}` needs a value (one line, never empty) and the link button its link, else the send is blocked
+  (`missing_value:…`, `guest_info_missing`…). Priced flat (`creditsPerMessage`, 12).
+- **Live:** the links are minted with channel `whatsapp`; the button's variable is `s/<code>` of the button's
+  link; Meta's button index from the template. The record keeps `whatsapp { templateId, name, language }`
+  (test runs too). Meta's 131050 at send time = a WhatsApp STOP; 131026 / 131049 at send time hold the number.
+- **Meta's statuses** (`routes/whatsappWebhook.ts` → `ingest/signals.ts` `adaptiveOnWhatsAppStatus`, by
+  `providerMessageId` = wamid; a Marketing-tab message isn't ours): delivered → `message.delivered`; read →
+  delivered + `message.opened`; failed → `message.failed` with Meta's code. The worker then: 131049 →
+  `whatsappLimitedUntil` +24 h, 131026 → `whatsappUnreachableUntil` +30 d (only ever later), 131050 → WhatsApp
+  STOP (`meta_stop`); and **every failed WhatsApp message gives its credits back** (`refundSend`: ledger
+  `refund_auto_{sendKey}`, an `adjustment` reversing the debit's buckets; `credits.refundLedgerId` on the send;
+  a `credits.refunded` event takes them off the daily numbers). A failed one not charged yet is never charged.
+- **Inbound STOP / START** on WhatsApp (the webhook's keyword classifier) → `consent.revoked/granted` with
+  `source: whatsapp_keyword` → `applyWhatsAppStop/Start` (the number's `suppression.whatsapp` + WhatsApp consent,
+  ordered by `waKeywordAt`). A START gives consent back, so — like Twilio's — only from a body Meta signed:
+  `X-Hub-Signature-256` checked with `WHATSAPP_APP_SECRET` (server; `services/metaSignature.ts`, the raw body kept
+  by server.ts for `/webhook/whatsapp`). Without the secret a START isn't applied (STOP always is); the local
+  stack applies it.
+- **Races and gaps** (review round): a refund looks for the debit itself (`refundOne`), not the send's
+  `credits.ledgerId`; a charge that finishes after Meta's "failed" refunds at once; a "failed" for a wamid not
+  found yet is looked up once more after 15 s, and is never dropped by the "engine may send" shortcut. A step that
+  must differ in wording (`requireDiff: variant`, the welcome's "same channel" follow-up after a read) never
+  repeats the last template. After an SMS STOP the owner's guest chips show WhatsApp "no" too.
+- **Verification round:** every charge call (record, `send_sweep` repair, resume, delivery) first finishes a
+  failed WhatsApp send's refund (never charges it); a failed send that was never charged still comes off the
+  daily numbers (`credits.refunded`, `notCharged`), the event written before the send is marked. The guest
+  chips read the phone point's block (the engine's rule). WhatsApp's own rules are reasons of their own:
+  `whatsapp_unverified` (not the owner's audience) and `whatsapp_no_optin` (an info message by WhatsApp needs
+  the guest's WhatsApp yes — Meta wants an opt-in for every template; also at claim). The "must differ" rule
+  compares template names (a translation is the same message). Meta's `contacts[0].wa_id` when it differs from
+  the number sent to is kept hashed on the point (`whatsappWaIdOf`), so a STOP from that id blocks the number.
+  With `WHATSAPP_APP_SECRET` set, the legacy handler also ignores an unsigned START. Dead WhatsApp STOP/START
+  signals have their own kinds (`whatsapp_stop` urgent). The refund ledger entry carries `refundOf` and the
+  debit's cost (the cms analytics undo the consumption; the owner sees "Returned: WhatsApp message not delivered").
+  Delta round: a STOP from Meta's id before the first send is carried once the id is linked (`linkWhatsAppId`);
+  info messages need the guest's own WhatsApp yes (`guestSaidYes` — an owner's marketing stop keeps it); a failing
+  WhatsApp rule is reported before "no wording".
+- **Owner screens:** the overview and the preview answer `sendingChannels` (`['sms','email']`, + `'whatsapp'`
+  when on); W01 (setup info) shows only while off.
+
 ## Signals coming back
 
 | Source | Adaptive effect |
@@ -1102,12 +1165,12 @@ emulator, even with credentials in the environment). Deterministic failures: an 
 `+reject`, `+timeout`, `+ratelimit` or `+authfail`; a phone ending `0000` (21610), `0001` (unknown),
 `0002` (try later) or `0003` (credentials refused).
 
-WhatsApp (PR PV): Adaptive's own WhatsApp adapter (`send/adapters/whatsapp.ts`, Meta's Cloud API, one
-POST, no retries) is used **only by the owner's WhatsApp Send test** (through `whatsappTestSend.ts`, kept
-out of `send/adapters/index.ts`) — the engine refuses WhatsApp (`whatsapp_off`), its adapter registry has
-no WhatsApp and the worker never even loads the sender until W3 (tests/adaptiveWhatsAppBoundary.test.ts). In the sandbox a WhatsApp test lands
-in the same outbox (`channel: whatsapp`, the template's name, language, values and the button's
-placeholder); a phone ending `0000` → 131026 (not on WhatsApp), `0001` → unknown, `0002` → try later,
+WhatsApp (PR PV, PR W3): Adaptive's own WhatsApp adapter (`send/adapters/whatsapp.ts`, Meta's Cloud API, one
+POST, no retries) sends the owner's WhatsApp Send test (through `whatsappTestSend.ts`) and — while the launch
+setting `whatsappSending` is on — journeys (`registerAdapters` fills `whatsapp`; "WhatsApp sending" above). In
+the sandbox a WhatsApp message lands in the same outbox (`channel: whatsapp`, the template's name, language,
+values and the button's variable — a test's placeholder, a journey's `s/<code>`); `POST /dev/launch
+{ "whatsappSending": { "mode": "on" } }` turns it on locally (no phrase, no checks); a phone ending `0000` → 131026 (not on WhatsApp), `0001` → unknown, `0002` → try later,
 `0003` → 190 (setup), `0004` → 132001 (Meta doesn't know the template in that language).
 
 | Route | What it does |

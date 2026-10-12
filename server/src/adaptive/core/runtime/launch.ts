@@ -41,6 +41,8 @@ export interface LaunchState {
   agents?: { mode: BanditSwitch; accounts: Record<string, BanditSwitch>; monthlyBudgetUsd: number };
   /** PR W2b: WhatsApp Auto (missing = off) and its daily cap. */
   whatsappTemplates?: { autoSubmit: BanditSwitch; maxPerDay: number };
+  /** PR W3: journeys send WhatsApp (missing = off). */
+  whatsappSending?: { mode: BanditSwitch };
 }
 
 export type BanditSwitch = 'off' | 'on';
@@ -59,6 +61,8 @@ export interface LaunchChange {
   agents?: { mode?: BanditSwitch; accounts?: Record<string, BanditSwitch | null>; monthlyBudgetUsd?: number };
   /** PR W2b: WhatsApp Auto and its daily cap. */
   whatsappTemplates?: { autoSubmit?: BanditSwitch; maxPerDay?: number };
+  /** PR W3: journeys send WhatsApp. */
+  whatsappSending?: { mode?: BanditSwitch };
 }
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -89,6 +93,7 @@ export function applyChange(before: LaunchState, c: LaunchChange): LaunchState {
     bandit: applyBandit(before.bandit, c.bandit),
     ...(before.agents || c.agents ? { agents: applyAgents(before.agents, c.agents) } : {}),
     ...(before.whatsappTemplates || c.whatsappTemplates ? { whatsappTemplates: applyWaTemplates(before.whatsappTemplates, c.whatsappTemplates) } : {}),
+    ...(before.whatsappSending || c.whatsappSending ? { whatsappSending: { mode: c.whatsappSending?.mode ?? before.whatsappSending?.mode ?? 'off' } } : {}),
   };
 }
 
@@ -161,7 +166,7 @@ export function nextLiveSince(before: LaunchState, after: Pick<LaunchState, 'def
   return ls;
 }
 
-export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on' | 'agents_on' | 'wa_auto_on';
+export type LooseningKind = 'default_live' | 'account_live' | 'release_pause' | 'loosen_limits' | 'bandit_on' | 'agents_on' | 'wa_auto_on' | 'wa_send_on';
 
 export interface ChangeSummary {
   /** Plain lines for the card: "tenant_x: test run → live". */
@@ -181,8 +186,9 @@ const PHRASES: Record<LooseningKind, string> = {
   bandit_on: 'BANDIT ON',
   agents_on: 'AI ON',
   wa_auto_on: 'WA AUTO-SUBMIT ON',
+  wa_send_on: 'WHATSAPP ON',
 };
-const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on', 'agents_on', 'wa_auto_on'];
+const ORDER: LooseningKind[] = ['default_live', 'account_live', 'release_pause', 'loosen_limits', 'bandit_on', 'agents_on', 'wa_auto_on', 'wa_send_on'];
 const MODE_WORDS: Record<Mode, string> = { off: 'off', test: 'test run', live: 'live' };
 
 export function summarizeChange(before: LaunchState, after: LaunchState): ChangeSummary {
@@ -262,6 +268,13 @@ export function summarizeChange(before: LaunchState, after: LaunchState): Change
       lines.push(`WhatsApp Auto: ${bw.maxPerDay} → ${aw.maxPerDay} templates a day`);
       if (aw.maxPerDay > bw.maxPerDay) kinds.add('loosen_limits');
     }
+  }
+  // PR W3: journeys send WhatsApp ("WhatsApp sending" on the admin card).
+  const bs = before.whatsappSending?.mode ?? 'off';
+  const as = after.whatsappSending?.mode ?? bs;
+  if (bs !== as) {
+    lines.push(`WhatsApp sending (journeys use approved templates): ${bs} → ${as}`);
+    if (as === 'on') kinds.add('wa_send_on');
   }
   const loosening = ORDER.filter((k) => kinds.has(k));
   return { lines, loosening, confirmPhrase: loosening.length ? loosening.map((k) => PHRASES[k]).join(' AND ') : null, empty: lines.length === 0 };

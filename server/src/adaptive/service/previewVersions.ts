@@ -8,7 +8,8 @@
  *    engine renders a guest's message.
  *  - WhatsApp, for a message whose pool can go by WhatsApp: the template `whatsapp/pick.ts` picks
  *    (approved, else waiting for Meta), else an example made from the SMS text (D1), else nothing.
- *    WhatsApp sending itself is still off (engine/sendPath.ts `whatsapp_off`); the cms says so.
+ *    Whether journeys send WhatsApp now is the launch setting `whatsappSending` (PR W3): the preview
+ *    answer's `sendingChannels` says so, and the cms shows a note while it is off.
  *    When the templates can't be read (or one is broken), the message has no WhatsApp version —
  *    never a wrong one, and SMS and email still show.
  */

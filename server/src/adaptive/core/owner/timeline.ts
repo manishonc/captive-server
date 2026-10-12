@@ -599,6 +599,15 @@ function eventSentence(c: Ctx, ev: TimelineEventInput, journeyKey: string | null
       const noun = messageNoun(l, channel);
       if (data.errorCode === '21610') return one(t(l, `The ${noun} did not arrive: this number has said STOP to texts.`, `Die ${noun} kam nicht an: diese Nummer hat SMS mit STOP abbestellt.`));
       if (data.blocked === true) return one(t(l, `The ${noun} did not arrive: the email service blocked it.`, `Die ${noun} kam nicht an: der E-Mail-Dienst hat sie blockiert.`));
+      // PR W3: WhatsApp says why (Meta's code — from the webhook `errorCode`, at send time `code`); never charged.
+      if (channel === 'whatsapp') {
+        const code = String(data.errorCode ?? data.code ?? '');
+        const free = t(l, ' No credits are charged for it.', ' Dafür werden keine Credits berechnet.');
+        if (code === '131049') return one(t(l, `The ${noun} did not arrive: WhatsApp held this marketing message back. No WhatsApp marketing to this number for a day.`, `Die ${noun} kam nicht an: WhatsApp hat diese Werbenachricht zurückgehalten. Einen Tag lang keine WhatsApp-Werbung an diese Nummer.`) + free);
+        if (code === '131026') return one(t(l, `The ${noun} did not arrive: this number can't get WhatsApp messages. No WhatsApp to it for 30 days.`, `Die ${noun} kam nicht an: diese Nummer kann keine WhatsApp-Nachrichten empfangen. 30 Tage lang kein WhatsApp an sie.`) + free);
+        if (code === '131050') return one(t(l, `The ${noun} did not arrive: this guest stopped marketing from us in WhatsApp.`, `Die ${noun} kam nicht an: dieser Gast hat Werbung von uns in WhatsApp gestoppt.`) + free);
+        return one(t(l, `The ${noun} did not arrive.`, `Die ${noun} kam nicht an.`) + free);
+      }
       return one(t(l, `The ${noun} did not arrive.`, `Die ${noun} kam nicht an.`));
     }
 
@@ -998,6 +1007,8 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
   for (const ev of args.events ?? []) {
     if (!ev || typeof ev.type !== 'string') continue;
     if ((ev.type === 'consent.granted' || ev.type === 'consent.revoked') && ledgerEventIds.has(ev.id)) continue;
+    // PR W3: bookkeeping for the daily numbers — the failed message's own line already says no credits are charged.
+    if (ev.type === 'credits.refunded' && !admin) continue;
     const data = rec(ev.data);
     const send = typeof ev.sendKey === 'string' ? sends[ev.sendKey] ?? null : null;
     const foreign =

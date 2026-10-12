@@ -8,13 +8,16 @@
  *  2. The provider call — one request, no automatic retries, 15 s timeout.
  *  3. Record the answer (only moves forward), then charge:
  *       accepted → `sent`; debitOne(debit_auto_{sendKey}) — idempotent
- *       rejected → `failed`, not charged (21610 also STOP-blocks the number)
+ *       rejected → `failed`, not charged (21610 also STOP-blocks the number; WhatsApp 131050 its WhatsApp)
  *       retry    → the record is removed (nothing left the building), try later
  *       unknown  → `unknown`: never resent, not charged, the journey carries on
  *
  * A worker that dies anywhere in between leaves the record behind: the retried
  * task resumes from it instead of sending again, and a sent-but-not-charged send
  * is charged on resume or by the `send_sweep` repair task.
+ *
+ * PR W3: Meta reports a WhatsApp message it couldn't deliver later (status webhook): that send is
+ * never charged, or — charged already — given back (`refundSend`, ledger `refund_auto_{sendKey}`).
  */
 
 import { FieldValue } from 'firebase-admin/firestore';
@@ -26,17 +29,21 @@ import { DAY_MS, MINUTE_MS } from '../core/runtime/time';
 import { eventIdFor } from '../core/runtime/ids';
 import { parseEngineSettings } from '../store/engineSettings';
 import { CONFIG_DOC_ID } from '../store/collections';
-import { consentFor, consentState } from '../identity/resolve';
+import { consentFor, consentState, guestSaidYes } from '../identity/resolve';
+import { contactPointId } from '../identity/key';
 import { tsMs } from '../store/time';
-import { debitOne, onCreditsSpent } from '../../services/credits';
+import { debitOne, onCreditsSpent, refundOne } from '../../services/credits';
 import { firestoreScheduler, LEASE_MS } from '../queue/firestoreQueue';
 import { appendEvent, appendEventInTx, eventDoc, eventRef, type EventInput } from '../engine/events';
 import { instanceRef, stateUpdate, type LoadedInstance } from '../engine/instanceStore';
-import { applyPhoneStop } from '../engine/optouts';
+import { applyPhoneStop, applyWhatsAppHold, applyWhatsAppStop, linkWhatsAppId } from '../engine/optouts';
+import { whatsappBlocked, whatsappFailureEffect } from '../core/runtime/whatsappRules';
+import type { Channel } from '../core/constants';
 import { raiseAlert, dayKey } from '../engine/alerts';
 import type { ChannelAdapter, Outbound, ProviderResult } from './adapters/types';
 import { newestTouchAt } from './touches';
 import type { WaitState } from '../core/runtime/types';
+import { now as engineNow } from '../engine/clock';
 
 /** A provider "try again later" answer is retried this many times, then the step is skipped. */
 export const MAX_DISPATCH_ATTEMPTS = 3;
@@ -53,7 +60,7 @@ export interface LiveSend {
   sendKey: string;
   now: number;
   workerId: string;
-  channel: 'email' | 'sms';
+  channel: Channel;
   purpose: 'marketing' | 'service';
   adapter: ChannelAdapter;
   /** The record to create (status dispatching, mode live, decision, prices…). */
@@ -113,7 +120,16 @@ export async function claimSend(p: LiveSend): Promise<Phase1Result> {
         // Unlinked from this guest since the first look (PR D): the same skip.
         stayUnlinked: stayId ? Boolean(staySnap?.exists) && staySnap?.get('contactId') !== inst.meta.contactId : false,
       },
-      address: { blocked: point?.suppression?.[p.channel]?.reason ?? null, lowRatingAt: tsMs(cv.lowRatingAt) },
+      // PR W3: WhatsApp reads its own block and, for marketing, an SMS STOP (core/runtime/whatsappRules.ts);
+      // an info message by WhatsApp also needs the guest's WhatsApp yes (Meta: an opt-in for every template).
+      address: {
+        blocked:
+          p.channel === 'whatsapp'
+            ? whatsappBlocked(point, p.purpose) ??
+              (p.purpose === 'service' && !guestSaidYes(consentFor(contact, inst.meta.venueId).whatsapp) ? 'whatsapp_no_optin' : null)
+            : point?.suppression?.[p.channel]?.reason ?? null,
+        lowRatingAt: tsMs(cv.lowRatingAt),
+      },
       consent: { state: consentState(consentFor(contact, inst.meta.venueId)[p.channel]) },
       weekly: { ...p.gateInput.weekly, count: touches.filter((t) => (tsMs(t.at) ?? 0) >= weekAgo).length },
       // PR F0: re-read here too, so two sends to one person claimed at the same time can't both pass.
@@ -276,6 +292,15 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
       await scheduleChargeRepair(p.inst.meta.tenantUserId, p.inst.meta.venueId, sendKey, p.now);
       await ensureSentEvent(sendKey).catch((err) => console.warn('[ADAPTIVE] message.sent not written:', sendKey, (err as Error)?.message || err));
     }
+    // PR W3: Meta delivers to another WhatsApp id than the number we sent to (Mexico's 521…, older
+    // Brazilian numbers): link it (hashed, like every point id), so the guest's STOP from that id finds this
+    // number — and a STOP that came from it before this first send applies now.
+    const waId = result.recipientId ?? null;
+    if (p.channel === 'whatsapp' && p.pointId && waId && waId !== p.message.to.replace(/\D/g, '')) {
+      await linkWhatsAppId(p.pointId, contactPointId('phone', `+${waId}`), { sendKey }).catch((err) =>
+        console.warn('[ADAPTIVE] WhatsApp id not linked:', sendKey, (err as Error)?.message || err),
+      );
+    }
     await chargeSend(sendKey).catch((err) => {
       console.error('[ADAPTIVE] debit failed after a send — the queued repair will charge it:', sendKey, (err as Error)?.message || err);
     });
@@ -316,11 +341,18 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
       if (marketing) await removeTouch(tx, p.inst.meta.networkId, sendKey, (npSnap?.data() ?? null) as NetworkPersonDoc | null);
       if (!eSnap.exists) tx.set(eventRef(ev.id), ev.doc);
     });
-    // 21610 = the number said STOP at the carrier: block it even if recording the failure didn't work.
+    // 21610 = the number said STOP at the carrier (WhatsApp 131050: stopped our marketing in WhatsApp):
+    // block it even if recording the failure didn't work.
     try {
       await recordFailed;
     } finally {
-      if (result.suppress === 'stop' && p.pointId) await applyPhoneStop(p.pointId, 'provider_stop', p.now, { sendKey, errorCode: result.code });
+      if (result.suppress === 'stop' && p.pointId) {
+        if (p.channel === 'whatsapp') await applyWhatsAppStop(p.pointId, 'meta_stop', p.now, { sendKey, errorCode: result.code });
+        else await applyPhoneStop(p.pointId, 'provider_stop', p.now, { sendKey, errorCode: result.code });
+      }
+      // PR W3: Meta said so at once (usually it comes later, by webhook): hold WhatsApp for the number.
+      const hold = p.channel === 'whatsapp' ? whatsappFailureEffect(result.code) : null;
+      if (p.pointId && (hold === 'limited' || hold === 'unreachable')) await applyWhatsAppHold(p.pointId, hold, p.now);
     }
     return { kind: 'failed', code: result.code };
   }
@@ -356,10 +388,18 @@ export async function recordResult(p: LiveSend, result: ProviderResult, attempts
 /**
  * Charges an accepted marketing send once (ledger `debit_auto_{sendKey}`), with
  * the amounts priced in phase 1. Safe to call again: debitOne's first write wins.
+ *
+ * PR W3: a WhatsApp send Meta reported as failed is never charged — and every caller (the record
+ * step, the `send_sweep` repair, the resume path, a delivery signal) finishes its refund instead,
+ * so an interrupted refund is completed by the next one.
  */
 export async function chargeSend(sendKey: string): Promise<'charged' | 'nothing'> {
   const snap = await sendRef(sendKey).get();
   const s = snap.data() as JourneySendDoc | undefined;
+  if (s && s.mode === 'live' && s.channel === 'whatsapp' && s.status === 'failed') {
+    await refundSend(sendKey);
+    return 'nothing';
+  }
   if (!s || s.mode !== 'live' || s.purpose !== 'marketing' || !s.credits || s.credits.amount < 1 || s.credits.ledgerId) return 'nothing';
   if (!s.sentAt) return 'nothing'; // only a send the provider accepted is charged
   await debitOne({
@@ -372,8 +412,59 @@ export async function chargeSend(sendKey: string): Promise<'charged' | 'nothing'
     providerCostMinorSnapshot: s.providerCostMinor ?? 0,
   });
   await sendRef(sendKey).update({ 'credits.ledgerId': `debit_auto_${sendKey}`, updatedAt: new Date() });
+  // Meta's "failed" may have landed while this charge ran (its refund then found no debit yet):
+  // look again and give the credits back now (else the next caller does, above).
+  if (s.channel === 'whatsapp' && (await sendRef(sendKey).get()).get('status') === 'failed') await refundSend(sendKey);
   void onCreditsSpent(s.tenantUserId).catch(() => undefined);
   return 'charged';
+}
+
+/**
+ * PR W3 (W3-D2): gives back the credits of a WhatsApp message Meta reported as failed (not on
+ * WhatsApp, the marketing limit, stopped…) — Meta charges only delivered messages. Reverses the
+ * send's own debit (ledger `refund_auto_{sendKey}`). Safe to call again, in any order with the charge:
+ *  - charged → refunded once; `credits.refundLedgerId` is written last, so an interrupted run is redone;
+ *  - not charged (yet) → nothing to give back; a charge that commits later refunds itself (chargeSend);
+ *  - either way, the daily numbers take the credits off once (`credits.refunded`, create-only, written
+ *    before the send is marked) — `message.sent` counted them when Meta took the message.
+ */
+export async function refundSend(sendKey: string): Promise<'refunded' | 'nothing'> {
+  const snap = await sendRef(sendKey).get();
+  const s = snap.data() as JourneySendDoc | undefined;
+  if (!s || s.mode !== 'live' || s.channel !== 'whatsapp' || s.status !== 'failed') return 'nothing';
+  if (s.purpose !== 'marketing' || !s.credits || s.credits.amount < 1 || s.credits.refundLedgerId) return 'nothing';
+  // Not `credits.ledgerId`: a debit can commit without it (the worker died before writing it, or a
+  // charge raced this "failed"). refundOne looks for the debit itself, in its transaction.
+  const done = await refundOne({
+    tenantUserId: s.tenantUserId,
+    sendId: sendKey,
+    note: `WhatsApp message not delivered${s.errorCode ? ` (Meta ${s.errorCode})` : ''}: credits returned`,
+  });
+  // Only a send Meta took was counted as spent (`sentAt`, the same rule as message.sent).
+  if (s.sentAt) {
+    await appendEvent(
+      {
+        type: 'credits.refunded',
+        occurredAt: engineNow(),
+        tenantUserId: s.tenantUserId,
+        venueId: s.venueId,
+        contactId: s.contactId,
+        instanceId: s.instanceId,
+        journeyKey: s.journeyKey,
+        nodeId: s.nodeId,
+        sendKey,
+        variantId: s.variantId,
+        channel: s.channel,
+        slot: s.slot,
+        mode: 'live',
+        data: { mode: 'live', channel: s.channel, credits: s.credits.amount, errorCode: s.errorCode ?? null, ...(done === 'nothing' ? { notCharged: true } : {}) },
+      },
+      eventIdFor('engine', `${sendKey}:credits.refunded`),
+    );
+  }
+  if (done === 'nothing') return 'nothing';
+  await sendRef(sendKey).update({ 'credits.refundLedgerId': `refund_auto_${sendKey}`, updatedAt: new Date() });
+  return 'refunded';
 }
 
 /**

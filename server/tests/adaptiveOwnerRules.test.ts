@@ -62,6 +62,14 @@ test('dead signals: STOP, START, reply, old unsubscribe and consent without a gu
   for (const [e, want, name] of rows) assertEqual(detailLessSignal(e), want, name);
 });
 
+test('dead signals (PR W3): a WhatsApp STOP / START is its own kind — urgent STOP, not an email unsubscribe', () => {
+  assertEqual(detailLessSignal({ type: 'consent.revoked', source: 'whatsapp_keyword' }), 'whatsapp_stop', 'STOP');
+  assertEqual(detailLessSignal({ type: 'consent.granted', source: 'whatsapp_keyword' }), 'whatsapp_start', 'START');
+  assertEqual([isUrgent('whatsapp_stop'), isUrgent('whatsapp_start')], [true, false], 'urgency');
+  assertEqual(urgentNote('whatsapp_stop'), 'A STOP on WhatsApp was not applied, and the number was removed.', 'note');
+  assert(refusalText('whatsapp_stop').includes('WhatsApp opt-out flag'), 'refusal words');
+});
+
 test('dead signals: a revoke or grant that names its guest can be retried', () => {
   for (const source of ['owner', 'unsubscribe_page', 'brevo_spam', 'brevo_unsubscribed', 'provider_stop', 'splash']) {
     assertEqual(detailLessSignal({ type: 'consent.revoked', source, contactId: 'u_1_c1' }), null, `revoke ${source}`);
@@ -418,7 +426,8 @@ test('the modules are pure: their runtime imports load no firebase', () => {
   assertEqual(runtimeImports(join(SRC, 'adaptive/core/owner/deadTasks.ts')), [], 'deadTasks imports nothing');
   assertEqual(
     runtimeImports(join(SRC, 'adaptive/engine/renderSend.ts')).sort(),
-    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/scans/occasions', '../core/schemas'],
+    // PR W3: + the WhatsApp template values (pure core) — renderMessage renders an approved template.
+    ['../core/registry', '../core/render', '../core/runtime/conditions', '../core/runtime/smsParts', '../core/runtime/time', '../core/scans/occasions', '../core/schemas', '../core/whatsapp/sendValues'],
     'renderSend runtime imports',
   );
   for (const rel of ['adaptive/core/owner/deadTasks.ts', 'adaptive/core/runtime/decision.ts', 'adaptive/core/runtime/replay.ts', 'adaptive/engine/renderSend.ts']) {

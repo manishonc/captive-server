@@ -65,6 +65,15 @@ import { isLapsedForSending } from '../../services/entitlements';
 import { applyAudienceToStats } from './audience';
 import { launchAwareOverview } from './startSending';
 import { previewVersionsFor, type PreviewVersion } from './previewVersions';
+import { cachedEngineSettings, whatsappSendingOn } from '../store/engineSettings';
+
+/** PR W3: the channels journeys send on now (the owner screens show WhatsApp as used only when it is). */
+async function sendingChannelsNow(): Promise<Channel[]> {
+  const on = await cachedEngineSettings()
+    .then(whatsappSendingOn)
+    .catch(() => false);
+  return on ? ['sms', 'email', 'whatsapp'] : ['sms', 'email'];
+}
 
 function asVenueType(t: string | null): VenueType {
   return (VENUE_TYPES as readonly string[]).includes(t ?? '') ? (t as VenueType) : 'other';
@@ -178,6 +187,7 @@ export async function getOverview(tenantUserId: string) {
   return {
     accountOn: adaptive.some((a) => a.status === 'on' || a.status === 'paused'),
     sendingLive: !cat.config.killSwitch.sendingPaused,
+    sendingChannels: await sendingChannelsNow(),
     venues: out,
     // PR D: sendingLive follows the account's launch mode (+ sendingPaused, needsStartSending per venue).
     ...(await launchAwareOverview(tenantUserId, adaptive, out)),
@@ -312,7 +322,7 @@ function contentFor(channels: ChannelContent, locales: Record<string, Partial<Ch
   return locales[lang]?.[channel] ?? channels[channel];
 }
 
-export async function preview(tenantUserId: string, body: unknown): Promise<{ journeyKey: string; lang: Lang; venueName: string; messages: PreviewMessage[] }> {
+export async function preview(tenantUserId: string, body: unknown): Promise<{ journeyKey: string; lang: Lang; venueName: string; messages: PreviewMessage[]; sendingChannels: Channel[] }> {
   const input = previewInputSchema.parse(body);
   let venueName = 'Your venue';
   if (input.venueId) venueName = (await ownedVenues(tenantUserId, [input.venueId])).get(input.venueId)?.name ?? venueName;
@@ -380,7 +390,7 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
     const v = versions[i];
     if (v) m.versions = v;
   });
-  return { journeyKey: input.journeyKey, lang: input.lang, venueName, messages };
+  return { journeyKey: input.journeyKey, lang: input.lang, venueName, messages, sendingChannels: await sendingChannelsNow() };
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -460,6 +470,7 @@ export async function saveSetups(tenantUserId: string, body: unknown, actor: Act
       venueIds.map((id) => preflightVenue(owned.get(id)!, avOf.get(id) ?? null, tzOf.get(id) ?? null, lapsed, overlaps.get(id)!, input.overlapAck[id] === true)),
       {
         enabledLadders: Object.entries(resolved.journeys).filter(([, j]) => j.enabled).map(([k]) => resolved.templates.get(k)?.definition.channelLadder ?? []),
+        whatsappSending: (await sendingChannelsNow()).includes('whatsapp'),
         needsStayCalendar: [...owned.values()].some((v) => asVenueType(v.venueType) === 'airbnb') && ownerPlaybookView(input.playbookKey, resolved.version.version, resolved.playbook.content, resolved.cat).needsStayCalendar,
       },
     );

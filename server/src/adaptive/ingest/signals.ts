@@ -12,6 +12,9 @@
  *    identity key (so the key guard covers them).
  *  - Clicks come only from our short links (the CMS forwards human clicks);
  *    Brevo's click events are ignored (mail scanners make them).
+ *  - PR W3: Meta's WhatsApp statuses of journey sends (delivered, read → opened,
+ *    failed with Meta's code) and inbound STOP / START. A START gives consent back,
+ *    so — like Twilio's — only from a body Meta signed (`WHATSAPP_APP_SECRET`).
  */
 
 import { FieldValue } from 'firebase-admin/firestore';
@@ -37,7 +40,7 @@ function isAlreadyExists(err: unknown): boolean {
 interface SignalEvent {
   id: string;
   type: string;
-  source: 'twilio' | 'brevo' | 'unsubscribe' | 'shortlink' | 'cms' | 'dev';
+  source: 'twilio' | 'brevo' | 'unsubscribe' | 'shortlink' | 'cms' | 'dev' | 'meta';
   tenantUserId?: string | null;
   venueId?: string | null;
   contactId?: string | null;
@@ -135,13 +138,70 @@ export async function adaptiveOnTwilioStatus(p: { messageSid: string; status: st
   const doc = snap.docs[0];
   if (!doc) return;
   const s = doc.data() as JourneySendDoc;
-  if (s.mode !== 'live' || s.provider === 'brevo') return;
+  if (s.mode !== 'live' || s.provider === 'brevo' || s.channel === 'whatsapp') return;
   await enqueue({
     id: eventIdFor('twilio', `${p.messageSid}:${type}`),
     type,
     source: 'twilio',
     ...fromSend(doc.id, s),
     data: { status, errorCode: p.errorCode },
+  });
+}
+
+// ── Meta WhatsApp statuses (PR W3) ───────────────────────────────────────────
+
+/** Meta's status → our message events (a read is also a delivery: Meta doesn't order them). */
+const WA_STATUS_EVENTS: Record<string, string[]> = {
+  delivered: ['message.delivered'],
+  read: ['message.delivered', 'message.opened'],
+  failed: ['message.failed'],
+};
+
+/** A "failed" for a wamid we can't find yet (its send is still being recorded) is looked up once more after this. */
+export const WA_FAILED_RETRY_MS = 15_000;
+
+export async function adaptiveOnWhatsAppStatus(p: { wamid: string; status: string; errorCode: string | null }, opts: { retryMs?: number } = {}): Promise<void> {
+  const status = p.status.toLowerCase();
+  const types = WA_STATUS_EVENTS[status];
+  if (!types || !p.wamid) return;
+  // A failure always counts (a refund, a hold, a STOP) — also for a message sent just before the brake.
+  const failed = status === 'failed';
+  if (!failed && !(await engineMaySend())) return;
+  const lookup = async () => (await db.collection(COL.journeySends).where('providerMessageId', '==', p.wamid).limit(1).get()).docs[0];
+  let doc = await lookup();
+  if (!doc && failed) {
+    // Meta can answer before our "sent" is written: look once more.
+    await new Promise((r) => setTimeout(r, opts.retryMs ?? WA_FAILED_RETRY_MS));
+    doc = await lookup();
+  }
+  if (!doc) return; // a Marketing-tab or campaign message: not ours
+  const s = doc.data() as JourneySendDoc;
+  if (s.mode !== 'live' || s.channel !== 'whatsapp') return;
+  for (const type of types) {
+    await enqueue({
+      id: eventIdFor('meta', `${p.wamid}:${type}`),
+      type,
+      source: 'meta',
+      ...fromSend(doc.id, s),
+      data: { status, errorCode: p.errorCode, channel: 'whatsapp', messageId: p.wamid },
+    });
+  }
+}
+
+/** Inbound WhatsApp STOP / START (the webhook's keyword classifier). A START only from a signed body (or the local stack). */
+export async function adaptiveOnInboundWhatsApp(p: { from: string; kind: 'stop' | 'start'; messageId: string; signatureChecked?: boolean }): Promise<void> {
+  const phone = normalizeE164('', `+${p.from.replace(/\D/g, '')}`);
+  if (!phone) return;
+  // Anyone could post an unsigned START: only a verified one may re-grant consent.
+  if (p.kind === 'start' && !p.signatureChecked && !sandboxEnabled()) return;
+  const key = p.messageId || `${phone}:${Math.floor(Date.now() / 60_000)}:${p.kind}`;
+  await enqueue({
+    id: eventIdFor('meta', `in:${key}`),
+    type: p.kind === 'stop' ? 'consent.revoked' : 'consent.granted',
+    source: 'meta',
+    channel: 'whatsapp',
+    data: { source: 'whatsapp_keyword', kind: p.kind },
+    guest: { phone },
   });
 }
 

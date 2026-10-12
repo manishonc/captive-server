@@ -14,7 +14,8 @@ import { FieldPath } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { db } from '../../firebase';
 import { COL, contactVenueId } from '../store/collections';
-import type { ConsentEntry, ContactDoc, ContactVenueDoc, JourneySendDoc } from '../store/engineTypes';
+import type { ConsentEntry, ContactDoc, ContactPointDoc, ContactVenueDoc, JourneySendDoc } from '../store/engineTypes';
+import { whatsappBlocked } from '../core/runtime/whatsappRules';
 import type { Actor } from '../core/schemas';
 import { pickLang } from '../core/schemas';
 import type { Channel } from '../core/constants';
@@ -110,8 +111,15 @@ async function tenantVenueMap(tenantUserId: string): Promise<Record<string, Time
   return out;
 }
 
+/** PR W3: the guests' phone points (the engine reads their blocks; the chips must say the same). */
+async function phonePointsOf(contacts: Array<ContactDoc | null>): Promise<Map<string, ContactPointDoc>> {
+  const ids = [...new Set(contacts.map((c) => c?.phonePointId).filter((x): x is string => typeof x === 'string' && x.length > 0))];
+  const snaps = ids.length ? await db.getAll(...ids.map((id) => db.collection(COL.contactPoints).doc(id))) : [];
+  return new Map(snaps.filter((s) => s.exists).map((s) => [s.id, s.data() as ContactPointDoc]));
+}
+
 /** Per channel at one venue: yes / no / no answer, and whether the owner stopped it. */
-function consentChips(contact: ContactDoc, venueId: string) {
+function consentChips(contact: ContactDoc, venueId: string, phonePoint: ContactPointDoc | null = null) {
   const byCh = contact.marketingConsent?.[venueScope(venueId)] ?? {};
   // Stopped at all venues: a venue without an answer yet counts as stopped too.
   const stoppedAll = Boolean(contact.ownerStoppedAll);
@@ -120,7 +128,16 @@ function consentChips(contact: ContactDoc, venueId: string) {
     ownerStopped: e?.ownerStopped === true || (!e && stoppedAll),
     at: iso(e?.at),
   });
-  return Object.fromEntries(CHANNELS.map((c) => [c, chip(byCh[c])])) as Record<Channel, ReturnType<typeof chip>>;
+  const chips = Object.fromEntries(CHANNELS.map((c) => [c, chip(byCh[c])])) as Record<Channel, ReturnType<typeof chip>>;
+  // PR W3 (W3-D1): the number's block (its SMS STOP — one STOP ends marketing on SMS and WhatsApp — or
+  // its own WhatsApp STOP) turns the WhatsApp "yes" into "no": the same rule the engine sends by
+  // (core/runtime/whatsappRules.ts `whatsappBlocked`). A START lifts the block, and with it this.
+  const block = phonePoint ? whatsappBlocked(phonePoint, 'marketing') : null;
+  if (block && chips.whatsapp?.state === 'yes') {
+    const at = phonePoint?.suppression?.[block === 'sms_stop' ? 'sms' : 'whatsapp']?.at;
+    chips.whatsapp = { ...chips.whatsapp, state: 'no', at: iso(at) };
+  }
+  return chips;
 }
 
 // ── Guests list ──────────────────────────────────────────────────────────────
@@ -163,6 +180,7 @@ export async function listGuests(tenantUserId: string, venueId: string, query: {
   const page = snap.docs.slice(0, limit);
   const cvs = page.map((d) => ({ id: d.id, doc: d.data() as ContactVenueDoc })).filter((c) => c.doc.tenantUserId === tenantUserId);
   const contactSnaps = cvs.length ? await db.getAll(...cvs.map((c) => db.collection(COL.contacts).doc(c.doc.contactId))) : [];
+  const points = await phonePointsOf(contactSnaps.map((s) => (s?.data() ?? null) as ContactDoc | null));
   const instanceIds = cvs.flatMap((c) => Object.values(c.doc.journeys ?? {}).map((j) => j.activeInstanceId).filter((x): x is string => Boolean(x)));
   const instSnaps = instanceIds.length ? await db.getAll(...instanceIds.map((id) => db.collection(COL.journeyInstances).doc(id))) : [];
   const insts = new Map(instSnaps.filter((s) => s.exists).map((s) => [s.id, s.data() as Record<string, any>]));
@@ -193,7 +211,7 @@ export async function listGuests(tenantUserId: string, venueId: string, query: {
       firstVisitAt: iso(c.doc.firstVisitAt),
       lastVisitAt: iso(c.doc.lastVisitAt),
       visitCount: Number(c.doc.visitCount) || 0,
-      consent: contact ? consentChips(contact, venueId) : null,
+      consent: contact ? consentChips(contact, venueId, (contact.phonePointId && points.get(contact.phonePointId)) || null) : null,
       lowRating: Boolean(c.doc.lowRatingAt),
       journeys,
     };
@@ -292,11 +310,12 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
   ]);
   if (!contactSnap.exists || contactSnap.get('tenantUserId') !== tenantUserId || !cvSnap.exists) throw notFound('This guest was not found at this venue');
   const contact = contactSnap.data() as ContactDoc;
-  const [record, venues, names, offerLabels] = await Promise.all([
+  const [record, venues, names, offerLabels, points] = await Promise.all([
     loadGuestRecord(contactId, tenantUserId),
     tenantVenueMap(tenantUserId),
     journeyNames(lang),
     tenantOfferLabels(tenantUserId, lang),
+    phonePointsOf([contact]),
   ]);
   // PR F0: the cms drawer words a running marketing journey like the guest's row (the catalogue is cached).
   const purposes = await journeyPurposes();
@@ -321,7 +340,7 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
       firstVisitAt: iso(cv.firstVisitAt),
       lastVisitAt: iso(cv.lastVisitAt),
       visitCount: Number(cv.visitCount) || 0,
-      consent: consentChips(contact, venueId),
+      consent: consentChips(contact, venueId, (contact.phonePointId && points.get(contact.phonePointId)) || null),
       lowRating: Boolean(cv.lowRatingAt),
     },
     journeys: record.instances
@@ -370,12 +389,13 @@ export async function setGuestMarketing(tenantUserId: string, venueId: string, c
   });
   if (changed) await ensureRollup(venueId, tenantUserId);
   const contact = (await db.collection(COL.contacts).doc(contactId).get()).data() as ContactDoc;
+  const points = await phonePointsOf([contact]);
   return {
     contactId,
     action: input.action,
     scope: input.scope,
     changed,
-    consent: consentChips(contact, venueId),
+    consent: consentChips(contact, venueId, (contact.phonePointId && points.get(contact.phonePointId)) || null),
     note: 'Adaptive Campaigns only: the Marketing tab and Campaign Manager are separate.',
   };
 }

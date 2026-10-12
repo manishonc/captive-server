@@ -48,6 +48,12 @@ export interface ContactPointDoc {
   verifiedAt: StoredTime;
   /** The last live Adaptive SMS to this number — a plain reply is matched to it. */
   lastLiveSms?: { sendKey: string; tenantUserId: string; at: StoredTime } | null;
+  /** PR W3: Meta held a marketing message back for this number (131049) — no WhatsApp marketing until then. */
+  whatsappLimitedUntil?: StoredTime;
+  /** PR W3: Meta couldn't deliver to this number (131026, not on WhatsApp) — no WhatsApp until then. */
+  whatsappUnreachableUntil?: StoredTime;
+  /** PR W3: the point id of Meta's WhatsApp id for this number, when it differs (a STOP from it applies here too). */
+  whatsappWaIdOf?: string | null;
   createdAt: StoredTime;
   updatedAt: StoredTime;
   schemaVersion: number;
@@ -186,8 +192,11 @@ export interface JourneySendDoc {
   providerMessageId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
-  /** Priced once in phase 1; every debit attempt reuses these numbers (debitOne's first write wins). */
-  credits: { amount: number; ledgerId: string | null; rateCardVersion?: number } | null;
+  /**
+   * Priced once in phase 1; every debit attempt reuses these numbers (debitOne's first write wins).
+   * PR W3: `refundLedgerId` once a WhatsApp message Meta couldn't deliver was given back.
+   */
+  credits: { amount: number; ledgerId: string | null; rateCardVersion?: number; refundLedgerId?: string | null } | null;
   providerCostMinor: number | null;
   smsSegments: number | null;
   shortCodes: string[];
@@ -207,6 +216,8 @@ export interface JourneySendDoc {
   schemaVersion: number;
   /** Reply notice: a service message outside any journey. */
   kind?: 'journey' | 'reply_notice';
+  /** PR W3: the approved WhatsApp template a WhatsApp send used. */
+  whatsapp?: { templateId: string; name: string; language: string } | null;
 }
 
 export interface JourneyEventDoc {

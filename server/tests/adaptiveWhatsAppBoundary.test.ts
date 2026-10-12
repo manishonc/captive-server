@@ -13,6 +13,8 @@
  *  - The WhatsApp webhook route reaches the template code only through `hints.ts` (no submit, no
  *    sync, no Meta client) — and never the old sender for templates.
  *  - The template code never reaches the AI (brain) or the Adaptive send path.
+ *  - PR W3: the engine sends WhatsApp with Adaptive's own adapter (send/adapters/whatsapp.ts), never
+ *    the template client; the webhook reaches the engine only through adaptive/ingest/signals.ts.
  */
 
 import { existsSync, readFileSync, statSync } from 'fs';
@@ -183,13 +185,20 @@ test('PR PV: the owner’s preview and WhatsApp Send test send through Adaptive�
   }
 });
 
-test('PR PV: the engine never loads the WhatsApp sender (until W3 switches WhatsApp sending on)', () => {
+test('PR W3: the engine sends WhatsApp through Adaptive’s own adapter (registerAdapters) — never the template client, the sandbox Meta, the old sender or the API’s test adapter', () => {
+  assert(reach(src('adaptive/send/adapters/index.ts')).has(WA_SENDER), 'registerAdapters does not load the WhatsApp sender');
   const engine = ['adaptive/worker/main.ts', 'adaptive/worker/worker.ts', 'adaptive/engine/sendPath.ts', 'adaptive/send/dispatch.ts', 'adaptive/send/adapters/index.ts'].map(src);
   for (const e of engine) {
     assert(existsSync(e), `missing ${rel(e)}`);
     const r = reach(e);
-    for (const bad of [WA_SENDER, WA_TEST_ADAPTER]) assert(!r.has(bad), `${rel(e)} reaches ${rel(bad)}`);
+    for (const bad of [META, SANDBOX, SOURCE, OLD_SENDER, WA_TEST_ADAPTER]) assert(!r.has(bad), `${rel(e)} reaches ${rel(bad)}`);
   }
+});
+
+test('PR W3: the WhatsApp webhook hands statuses and STOPs to Adaptive through the ingest only (never the send path)', () => {
+  const r = reach(src('routes/whatsappWebhook.ts'));
+  assert(r.has(src('adaptive/ingest/signals.ts')), 'the webhook does not reach adaptive/ingest/signals.ts');
+  for (const bad of [src('adaptive/engine/sendPath.ts'), src('adaptive/send/dispatch.ts'), WA_SENDER, META, SOURCE]) assert(!r.has(bad), `the webhook reaches ${rel(bad)}`);
 });
 
 test('PR PV: the preview, the template pick and the owner’s test never reach the Adaptive send path', () => {

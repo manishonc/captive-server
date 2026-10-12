@@ -9,6 +9,11 @@
  *     live:     mint the links → phase 1 transaction → provider → record → charge
  *               (send/dispatch.ts)
  *
+ * PR W3: WhatsApp — while the launch setting `whatsappSending` is on — carries the message's
+ * approved templates (whatsapp/pick.ts): they are its WhatsApp "wordings" (`wa:<name>:<lang>`,
+ * W1, W2… in rotation, never the bandit), rendered by `renderMessage` and sent with the link
+ * button's short link. Its own channel rules: core/runtime/whatsappRules.ts.
+ *
  * The SMS is priced on exactly the text that goes out: same-length placeholders
  * for the links until the gate says yes, the STOP line in the guest's language.
  */
@@ -29,9 +34,12 @@ import { phoneCountry } from '../core/runtime/phoneCountry';
 import type { LastTouch } from '../core/runtime/types';
 import { ENGINE_VERSION, SCHEMA_VERSION } from '../core/constants';
 import { sha256Hex } from '../core/checksum';
-import { consentFor, consentState } from '../identity/resolve';
+import { consentFor, consentState, guestSaidYes } from '../identity/resolve';
 import { loadCatalogue } from '../service/catalogue';
-import { banditModeFor, type EngineSettings } from '../store/engineSettings';
+import { banditModeFor, whatsappSendingOn, type EngineSettings } from '../store/engineSettings';
+import { whatsappBlocked, whatsappRuleFail } from '../core/runtime/whatsappRules';
+import { cachedWaPickContext, usableWaTemplates } from '../whatsapp/pick';
+import type { StoredTemplate } from '../whatsapp/store';
 import { banditSeed, fitBanditBlock, pickSlot, pickWording, segmentOf, sentInSlot, type BanditBlock } from '../core/runtime/bandit';
 import { variantArmKey } from '../core/runtime/banditKeys';
 import { loadStepArms, type StepArms } from './banditArms';
@@ -51,7 +59,7 @@ import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLea
 import { newestTouchAt } from '../send/touches';
 import { dayKey, raiseAlert } from './alerts';
 import { journeyOnState, loadContact, loadGuestInfo, type PinnedConfig, type VenueContext } from './context';
-import { DRY_RUN_LINKS, linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from './renderSend';
+import { DRY_RUN_LINKS, linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, whatsappParams, type LinkKind, type WaTemplateContent } from './renderSend';
 import { resolveStayTimes } from '../stays/times';
 import type { LoadedStay } from '../stays/store';
 import { renderText } from '../core/render';
@@ -257,15 +265,48 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const variants = cat.variants.filter((v) => v.poolKey === cfg.pool && v.status === 'active' && variantEligible(v, a.pinned.slots));
   const unsubscribeReady = Boolean(process.env.UNSUBSCRIBE_SIGNING_SECRET && process.env.SERVER_PUBLIC_URL);
 
+  // PR W3: WhatsApp's wordings are the message's approved templates (guest's language, else English).
+  const waOn = whatsappSendingOn(a.settings);
+  const waPool = Boolean(a.definition.pools?.[cfg.pool]?.channels.includes('whatsapp'));
+  const waPick =
+    waOn && waPool
+      ? await cachedWaPickContext()
+          .then((ctx) => usableWaTemplates(ctx, { journeyKey: inst.meta.journeyKey, poolKey: cfg.pool }, lang))
+          .catch((err) => {
+            // The registry couldn't be read: WhatsApp has no wording this time, the ladder moves on.
+            console.warn('[ADAPTIVE] WhatsApp templates not read:', (err as Error)?.message ?? err);
+            return null;
+          })
+      : null;
+  // A step that must differ in wording (welcome's "same channel" follow-up) never repeats the last
+  // template — in any language (one name = one message and its translations): with none left,
+  // WhatsApp has no wording for it and the step uses another channel or none.
+  const lastVid = inst.state.lastTouch?.variantId ?? null;
+  const lastWaName = lastVid?.startsWith('wa:') ? lastVid.slice(3, lastVid.lastIndexOf(':')) : null;
+  const waVariants = (waPick?.templates ?? [])
+    .map((t, i) => ({ id: waVariantId(t), letter: `W${i + 1}`, template: t }))
+    .filter((v) => !(cfg.requireDiff?.includes('variant') && v.template.name === lastWaName));
+
   const channelFacts = (channel: Channel): ChannelFacts => {
     const email = channel === 'email';
+    const wa = channel === 'whatsapp';
     const cp = email ? cpEmail : cpPhone;
     const audience = email ? a.ctx?.audience.email ?? 'all' : a.ctx?.audience.sms ?? 'verified';
     const verified = email ? contact.emailVerified : contact.phoneVerified;
     let ruleFail: string | null = null;
-    // The cms owner screens mirror this switch (running-words.ts `SENDING_CHANNELS`): change both together.
-    if (channel === 'whatsapp') ruleFail = 'whatsapp_off';
-    else if (channel === 'sms') {
+    // The cms owner screens read the same switch (the owner API's `sendingChannels`).
+    if (wa) {
+      ruleFail = whatsappRuleFail({
+        on: waOn,
+        purpose: cfg.purpose,
+        phoneCountry: phoneCountry(contact.phoneE164)?.country ?? null,
+        limitedUntil: tsMs(cpPhone?.whatsappLimitedUntil),
+        unreachableUntil: tsMs(cpPhone?.whatsappUnreachableUntil),
+        verified: Boolean(contact.phoneVerified),
+        optedIn: guestSaidYes(consent.whatsapp),
+        now,
+      });
+    } else if (channel === 'sms') {
       const country = phoneCountry(contact.phoneE164)?.country ?? null;
       if (!country || !a.settings.sms.allowedCountries.includes(country)) ruleFail = 'country_not_allowed';
     } else if (email && cfg.purpose === 'marketing' && !unsubscribeReady) ruleFail = 'email_unsubscribe_not_configured';
@@ -275,9 +316,13 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       channel,
       hasAddress: email ? Boolean(contact.email) : Boolean(contact.phoneE164),
       consent: consentState(consent[channel]),
-      suppressed: cp?.suppression?.[channel]?.reason ?? null,
-      audienceOk: audience === 'all' || Boolean(verified),
-      hasWording: variants.some((v) => Boolean(variantContent(v, channel, lang))),
+      // WhatsApp: its own block, and for marketing an SMS STOP too (W3-D1).
+      suppressed: wa ? whatsappBlocked(cpPhone, cfg.purpose) : cp?.suppression?.[channel]?.reason ?? null,
+      // WhatsApp's own "verified number only" is a WhatsApp rule (`whatsapp_unverified`), not the owner's audience.
+      audienceOk: wa ? true : audience === 'all' || Boolean(verified),
+      // While WhatsApp is off — or another WhatsApp rule fails (unverified, no opt-in…) — that rule is the
+      // reason, not the wording (checkChannel tests wording first).
+      hasWording: wa ? !waOn || ruleFail !== null || waVariants.length > 0 : variants.some((v) => Boolean(variantContent(v, channel, lang))),
       ruleFail,
     };
   };
@@ -419,14 +464,22 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const channel = pick.channel;
 
   // ── 5. Wording + render ──
-  const options = variants.filter((v) => variantContent(v, channel, lang));
+  const isWa = channel === 'whatsapp';
+  const options = isWa ? [] : variants.filter((v) => variantContent(v, channel, lang));
   const rotation = () => pickVariant(options.map((v) => ({ id: v.id, letter: v.letter })), inst.state.lastTouch?.variantId ?? null);
   let vpick: { variantId: string | null; method: string };
   let varPart: BanditBlock['var'] = null;
   // PR F1: sticky per send — a held send keeps the wording its first look picked (while it has
   // this channel, and while its text is the one that was drawn: an edited text is a new arm).
   const sticky = banditOn ? sameStepWait?.variantPick : undefined;
-  if (sticky && options.some((v) => v.id === sticky.vid && (!sticky.part || sticky.part.pick === variantArmKey(v)))) {
+  if (isWa) {
+    // PR W3: WhatsApp's templates rotate (W1, W2…); the bandit never draws them, so its learner only
+    // ever compares SMS/email wordings. A held send keeps its template while it is still usable.
+    vpick =
+      sticky && waVariants.some((v) => v.id === sticky.vid)
+        ? { variantId: sticky.vid, method: sticky.method }
+        : pickVariant(waVariants.map((v) => ({ id: v.id, letter: v.letter })), inst.state.lastTouch?.variantId ?? null);
+  } else if (sticky && options.some((v) => v.id === sticky.vid && (!sticky.part || sticky.part.pick === variantArmKey(v)))) {
     vpick = { variantId: sticky.vid, method: sticky.method };
     varPart = sticky.part ?? null;
   } else if (banditOn) {
@@ -452,7 +505,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   } else {
     vpick = rotation();
   }
-  const variant = variants.find((v) => v.id === vpick.variantId)!;
+  const waVariant = isWa ? waVariants.find((v) => v.id === vpick.variantId)! : null;
+  const variant = waVariant ?? variants.find((v) => v.id === vpick.variantId)!;
   const banditBlock: BanditBlock | null = banditOn && (varPart || slotPart) ? fitBanditBlock({ v: 1, seg: segment, var: varPart, slot: slotPart }) : null;
   // While the bandit is on, every wording pick is kept by a wait (one without draws too: a
   // rotation stand-in or a forced pick), so a held send goes out with the wording it named.
@@ -460,7 +514,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     ...(slotPart ? { slotPick: slotPart } : {}),
     ...(banditOn ? { variantPick: { vid: variant.id, method: vpick.method, part: varPart } } : {}),
   };
-  const vc = variantContent(variant, channel, lang)!;
+  const vc: { content: any; locale: Lang; fallback: boolean } = waVariant
+    ? { content: waContentOf(waVariant.template), locale: waPick!.lang, fallback: waPick!.lang !== lang }
+    : variantContent(variant as (typeof variants)[number], channel, lang)!;
   // Links: same-length stand-ins for pricing and the gate (real ones are minted only
   // once the gate says yes), readable ones for the stored preview.
   const gates = linkGates(guestInfo, lang, cfg.pool, typeof inst.state.vars.offerKey === 'string', a.pinned.slots.booking_url);
@@ -532,7 +588,9 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       audienceFact:
         channel === 'sms'
           ? `${contact.phoneVerified ? 'verified' : 'unverified'} number (owner: ${a.ctx?.audience.sms === 'all' ? 'everyone' : 'verified only'})`
-          : `email${contact.emailVerified ? ' (verified)' : ''}`,
+          : channel === 'whatsapp'
+            ? `${contact.phoneVerified ? 'verified' : 'unverified'} number (WhatsApp: verified only)`
+            : `email${contact.emailVerified ? ' (verified)' : ''}`,
       ruleFail: rendered.missing.length ? missingReason(rendered.missing) : null,
     },
     caps: { touches: inst.state.counters.touches, maxTouches, clicks: inst.state.counters.clicks, stopAfterClicks },
@@ -587,7 +645,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const preview = referralCode ? renderMessage(vc.content, channel, maskSecretValues(valuesWith(previewLinks, referralCode))) : previewRendered;
 
   if (gate.verdict === 'allow' && mode === 'test') {
-    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: preview, decision, replay, price, ladderPos: pick.ladderPos, contact, common, bandit: banditBlock });
+    return dryRun({ a, sendKey, channel, variantId: variant.id, lang: vc.locale, slot, cfg, rendered: preview, decision, replay, price, ladderPos: pick.ladderPos, contact, common, bandit: banditBlock, whatsapp: waVariant ? waRecordOf(waVariant.template) : null });
   }
 
   if (gate.verdict === 'allow') {
@@ -798,14 +856,13 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     void alertFor(reason, a, d.tz);
     return skipWith({ ...d.decision, result: 'block', rule: 'system', reason }, a, sendKey, d.common, false, null, d.replay, d.bandit);
   };
-  if (d.channel === 'whatsapp') return block('channel_not_ready');
   const channel = d.channel;
   const adapter = channelAdapters[channel];
   if (!adapter?.ready()) return block('channel_not_ready');
   if (marketing && (!Number.isInteger(d.price) || d.price < 1)) return block('rate_card_invalid');
   const attempts = inst.state.waiting?.nodeId === a.nodeId ? inst.state.waiting?.dispatchAttempts ?? 0 : 0;
   if (attempts >= MAX_DISPATCH_ATTEMPTS) return block('provider_unavailable');
-  const address = channel === 'email' ? d.contact.email : d.contact.phoneE164;
+  const address = channel === 'email' ? d.contact.email : d.contact.phoneE164; // SMS and WhatsApp: the phone
   if (!address) return skipWith({ ...d.decision, result: 'skip', reason: 'no_address' }, a, sendKey, d.common, false, null, d.replay, d.bandit);
   if (channel === 'email' && marketing && !d.unsubscribeUrl) return block('email_unsubscribe_not_configured');
 
@@ -831,6 +888,22 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
   if (channel === 'sms') {
     smsBody = smsFinalText(final.text, d.locale, String(d.content.text ?? ''));
     message = { kind: 'sms', to: address, body: smsBody, sendKey };
+  } else if (channel === 'whatsapp') {
+    // PR W3: the template, its values, and its link button's variable = the short link's path.
+    const c = d.content as WaTemplateContent;
+    const buttonField = c.compiled.button?.field ?? null;
+    const code = buttonField ? minted.byKind[buttonField.slice('link.'.length) as keyof typeof minted.byKind] : null;
+    if (buttonField && !code) return block(missingReason([buttonField]));
+    message = {
+      kind: 'whatsapp',
+      to: address,
+      templateName: c.name,
+      language: c.language,
+      bodyParams: whatsappParams(c, finalValues),
+      button: buttonField ? { index: c.buttonIndex, param: `s/${code}` } : null,
+      previewText: final.text,
+      sendKey,
+    };
   } else {
     const poweredBy = await getEntitlements(inst.meta.tenantUserId)
       .then((e) => !e.flags?.hidePoweredBy)
@@ -893,6 +966,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     schemaVersion: SCHEMA_VERSION,
     ladderPos: d.ladderPos,
     kind: 'journey',
+    ...(channel === 'whatsapp' ? { whatsapp: waRecordOf(d.content as WaTemplateContent) } : {}),
   };
   const live: LiveSend = {
     inst,
@@ -1029,6 +1103,8 @@ async function dryRun(p: {
   contact: ContactDoc;
   common: Record<string, unknown>;
   bandit: BanditBlock | null;
+  /** PR W3: the WhatsApp template a test run would have sent. */
+  whatsapp?: { templateId: string; name: string; language: string } | null;
 }): Promise<SendOutcome> {
   const { a, sendKey } = p;
   const now = a.now;
@@ -1073,6 +1149,7 @@ async function dryRun(p: {
     updatedAt: new Date(now),
     expireAt: retentionFrom(now),
     schemaVersion: SCHEMA_VERSION,
+    ...(p.whatsapp ? { whatsapp: p.whatsapp } : {}),
   };
 
   const readRev = a.inst.state.rev;
@@ -1096,4 +1173,28 @@ async function dryRun(p: {
     suppress: false,
     events: [],
   };
+}
+
+/** PR W3: a template's wording id — stable while the template is (its name and language never change). */
+function waVariantId(t: Pick<StoredTemplate, 'name' | 'language'>): string {
+  return `wa:${t.name}:${t.language}`;
+}
+
+/** PR W3: what the engine renders and sends for one approved template. */
+function waContentOf(t: StoredTemplate): WaTemplateContent {
+  const index = t.meta?.buttons?.findIndex((b) => b.type === 'URL') ?? -1;
+  return {
+    kind: 'wa_template',
+    templateId: t.id,
+    name: t.name,
+    language: t.language,
+    source: { body: t.source!.body, footer: t.source!.footer ?? null },
+    compiled: { params: t.compiled!.params, button: t.compiled!.button },
+    buttonIndex: index >= 0 ? index : 0,
+  };
+}
+
+/** PR W3: the template on the send record. */
+function waRecordOf(t: Pick<StoredTemplate, 'name' | 'language'> & ({ id: string } | { templateId: string })): { templateId: string; name: string; language: string } {
+  return { templateId: 'templateId' in t ? t.templateId : t.id, name: t.name, language: t.language };
 }

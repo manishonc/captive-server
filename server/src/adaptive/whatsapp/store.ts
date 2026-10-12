@@ -479,6 +479,12 @@ export interface WaOps {
   autoPauseUntilMs: number | null;
   /** PR W2b: Auto's "left for now" log rows already written today (one per template, version and reason a day). */
   autoNoted: { day: string | null; keys: string[] };
+  /**
+   * PR W3: when Meta last sent us a WhatsApp message notice (a status or an inbound message) — real
+   * ms; written by the webhook (adaptive/ingest/signals.ts) at most every 10 minutes. Proves the
+   * `messages` webhook field is subscribed: the WhatsApp sending switch needs it.
+   */
+  messagesSeenAtMs: number | null;
 }
 
 const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -497,6 +503,7 @@ export function parseOps(raw: Record<string, unknown> | undefined): WaOps {
       ? ({ ...(lastSync as object), atMs: tsMs(lastSync.at), engineAtMs: typeof lastSync.engineAtMs === 'number' ? lastSync.engineAtMs : null } as WaOps['lastSync'])
       : null,
     hintUnknownAtMs: tsMs(r.hintUnknownAt),
+    messagesSeenAtMs: tsMs(r.messagesSeenAt),
     lastFullSyncAtMs: typeof r.lastFullSyncAtMs === 'number' ? r.lastFullSyncAtMs : null,
     templateLimit: Math.max(1, num(r.templateLimit, 250)),
     templateCount: typeof r.templateCount === 'number' ? r.templateCount : null,

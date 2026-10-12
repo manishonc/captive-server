@@ -64,13 +64,20 @@ export interface OutboundWhatsApp {
 export type Outbound = OutboundEmail | OutboundSms | OutboundWhatsApp;
 
 export type ProviderResult =
-  | { kind: 'accepted'; provider: ProviderName; providerMessageId: string | null; segments?: number | null }
+  | {
+      kind: 'accepted';
+      provider: ProviderName;
+      providerMessageId: string | null;
+      segments?: number | null;
+      /** PR W3: Meta's WhatsApp id of the recipient (`contacts[0].wa_id`) — can differ from the number we sent to. */
+      recipientId?: string | null;
+    }
   | {
       kind: 'rejected';
       provider: ProviderName;
       code: string;
       message: string;
-      /** Twilio 21610 ("unsubscribed") → STOP-block the number everywhere. */
+      /** Twilio 21610 ("unsubscribed") → STOP-block the number everywhere (WhatsApp 131050: its WhatsApp, PR W3). */
       suppress?: 'stop' | null;
       /** An account/credentials problem (401/403, Twilio 20003): not the guest's fault. */
       config?: boolean;

@@ -202,7 +202,7 @@ export function hasOverlap(v: PreflightVenue): boolean {
 
 export function preflightTurnOn(
   venues: PreflightVenue[],
-  opts: { enabledLadders: Channel[][]; needsStayCalendar: boolean },
+  opts: { enabledLadders: Channel[][]; needsStayCalendar: boolean; /** PR W3: journeys send WhatsApp now. */ whatsappSending?: boolean },
 ): Issue[] {
   const issues: Issue[] = [];
   for (const v of venues) {
@@ -216,8 +216,9 @@ export function preflightTurnOn(
       issues.push(error('F03', `${v.name}: confirm you've seen that guests may get two welcome messages`, `venues.${v.venueId}.overlap`));
     }
   }
-  if (opts.enabledLadders.some((ladder) => ladder.includes('whatsapp'))) {
-    issues.push(info('W01', 'WhatsApp isn’t used yet — SMS and email are used until the WhatsApp templates are approved'));
+  // PR W3: only while WhatsApp sending is off (on: messages with an approved template go by WhatsApp).
+  if (!opts.whatsappSending && opts.enabledLadders.some((ladder) => ladder.includes('whatsapp'))) {
+    issues.push(info('W01', 'WhatsApp isn’t used yet — SMS and email are used until WhatsApp is switched on'));
   }
   if (opts.needsStayCalendar) {
     issues.push(warning('W02', 'Stay messages wait until your booking calendar is linked (coming with stay messages)'));

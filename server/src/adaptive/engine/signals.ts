@@ -9,7 +9,9 @@
  *
  *  delivered → send `delivered` (an `unknown` send is repaired — and charged,
  *              the provider evidently took it)
- *  failed    → send `failed` (21610 → STOP-block the number)
+ *  failed    → send `failed` (21610 → STOP-block the number). PR W3, WhatsApp: 131049 → no
+ *              WhatsApp marketing for 24 h, 131026 → no WhatsApp for 30 days, 131050 → WhatsApp
+ *              STOP; the credits come back (W3-D2)
  *  opened    → openedAt, the guest's opens + time-slot histogram
  *  bounced   → send `bounced`; the address's hard-bounce count; 2 (or invalid) → blocked for everyone
  *  clicked   → firstClickAt; the guest's favourite channel = this channel
@@ -29,8 +31,9 @@ import { eventDoc, loadEvent } from './events';
 import { eventIdFor } from '../core/runtime/ids';
 import { deliverEvent } from './advance';
 import { mustDeliver, __clearLegacyCaches } from './route';
-import { applyEmailRevoke, applyPhoneStart, applyPhoneStop } from './optouts';
-import { chargeRepairTask, chargeSend } from '../send/dispatch';
+import { applyEmailRevoke, applyPhoneStart, applyPhoneStop, applyWhatsAppHold, applyWhatsAppStart, applyWhatsAppStop } from './optouts';
+import { chargeRepairTask, chargeSend, refundSend } from '../send/dispatch';
+import { whatsappFailureEffect } from '../core/runtime/whatsappRules';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { sendReplyNotice } from './replyNotice';
 import { raiseAlert } from './alerts';
@@ -193,11 +196,36 @@ async function applySendSignal(event: EngineEvent, env: SignalEnv): Promise<void
   if (event.type === 'message.failed' && event.data.errorCode === '21610' && send.toPointId) {
     await applyPhoneStop(send.toPointId, 'provider_stop', event.occurredAt, { sendKey, errorCode: '21610' });
   }
+  if (event.type === 'message.failed' && send.channel === 'whatsapp') await applyWhatsAppFailure(send, sendKey, event);
+}
+
+/** PR W3: what Meta's later "failed" changes for the number, then the credits come back (both repeatable). */
+async function applyWhatsAppFailure(send: JourneySendDoc, sendKey: string, event: EngineEvent): Promise<void> {
+  const code = typeof event.data.errorCode === 'string' ? event.data.errorCode : null;
+  const effect = whatsappFailureEffect(code);
+  if (send.toPointId && effect === 'stop') await applyWhatsAppStop(send.toPointId, 'meta_stop', event.occurredAt, { sendKey, errorCode: code });
+  if (send.toPointId && (effect === 'limited' || effect === 'unreachable')) await applyWhatsAppHold(send.toPointId, effect, event.occurredAt);
+  await refundSend(sendKey);
 }
 
 async function applyConsentSignal(event: EngineEvent, guest: Record<string, unknown>, env: SignalEnv): Promise<void> {
   const source = String(event.data.source ?? '');
   const ref = { eventId: event.id, sendKey: event.sendKey ?? null };
+  if (source === 'whatsapp_keyword') {
+    // PR W3: a STOP / START sent on WhatsApp (a START only from a body Meta signed, or the local stack).
+    const phone = typeof guest.phone === 'string' ? guest.phone : null;
+    if (!phone) return;
+    const fromId = contactPointId('phone', phone);
+    // Meta's id of the sender can differ from the number we send to: every number we reached under it too.
+    const aliases = await db.collection(COL.contactPoints).where('whatsappWaIdOf', '==', fromId).limit(5).get();
+    const pointIds = [...new Set([fromId, ...aliases.docs.map((d) => d.id)])];
+    for (const pointId of pointIds) {
+      if (event.type === 'consent.granted') await applyWhatsAppStart(pointId, event.occurredAt, ref);
+      else await applyWhatsAppStop(pointId, 'whatsapp_keyword', event.occurredAt, ref);
+    }
+    if (event.type === 'consent.granted') __clearLegacyCaches();
+    return;
+  }
   if (source === 'sms_keyword') {
     const phone = typeof guest.phone === 'string' ? guest.phone : null;
     if (!phone) return;

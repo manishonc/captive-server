@@ -124,6 +124,8 @@ export async function devLaunch(body: {
   bandit?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null> };
   agents?: { mode?: 'off' | 'on'; accounts?: Record<string, 'off' | 'on' | null>; monthlyBudgetUsd?: number };
   whatsappTemplates?: { autoSubmit?: 'off' | 'on'; maxPerDay?: number };
+  /** PR W3: journeys send WhatsApp (no phrase and no checks in the sandbox). */
+  whatsappSending?: { mode?: 'off' | 'on' };
 }) {
   requireSandbox();
   // The admin card's own function (PR D), so "live since" and the history are written the same
@@ -138,6 +140,8 @@ export async function devLaunch(body: {
   if (body.agents && typeof body.agents === 'object') change.agents = body.agents;
   // PR W2b: WhatsApp Auto and its cap, like the admin card's (no phrase in the sandbox).
   if (body.whatsappTemplates && typeof body.whatsappTemplates === 'object') change.whatsappTemplates = body.whatsappTemplates;
+  // PR W3: WhatsApp sending, like the admin card's (no phrase and no checks in the sandbox).
+  if (body.whatsappSending && typeof body.whatsappSending === 'object') change.whatsappSending = body.whatsappSending;
   if (Object.keys(change).length) {
     const { applyLaunchChange } = await import('./launch');
     await applyLaunchChange({ change }, { actor: { uid: 'sandbox', kind: 'seed' }, sandbox: true });
@@ -150,6 +154,7 @@ export async function devLaunch(body: {
     bandit: settings.bandit ?? { mode: 'off', accounts: {} },
     agents: settings.agents ?? { mode: 'off', accounts: {} },
     whatsappTemplates: settings.whatsappTemplates ?? { autoSubmit: 'off', maxPerDay: 0, changedBy: null },
+    whatsappSending: settings.whatsappSending ?? { mode: 'off', changedBy: null },
   };
 }
 

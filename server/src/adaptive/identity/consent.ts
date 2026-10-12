@@ -26,7 +26,10 @@ export type ConsentSource =
   | 'brevo_spam'
   | 'provider_stop'
   | 'owner'
-  | 'import_legacy';
+  | 'import_legacy'
+  // PR W3: a STOP / START sent on WhatsApp, and Meta's 131050 (the person stopped our marketing in WhatsApp).
+  | 'whatsapp_keyword'
+  | 'meta_stop';
 
 export interface ConsentChange {
   venueId: string;

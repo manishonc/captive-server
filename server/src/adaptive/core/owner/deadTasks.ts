@@ -7,7 +7,7 @@
  * texts until the phone network's own STOP handling blocks the number. Those rows are urgent.
  */
 
-export type DetailLessSignal = 'sms_stop' | 'sms_start' | 'sms_reply' | 'legacy_unsubscribe' | 'consent_without_guest';
+export type DetailLessSignal = 'sms_stop' | 'sms_start' | 'sms_reply' | 'whatsapp_stop' | 'whatsapp_start' | 'legacy_unsubscribe' | 'consent_without_guest';
 
 export interface SignalEventFacts {
   type: string;
@@ -21,6 +21,9 @@ export function detailLessSignal(e: SignalEventFacts): DetailLessSignal | null {
   const hasContact = typeof e.contactId === 'string' && e.contactId.length > 0;
   if (e.type === 'consent.revoked' && source === 'sms_keyword') return 'sms_stop';
   if (e.type === 'consent.granted' && source === 'sms_keyword') return 'sms_start';
+  // PR W3: a STOP / START sent on WhatsApp.
+  if (e.type === 'consent.revoked' && source === 'whatsapp_keyword') return 'whatsapp_stop';
+  if (e.type === 'consent.granted' && source === 'whatsapp_keyword') return 'whatsapp_start';
   if (e.type === 'consent.revoked' && !hasContact) return 'legacy_unsubscribe';
   if (e.type === 'consent.granted' && !hasContact) return 'consent_without_guest';
   if (e.type === 'message.replied') return 'sms_reply';
@@ -29,11 +32,12 @@ export function detailLessSignal(e: SignalEventFacts): DetailLessSignal | null {
 
 /** Rows the admin must look at first: a guest's "no" that was never applied. */
 export function isUrgent(kind: DetailLessSignal | null): boolean {
-  return kind === 'sms_stop' || kind === 'legacy_unsubscribe';
+  return kind === 'sms_stop' || kind === 'whatsapp_stop' || kind === 'legacy_unsubscribe';
 }
 
 const URGENT_NOTE: Partial<Record<DetailLessSignal, string>> = {
   sms_stop: 'A STOP by SMS was not applied, and the number was removed.',
+  whatsapp_stop: 'A STOP on WhatsApp was not applied, and the number was removed.',
   legacy_unsubscribe: 'An email unsubscribe was not applied, and the address was removed.',
 };
 
@@ -50,6 +54,10 @@ export function refusalText(kind: DetailLessSignal): string {
       return "This unsubscribe lost the guest's address when it failed, so nothing can be applied again from here. The guest record keeps its own unsubscribe flag, which the engine reads at the guest's next Wi-Fi login.";
     case 'sms_start':
       return "This START lost the guest's number when it failed: a retry would change nothing (the guest can text START again).";
+    case 'whatsapp_stop':
+      return "This WhatsApp STOP lost the guest's number when it failed, so nothing can be applied again from here. The guest record keeps its own WhatsApp opt-out flag, which the engine reads at the guest's next Wi-Fi login, and Meta reports 131050 for marketing the person stopped in WhatsApp.";
+    case 'whatsapp_start':
+      return "This WhatsApp START lost the guest's number when it failed: a retry would change nothing (the guest can send START again).";
     case 'sms_reply':
       return "This reply lost the guest's number when it failed: a retry would change nothing.";
     default:
