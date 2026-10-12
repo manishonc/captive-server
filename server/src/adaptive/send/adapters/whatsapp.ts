@@ -87,7 +87,10 @@ export function classifyWhatsAppAnswer(status: number, json: unknown, headers: H
   if (status >= 200 && status < 300 && !e) {
     const first = Array.isArray(root.messages) ? (root.messages[0] as { id?: unknown } | undefined) : undefined;
     const id = typeof first?.id === 'string' && first.id ? first.id.slice(0, 200) : null;
-    return id ? { kind: 'accepted', provider, providerMessageId: id } : { kind: 'unknown', provider, reason: 'meta_no_message_id' };
+    // PR W3: who Meta delivers to (a Mexican or older Brazilian number comes back changed): inbound STOPs use it.
+    const contact = Array.isArray(root.contacts) ? (root.contacts[0] as { wa_id?: unknown } | undefined) : undefined;
+    const waId = typeof contact?.wa_id === 'string' && /^\d{5,20}$/.test(contact.wa_id) ? contact.wa_id : null;
+    return id ? { kind: 'accepted', provider, providerMessageId: id, recipientId: waId } : { kind: 'unknown', provider, reason: 'meta_no_message_id' };
   }
   const code = numOrNull(e?.code);
   const subcode = numOrNull(e?.error_subcode);

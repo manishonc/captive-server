@@ -17,7 +17,8 @@
  * WhatsApp (PR PV: the owner's Send test), by the number's end: 0000 → rejected 131026 (not on
  * WhatsApp), 0001 → unknown, 0002 → retry 130429 (60 s), 0003 → rejected 190, config; 0004 →
  * rejected 132001 (Meta doesn't know the template in that language). The outbox doc keeps the
- * template, its values and the text the guest would read.
+ * template, its values and the text the guest would read. PR W3: like Meta, a Mexican number
+ * (+52…) comes back with WhatsApp's own id (+521…) as `recipientId`.
  */
 
 import { db } from '../../../firebase';
@@ -135,6 +136,11 @@ export function createSandboxAdapter(channel: 'email' | 'sms' | 'whatsapp'): Cha
         return { kind: 'unknown', provider: 'sandbox', reason: `sandbox_write_failed: ${(err as Error)?.message ?? String(err)}`.slice(0, 200) };
       }
 
+      if (message.kind === 'whatsapp') {
+        const digits = message.to.replace(/\D/g, '');
+        const recipientId = digits.startsWith('52') && !digits.startsWith('521') ? `521${digits.slice(2)}` : digits;
+        return { kind: 'accepted', provider: 'sandbox', providerMessageId, recipientId };
+      }
       return message.kind === 'sms'
         ? { kind: 'accepted', provider: 'sandbox', providerMessageId, segments }
         : { kind: 'accepted', provider: 'sandbox', providerMessageId };

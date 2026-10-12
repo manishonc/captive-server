@@ -23,6 +23,9 @@
  *  - Review round: a refund doesn't need the debit's id on the send (a charge that died half-way); a
  *    "failed" is never charged afterwards; after an SMS STOP the owner's WhatsApp chip reads "no"; a
  *    read WhatsApp welcome's "same channel" follow-up never repeats the only template.
+ *  - Verification round: any later charge call finishes an interrupted refund; a failed send never
+ *    charged still comes off the daily numbers; the owner's timeline has no bookkeeping line; a STOP
+ *    from Meta's WhatsApp id reaches the number we sent to (Mexico's +521…).
  */
 
 import express from 'express';
@@ -112,12 +115,12 @@ async function main() {
 
   let checks = 0;
   /** Connect the sandbox Meta, write a template and have Meta approve it. */
-  async function approved(poolKey: string, lang: string, source: unknown): Promise<string> {
+  async function approved(poolKey: string, lang: string, source: unknown, name?: string): Promise<string> {
     // The check is rate-limited per admin: a new admin each time.
     checks += 1;
     const c = await api.call('POST', '/admin/whatsapp/connection/check', { actor: { ...admin, uid: `heidifi_admin_w3_${checks}` } });
     assertEqual(c.status, 200, `connection ${c.text}`);
-    const d = await post('/admin/whatsapp/templates', { use: { journeyKey: A1, poolKey }, lang, category: 'MARKETING', source });
+    const d = await post('/admin/whatsapp/templates', { use: { journeyKey: A1, poolKey }, lang, category: 'MARKETING', source, ...(name ? { name } : {}) });
     assertEqual(d.status, 200, `draft ${d.text}`);
     const id = d.body.template.id as string;
     const s = await post(`/admin/whatsapp/templates/${id}/submit`, { baseVersion: d.body.template.version });
@@ -302,7 +305,7 @@ async function main() {
     assertEqual((await point(waStop.pointId)).suppression?.whatsapp, undefined, 'START lifts the block (sandbox)');
 
     const unverified = await welcomed({ phone: ukPhone(), verified: false });
-    assertEqual([unverified.s1, waReason(unverified.events)], [null, 'audience'], 'a verified number only');
+    assertEqual([unverified.s1, waReason(unverified.events)], [null, 'whatsapp_unverified'], 'a verified number only (WhatsApp’s rule, not the owner’s audience)');
   });
 
   await test('a test run names the template and sends nothing (no outbox, no credits)', async () => {
@@ -447,6 +450,83 @@ async function main() {
     await fresh({ whatsapp: 'on' });
     await adaptiveOnWhatsAppStatus({ wamid: 'wamid.not-ours', status: 'failed', errorCode: '131049' }, { retryMs: 20 });
     assertEqual((await db.collection(COL.journeyEvents).where('type', '==', 'message.failed').get()).size, 0, 'nothing written');
+  });
+
+  console.log('\nVerification round (PR W3)\n');
+
+  await test('an interrupted refund is finished by the next charge call (repair, resume, delivery): once', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    const g = await welcomed({ phone: ukPhone() });
+    const key = g.s1!.id;
+    // Meta's "failed" was recorded, but its refund never ran (the worker died right after).
+    await db.collection(COL.journeySends).doc(key).update({ status: 'failed', errorCode: '131026' });
+    assertEqual(await chargeSend(key), 'nothing', 'the repair charges nothing…');
+    assertEqual(await chargeSend(key), 'nothing', '…twice');
+    const entries = await ledger(W.tenant);
+    assertEqual([entries.filter((e) => e.type === 'debit').length, entries.filter((e) => e.id === `refund_auto_${key}`).length], [1, 1], '…and refunds once');
+    assertEqual((await sendOf(key)).credits?.refundLedgerId, `refund_auto_${key}`, 'marked');
+  });
+
+  await test('a failed send that was never charged still comes off the daily numbers (credits.refunded, notCharged)', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    const g = await welcomed({ phone: ukPhone() });
+    const key = g.s1!.id;
+    // As if the charge never happened (it threw, the repair is still queued).
+    await db.collection(COL.creditWallets).doc(W.tenant).collection('ledger').doc(`debit_auto_${key}`).delete();
+    await db.collection(COL.journeySends).doc(key).update({ 'credits.ledgerId': null });
+    await status(g.s1!.providerMessageId, 'failed', '131049');
+    const ev = await db.collection(COL.journeyEvents).where('sendKey', '==', key).where('type', '==', 'credits.refunded').get();
+    assertEqual([ev.size, ev.docs[0]?.get('data.notCharged'), ev.docs[0]?.get('data.credits')], [1, true, 12], 'taken off once');
+    assertEqual((await ledger(W.tenant)).filter((e) => e.id.startsWith('refund_auto_')).length, 0, 'nothing to give back');
+    assertEqual(await chargeSend(key), 'nothing', 'never charged afterwards');
+    assertEqual((await ledger(W.tenant)).length, 0, 'the ledger stays empty');
+  });
+
+  await test('the owner’s guest timeline: the failed WhatsApp line, no bookkeeping line for the refund', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    const g = await welcomed({ phone: ukPhone() });
+    await status(g.s1!.providerMessageId, 'failed', '131026');
+    const r = await api.get(`/tenants/${W.tenant}/venues/${W.venueId}/guests/${g.contactId}`);
+    assertEqual(r.status, 200, r.text);
+    const sentences = (r.body.timeline as Array<{ sentence: string }>).map((i) => i.sentence);
+    assert(sentences.some((x) => x.includes("this number can't get WhatsApp messages") && x.includes('No credits are charged')), `the failed line: ${sentences.join(' | ')}`);
+    assert(!sentences.includes('Something else happened.'), `no unknown line: ${sentences.join(' | ')}`);
+  });
+
+  await test('the "same channel" follow-up never repeats the last template in another language either (de approved after an en welcome)', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    const g = await welcomed({ phone: ukPhone(), language: 'de', firstName: 'Jonas' });
+    assertEqual(g.s1?.whatsapp?.language, 'en', 'the welcome went in English');
+    // The German translation of the same template (same name).
+    await approved('welcome_offer', 'de', DE_OFFER, 'hf_welcome_offer_1');
+    await status(g.s1!.providerMessageId, 'read');
+    for (let i = 0; i < 6; i += 1) {
+      await advance(2 * HOUR_MS);
+      await runDue();
+    }
+    const s2 = await db.collection(COL.journeySends).doc(sendKeyFor(g.inst.id, 's2_same')).get();
+    assertEqual(s2.exists, false, `no German copy of the same message: ${JSON.stringify(s2.exists ? { ch: s2.get('channel'), v: s2.get('variantId'), st: s2.get('status'), last: (await db.collection(COL.journeyInstances).doc(g.inst.id).get()).get('lastTouch') } : null)}`);
+    assertEqual((await outbox()).filter((o) => o.channel === 'whatsapp').length, 1, 'one WhatsApp message in all');
+  });
+
+  await test('a STOP from Meta’s WhatsApp id reaches the number we sent to (Mexico: sent to +52…, Meta’s id +521…)', async () => {
+    await fresh({ whatsapp: 'on' });
+    await approved('welcome_offer', 'en', EN_OFFER);
+    const guestId = await connect({ venue: W, firstName: 'Lucía', phone: '5512345678', phoneCountryCode: '+52', phoneVerified: true, consent: true, language: 'en' });
+    await runDue();
+    await advance(15 * MINUTE_MS);
+    await runDue();
+    const pointId = contactPointId('phone', '+525512345678');
+    const sent = (await outbox()).filter((o) => o.channel === 'whatsapp');
+    assertEqual(sent.length, 1, `sent by WhatsApp (guest ${guestId})`);
+    assertEqual((await point(pointId)).whatsappWaIdOf, contactPointId('phone', '+5215512345678'), 'the WhatsApp id is remembered (hashed)');
+    await adaptiveOnInboundWhatsApp({ from: '5215512345678', kind: 'stop', messageId: 'wamid.in.mx.1' });
+    await runDue();
+    assertEqual((await point(pointId)).suppression?.whatsapp?.reason, 'stop', 'the number we send to is blocked');
   });
 
   await api.close();

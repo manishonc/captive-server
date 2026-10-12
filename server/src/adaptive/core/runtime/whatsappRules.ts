@@ -3,6 +3,10 @@
  * ones (address, consent, block, audience, wording in core/runtime/pickers.ts). Pure.
  *
  *  - the launch setting `whatsappSending` is off            → whatsapp_off
+ *  - the guest never proved the number (no OTP)              → whatsapp_unverified (whatever the owner
+ *                                                               picked for SMS: fewer wrong numbers)
+ *  - an info message to a guest who didn't say yes to        → whatsapp_no_optin (Meta needs an opt-in
+ *    WhatsApp (marketing checks consent first anyway)           for every template, utility too)
  *  - Meta said the number can't get WhatsApp (131026)        → whatsapp_unreachable (30 days)
  *  - marketing to a +1 number (Meta delivers no marketing     → whatsapp_us_marketing
  *    templates to US numbers; +1 is the whole NANP region)
@@ -15,7 +19,7 @@
 import { DAY_MS, HOUR_MS } from './time';
 
 /** The channel reasons only WhatsApp has (Replay and the owner's words skip/explain them like `whatsapp_off`). */
-export const WHATSAPP_CHANNEL_REASONS = ['whatsapp_off', 'whatsapp_unreachable', 'whatsapp_us_marketing', 'whatsapp_limited'] as const;
+export const WHATSAPP_CHANNEL_REASONS = ['whatsapp_off', 'whatsapp_unverified', 'whatsapp_no_optin', 'whatsapp_unreachable', 'whatsapp_us_marketing', 'whatsapp_limited'] as const;
 
 /** After Meta's 131049 ("held back to keep engagement healthy"): no WhatsApp marketing to the number for this long. */
 export const WA_LIMITED_MS = 24 * HOUR_MS;
@@ -29,11 +33,17 @@ export interface WhatsAppRuleInput {
   phoneCountry: string | null;
   limitedUntil: number | null;
   unreachableUntil: number | null;
+  /** The guest proved the number (missing = yes, for callers that checked it themselves). */
+  verified?: boolean;
+  /** The guest said yes to WhatsApp here (missing = yes). */
+  optedIn?: boolean;
   now: number;
 }
 
 export function whatsappRuleFail(i: WhatsAppRuleInput): string | null {
   if (!i.on) return 'whatsapp_off';
+  if (i.verified === false) return 'whatsapp_unverified';
+  if (i.optedIn === false && i.purpose === 'service') return 'whatsapp_no_optin';
   if (i.unreachableUntil !== null && i.unreachableUntil > i.now) return 'whatsapp_unreachable';
   if (i.purpose === 'marketing') {
     if (i.phoneCountry === 'US') return 'whatsapp_us_marketing';

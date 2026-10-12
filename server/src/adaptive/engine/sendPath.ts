@@ -279,11 +279,13 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
           })
       : null;
   // A step that must differ in wording (welcome's "same channel" follow-up) never repeats the last
-  // template: with none left, WhatsApp has no wording for it and the step uses another channel or none.
+  // template — in any language (one name = one message and its translations): with none left,
+  // WhatsApp has no wording for it and the step uses another channel or none.
   const lastVid = inst.state.lastTouch?.variantId ?? null;
+  const lastWaName = lastVid?.startsWith('wa:') ? lastVid.slice(3, lastVid.lastIndexOf(':')) : null;
   const waVariants = (waPick?.templates ?? [])
     .map((t, i) => ({ id: waVariantId(t), letter: `W${i + 1}`, template: t }))
-    .filter((v) => !(cfg.requireDiff?.includes('variant') && v.id === lastVid));
+    .filter((v) => !(cfg.requireDiff?.includes('variant') && v.template.name === lastWaName));
 
   const channelFacts = (channel: Channel): ChannelFacts => {
     const email = channel === 'email';
@@ -300,6 +302,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
         phoneCountry: phoneCountry(contact.phoneE164)?.country ?? null,
         limitedUntil: tsMs(cpPhone?.whatsappLimitedUntil),
         unreachableUntil: tsMs(cpPhone?.whatsappUnreachableUntil),
+        verified: Boolean(contact.phoneVerified),
+        optedIn: consentState(consent.whatsapp) === 'granted',
         now,
       });
     } else if (channel === 'sms') {
@@ -314,8 +318,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       consent: consentState(consent[channel]),
       // WhatsApp: its own block, and for marketing an SMS STOP too (W3-D1).
       suppressed: wa ? whatsappBlocked(cpPhone, cfg.purpose) : cp?.suppression?.[channel]?.reason ?? null,
-      // WhatsApp only to a number the guest proved (whatever the owner picked for SMS).
-      audienceOk: wa ? Boolean(contact.phoneVerified) : audience === 'all' || Boolean(verified),
+      // WhatsApp's own "verified number only" is a WhatsApp rule (`whatsapp_unverified`), not the owner's audience.
+      audienceOk: wa ? true : audience === 'all' || Boolean(verified),
       // While WhatsApp is off, the switch is the reason (its templates aren't looked at).
       hasWording: wa ? !waOn || waVariants.length > 0 : variants.some((v) => Boolean(variantContent(v, channel, lang))),
       ruleFail,

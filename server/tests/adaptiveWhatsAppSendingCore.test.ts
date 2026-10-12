@@ -69,6 +69,11 @@ async function main() {
     assertEqual(whatsappRuleFail({ ...base, limitedUntil: NOW + HOUR_MS, purpose: 'service' }), null, 'the marketing limit holds no info message');
     assertEqual(whatsappRuleFail({ ...base, on: false, unreachableUntil: NOW + DAY_MS }), 'whatsapp_off', 'off wins');
     assertEqual([WA_LIMITED_MS, WA_UNREACHABLE_MS], [24 * HOUR_MS, 30 * DAY_MS], 'the holds');
+    // Verification round: WhatsApp's own rules, not the owner's audience choice.
+    assertEqual(whatsappRuleFail({ ...base, verified: false }), 'whatsapp_unverified', 'an unproved number');
+    assertEqual(whatsappRuleFail({ ...base, on: false, verified: false }), 'whatsapp_off', 'off still wins');
+    assertEqual(whatsappRuleFail({ ...base, purpose: 'service', optedIn: false }), 'whatsapp_no_optin', 'an info message needs a WhatsApp yes');
+    assertEqual(whatsappRuleFail({ ...base, purpose: 'marketing', optedIn: false }), null, 'marketing: consent is checked before (no_consent)');
   });
 
   await test('the block: its own WhatsApp STOP; an SMS STOP for marketing only (W3-D1); an email bounce changes nothing', () => {
@@ -148,7 +153,7 @@ async function main() {
   });
 
   await test('Replay’s "no channel" words: the WhatsApp rules are not the guest’s reachability (like the old whatsapp_off)', () => {
-    assertEqual([...WHATSAPP_CHANNEL_REASONS], ['whatsapp_off', 'whatsapp_unreachable', 'whatsapp_us_marketing', 'whatsapp_limited'], 'the reasons');
+    assertEqual([...WHATSAPP_CHANNEL_REASONS], ['whatsapp_off', 'whatsapp_unverified', 'whatsapp_no_optin', 'whatsapp_unreachable', 'whatsapp_us_marketing', 'whatsapp_limited'], 'the reasons');
     for (const reason of WHATSAPP_CHANNEL_REASONS) {
       const r = noChannelFor(
         [

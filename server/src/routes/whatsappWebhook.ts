@@ -170,6 +170,9 @@ router.post('/', async (req: Request, res: Response) => {
                   `+${from}`,
                   'You have been unsubscribed from WhatsApp updates. Reply START to resubscribe.',
                 ).catch(() => {});
+              } else if (kind === 'start' && process.env.WHATSAPP_APP_SECRET && !signatureChecked) {
+                // PR W3: with the app secret set, only a START Meta signed lifts the opt-out (Adaptive reads this flag too).
+                console.warn('[WHATSAPP WEBHOOK] unsigned START ignored');
               } else if (kind === 'start') {
                 await setChannelOptOut(`+${from}`, 'whatsapp', false);
                 await sendWhatsAppText(

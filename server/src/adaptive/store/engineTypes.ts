@@ -52,6 +52,8 @@ export interface ContactPointDoc {
   whatsappLimitedUntil?: StoredTime;
   /** PR W3: Meta couldn't deliver to this number (131026, not on WhatsApp) — no WhatsApp until then. */
   whatsappUnreachableUntil?: StoredTime;
+  /** PR W3: the point id of Meta's WhatsApp id for this number, when it differs (a STOP from it applies here too). */
+  whatsappWaIdOf?: string | null;
   createdAt: StoredTime;
   updatedAt: StoredTime;
   schemaVersion: number;

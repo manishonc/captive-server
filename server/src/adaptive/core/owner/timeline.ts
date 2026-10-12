@@ -1007,6 +1007,8 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
   for (const ev of args.events ?? []) {
     if (!ev || typeof ev.type !== 'string') continue;
     if ((ev.type === 'consent.granted' || ev.type === 'consent.revoked') && ledgerEventIds.has(ev.id)) continue;
+    // PR W3: bookkeeping for the daily numbers — the failed message's own line already says no credits are charged.
+    if (ev.type === 'credits.refunded' && !admin) continue;
     const data = rec(ev.data);
     const send = typeof ev.sendKey === 'string' ? sends[ev.sendKey] ?? null : null;
     const foreign =

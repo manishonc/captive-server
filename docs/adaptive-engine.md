@@ -681,6 +681,17 @@ Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-w3-brief.md`. Journeys
   found yet is looked up once more after 15 s, and is never dropped by the "engine may send" shortcut. A step that
   must differ in wording (`requireDiff: variant`, the welcome's "same channel" follow-up after a read) never
   repeats the last template. After an SMS STOP the owner's guest chips show WhatsApp "no" too.
+- **Verification round:** every charge call (record, `send_sweep` repair, resume, delivery) first finishes a
+  failed WhatsApp send's refund (never charges it); a failed send that was never charged still comes off the
+  daily numbers (`credits.refunded`, `notCharged`), the event written before the send is marked. The guest
+  chips read the phone point's block (the engine's rule). WhatsApp's own rules are reasons of their own:
+  `whatsapp_unverified` (not the owner's audience) and `whatsapp_no_optin` (an info message by WhatsApp needs
+  the guest's WhatsApp yes — Meta wants an opt-in for every template; also at claim). The "must differ" rule
+  compares template names (a translation is the same message). Meta's `contacts[0].wa_id` when it differs from
+  the number sent to is kept hashed on the point (`whatsappWaIdOf`), so a STOP from that id blocks the number.
+  With `WHATSAPP_APP_SECRET` set, the legacy handler also ignores an unsigned START. Dead WhatsApp STOP/START
+  signals have their own kinds (`whatsapp_stop` urgent). The refund ledger entry carries `refundOf` and the
+  debit's cost (the cms analytics undo the consumption; the owner sees "Returned: WhatsApp message not delivered").
 - **Owner screens:** the overview and the preview answer `sendingChannels` (`['sms','email']`, + `'whatsapp'`
   when on); W01 (setup info) shows only while off.
 

@@ -212,14 +212,18 @@ async function applyConsentSignal(event: EngineEvent, guest: Record<string, unkn
   const source = String(event.data.source ?? '');
   const ref = { eventId: event.id, sendKey: event.sendKey ?? null };
   if (source === 'whatsapp_keyword') {
-    // PR W3: a STOP / START sent on WhatsApp (a START only reaches here from the local stack).
+    // PR W3: a STOP / START sent on WhatsApp (a START only from a body Meta signed, or the local stack).
     const phone = typeof guest.phone === 'string' ? guest.phone : null;
     if (!phone) return;
-    const pointId = contactPointId('phone', phone);
-    if (event.type === 'consent.granted') {
-      await applyWhatsAppStart(pointId, event.occurredAt, ref);
-      __clearLegacyCaches();
-    } else await applyWhatsAppStop(pointId, 'whatsapp_keyword', event.occurredAt, ref);
+    const fromId = contactPointId('phone', phone);
+    // Meta's id of the sender can differ from the number we send to: every number we reached under it too.
+    const aliases = await db.collection(COL.contactPoints).where('whatsappWaIdOf', '==', fromId).limit(5).get();
+    const pointIds = [...new Set([fromId, ...aliases.docs.map((d) => d.id)])];
+    for (const pointId of pointIds) {
+      if (event.type === 'consent.granted') await applyWhatsAppStart(pointId, event.occurredAt, ref);
+      else await applyWhatsAppStop(pointId, 'whatsapp_keyword', event.occurredAt, ref);
+    }
+    if (event.type === 'consent.granted') __clearLegacyCaches();
     return;
   }
   if (source === 'sms_keyword') {

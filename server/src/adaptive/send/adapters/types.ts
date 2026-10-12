@@ -64,7 +64,14 @@ export interface OutboundWhatsApp {
 export type Outbound = OutboundEmail | OutboundSms | OutboundWhatsApp;
 
 export type ProviderResult =
-  | { kind: 'accepted'; provider: ProviderName; providerMessageId: string | null; segments?: number | null }
+  | {
+      kind: 'accepted';
+      provider: ProviderName;
+      providerMessageId: string | null;
+      segments?: number | null;
+      /** PR W3: Meta's WhatsApp id of the recipient (`contacts[0].wa_id`) — can differ from the number we sent to. */
+      recipientId?: string | null;
+    }
   | {
       kind: 'rejected';
       provider: ProviderName;

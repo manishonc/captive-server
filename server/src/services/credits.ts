@@ -757,8 +757,9 @@ export async function debitOne(opts: {
 /**
  * Gives back one automation debit (PR W3: a WhatsApp message Meta reported as not delivered).
  * Idempotent on `refund_auto_{sendId}`; reverses exactly the buckets the debit
- * `debit_auto_{sendId}` drained (its `channelDeltas`). An `adjustment` entry (+credits), so the
- * analytics count it as given back, not as a Stripe refund. 'nothing' when there is no such debit.
+ * `debit_auto_{sendId}` drained (its `channelDeltas`). An `adjustment` entry (+credits) with
+ * `refundOf`, so the analytics undo that debit's consumption and cost (not a Stripe refund, not a
+ * manual credit). 'nothing' when there is no such debit.
  */
 export async function refundOne(opts: { tenantUserId: string; sendId: string; note: string }): Promise<'refunded' | 'nothing'> {
   const { tenantUserId, sendId, note } = opts;
@@ -790,18 +791,22 @@ export async function refundOne(opts: { tenantUserId: string; sendId: string; no
     wallet.lifetimeSpentCredits = Math.max(0, wallet.lifetimeSpentCredits - credits);
 
     tx.set(wRef, walletWrite(wallet), { merge: true });
-    tx.set(
-      entryRef,
-      baseEntry({
+    tx.set(entryRef, {
+      ...baseEntry({
         type: 'adjustment',
         credits,
         balanceAfter: wallet.balance,
         channel: debit.channel ?? null,
+        segments: debit.segments ?? null,
         channelDeltas: deltas,
         sendId,
+        // The provider never charged us either: the analytics take the debit's cost off again.
+        providerCostMinorSnapshot: debit.providerCostMinorSnapshot ?? null,
         note,
       }),
-    );
+      // Marks a reversal of an automation debit (the cms analytics undo its consumption, not a manual credit).
+      refundOf: `debit_auto_${sendId}`,
+    });
     return 'refunded' as const;
   });
 }
