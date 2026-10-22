@@ -22,6 +22,10 @@ export interface CreateUserRequestBody {
   privacyPolicyConsent?: ConsentRecord;
   termsConsent?: ConsentRecord;
   marketingConsent?: ConsentRecord;
+  /** The guest saw the consent step and tapped Accept or "I don't want to stay in touch". False or
+   *  absent when the venue hides the step (or from an older portal build). Only Adaptive reads it,
+   *  so an explicit no can take back an earlier yes; it is never stored on the guest record. */
+  consentAsked?: boolean;
   /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
   splashResponses?: Record<string, unknown>;
   /** Splash-screen language the guest chose ('en'|'de'|'it'|'fr'). Absent when
@@ -304,6 +308,10 @@ export interface UnifiAuthorizeRequestBody {
   privacyPolicyConsent?: ConsentRecord;
   termsConsent?: ConsentRecord;
   marketingConsent?: ConsentRecord;
+  /** The guest saw the consent step and tapped Accept or "I don't want to stay in touch". False or
+   *  absent when the venue hides the step (or from an older portal build). Only Adaptive reads it,
+   *  so an explicit no can take back an earlier yes; it is never stored on the guest record. */
+  consentAsked?: boolean;
   /** Raw {fieldId: value} answers for loginPage.customFields — validated server-side. */
   splashResponses?: Record<string, unknown>;
   /** Splash-screen language the guest chose ('en'|'de'|'it'|'fr'). Absent when

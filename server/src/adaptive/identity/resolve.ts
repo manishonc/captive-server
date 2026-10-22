@@ -36,6 +36,12 @@ export interface ResolveInput {
   lang: Lang | null;
   /** The guest ticked the marketing box in this request. */
   consentGiven: boolean;
+  /**
+   * The guest saw the consent step in this request and chose "I don't want to stay in touch":
+   * a yes they gave at this venue is taken back, on every channel. Not set when the venue hides
+   * the step: that "no" isn't the guest's.
+   */
+  consentDeclined?: boolean;
   emailVerified: boolean;
   phoneVerified: boolean;
   /** Old opt-out flags found on this guest's docs (import once as revokes). */
@@ -113,7 +119,7 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
       channel: Channel;
       action: 'grant' | 'revoke';
       source: string;
-      revokedVia?: 'channel' | 'owner';
+      revokedVia?: 'channel' | 'owner' | 'splash';
       ownerPrior?: 'granted' | 'none';
       ownerStopped?: boolean;
       kind?: string;
@@ -158,6 +164,22 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
         // The guest's tick is theirs: in the ledger as their yes, held by the owner's stop (as at any venue).
         if (input.consentGiven && channelsWithAddress.includes(ch) && !legacyRevoke[ch]) {
           events.push({ channel: ch, action: 'grant', source: 'splash', heldByOwnerStop: true });
+        }
+      }
+    }
+    // An explicit "I don't want to stay in touch" on the splash: the guest takes back the yes they
+    // gave at this venue, on every channel (not only those this form has an address for). Only a
+    // yes goes: a STOP or an unsubscribe stays as it is, and no answer stays no answer. Not sticky
+    // (`revokedVia: 'splash'`), so a later Accept gives the yes again. A yes the owner's stop is
+    // holding (PR D) is taken back too, so the owner's Resume can't give it back.
+    if (input.consentDeclined && !input.consentGiven) {
+      for (const ch of ['email', 'sms', 'whatsapp'] as Channel[]) {
+        if (events.some((ev) => ev.channel === ch)) continue; // an old opt-out above took it
+        const cur = current[ch];
+        if (cur?.state === 'granted') {
+          events.push({ channel: ch, action: 'revoke', source: 'splash', revokedVia: 'splash', kind: 'splash_no' });
+        } else if (cur?.state === 'revoked' && cur.revokedVia === 'owner' && cur.ownerPrior === 'granted') {
+          events.push({ channel: ch, action: 'revoke', source: 'splash', revokedVia: 'owner', ownerPrior: 'none', ownerStopped: true, kind: 'splash_no' });
         }
       }
     }

@@ -179,8 +179,8 @@ function reasonText(record: DecisionRecord, l: 'en' | 'de'): string {
   if (reason === 'no_consent' && (fact === 'marketing to this guest was stopped' || fact.startsWith('said no to'))) {
     // The guest had said yes; then they or the owner stopped it (PR D). The ledger line next to it says who.
     return l === 'de'
-      ? 'Werbung an diesen Gast gestoppt wurde (von dir, oder der Gast hat sich abgemeldet oder STOP geantwortet)'
-      : 'marketing to this guest was stopped (by you, or the guest unsubscribed or replied STOP)';
+      ? 'Werbung an diesen Gast gestoppt wurde (von dir, oder der Gast hat auf der WLAN-Seite abgelehnt, sich abgemeldet oder STOP geantwortet)'
+      : 'marketing to this guest was stopped (by you, or the guest said no on the Wi-Fi page, unsubscribed or replied STOP)';
   }
   const key = reason.startsWith('missing_value:') ? 'missing_value' : reason;
   return REASON_WORDS[key]?.[l] ?? UNKNOWN_REASON[l];

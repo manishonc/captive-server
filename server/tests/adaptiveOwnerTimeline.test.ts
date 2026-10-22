@@ -380,6 +380,8 @@ test('consent ledger sentences by source, and a consent event the ledger already
     [c({ source: 'brevo_unsubscribed', channel: 'email' }), 'Unsubscribed from emails.', 'Hat sich von E-Mails abgemeldet.'],
     [c({ source: 'brevo_spam', channel: 'email' }), 'Marked an email as spam: no more emails.', 'Hat eine E-Mail als Spam markiert: keine E-Mails mehr.'],
     [c({ source: 'import_legacy' }), 'Had already said no to messages by SMS before (carried over).', 'Hatte Nachrichten per SMS schon früher abgelehnt (übernommen).'],
+    // "I don't want to stay in touch" on a later visit (the guest takes back their yes).
+    [c({ source: 'splash', channel: 'email', sourceRef: { guestId: 'g_no', kind: 'splash_no' } }), 'Said no to messages by email on the Wi-Fi page.', 'Hat auf der WLAN-Seite Nachrichten per E-Mail abgelehnt.'],
   ];
   const sends = { js_own: send('js_own') };
   for (const [input, en, de] of rows) {

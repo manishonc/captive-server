@@ -232,6 +232,8 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     lastName: guest.lastName ?? g.lastName ?? null,
     lang: asLang(event.data.lang) ?? asLang(g.language),
     consentGiven: event.data.consentGiven === true,
+    // An explicit "I don't want to stay in touch" (not a hidden consent step): takes back a yes given here.
+    consentDeclined: event.data.consentAsked === true && event.data.consentGiven !== true,
     emailVerified: Boolean(guest.emailVerified || g.emailVerified),
     // Only this request's own check: the guest doc's flag isn't tied to a number,
     // and a reconnect can change the number under it. A contact keeps a flag it

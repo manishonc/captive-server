@@ -170,6 +170,8 @@ export interface ConnectFixture {
   phone?: string | null;
   phoneCountryCode?: string | null;
   consent?: boolean;
+  /** The guest saw the consent step and tapped a button (with `consent: false`: "I don't want to stay in touch"). */
+  consentAsked?: boolean;
   phoneVerified?: boolean;
   language?: string | null;
   guestId?: string;
@@ -210,6 +212,7 @@ export async function connect(c: ConnectFixture): Promise<string> {
     venueId: c.venue.venueId,
     apVendor: 'aruba',
     consentGiven: c.consent ?? false,
+    consentAsked: c.consentAsked ?? false,
     language: c.language ?? null,
     firstName: c.firstName ?? 'Guest',
     lastName: null,

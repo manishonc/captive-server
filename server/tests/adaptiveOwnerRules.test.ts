@@ -172,8 +172,8 @@ function withFact(fact: string, over: Partial<DecisionRecord> = {}): DecisionRec
   return decision({ checks: [{ rule: 'system', ok: true, fact: 'sending on' }, { rule: 'consent', ok: false, fact }], ...over });
 }
 
-const STOPPED_EN = 'Not sent because marketing to this guest was stopped (by you, or the guest unsubscribed or replied STOP).';
-const STOPPED_DE = 'Nicht gesendet, weil Werbung an diesen Gast gestoppt wurde (von dir, oder der Gast hat sich abgemeldet oder STOP geantwortet).';
+const STOPPED_EN = 'Not sent because marketing to this guest was stopped (by you, or the guest said no on the Wi-Fi page, unsubscribed or replied STOP).';
+const STOPPED_DE = 'Nicht gesendet, weil Werbung an diesen Gast gestoppt wurde (von dir, oder der Gast hat auf der WLAN-Seite abgelehnt, sich abgemeldet oder STOP geantwortet).';
 const NO_YES_EN = 'Not sent because the guest has not said yes to this channel.';
 const NO_YES_DE = 'Nicht gesendet, weil der Gast diesem Kanal nicht zugestimmt hat.';
 
@@ -181,7 +181,7 @@ test('no_consent after a stop says marketing was stopped, EN and DE', () => {
   const d = withFact('marketing to this guest was stopped');
   assertEqual(explainDecision(d, 'en', ZRH), STOPPED_EN, 'en');
   assertEqual(explainDecision(d, 'de', ZRH), STOPPED_DE, 'de');
-  assert(explainDecision(d, 'en', ZRH).includes('marketing to this guest was stopped (by you, or the guest unsubscribed or replied STOP)'), 'en phrase');
+  assert(explainDecision(d, 'en', ZRH).includes('marketing to this guest was stopped (by you, or the guest said no on the Wi-Fi page, unsubscribed or replied STOP)'), 'en phrase');
   assert(explainDecision(d, 'de', ZRH).includes('Werbung an diesen Gast gestoppt wurde'), 'de phrase');
   assertEqual(explainDecision(d, 'fr', ZRH), STOPPED_EN, 'any other language gets English');
   assertEqual(explainDecision({ ...d, mode: 'test' }, 'en', ZRH), STOPPED_EN, 'same words in a test run');

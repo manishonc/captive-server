@@ -37,6 +37,12 @@ export interface ConnectHookInput {
   apVendor: string | null;
   /** The guest ticked the marketing box in this request. */
   consentGiven: boolean;
+  /**
+   * The guest saw the consent step and tapped Accept or "I don't want to stay in touch". With
+   * `consentGiven` false it is an explicit no, which takes back a yes given at this venue
+   * (identity/resolve.ts). False or absent: the venue hides the step (or an older portal build).
+   */
+  consentAsked?: boolean;
   language: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -107,7 +113,7 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
     source: 'portal',
     occurredAt: new Date(occurredAt),
     recordedAt: FieldValue.serverTimestamp(), // commit time (the rollups read the log in this order)
-    data: { apId: input.accessPointId, route: input.route, consentGiven: input.consentGiven, lang: input.language },
+    data: { apId: input.accessPointId, route: input.route, consentGiven: input.consentGiven, consentAsked: input.consentAsked === true, lang: input.language },
     expireAt: retentionFrom(occurredAt),
     schemaVersion: SCHEMA_VERSION,
   });
