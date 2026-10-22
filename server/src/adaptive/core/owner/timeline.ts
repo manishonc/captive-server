@@ -823,6 +823,9 @@ function consentLedgerSentence(l: L, c: TimelineConsentInput, viaOtherPlace: boo
       return t(l, `You stopped marketing by ${ch} for this guest.`, `Du hast Werbung per ${ch} für diesen Gast gestoppt.`);
     case 'import_legacy':
       return t(l, `Had already said no to messages by ${ch} before (carried over).`, `Hatte Nachrichten per ${ch} schon früher abgelehnt (übernommen).`);
+    case 'splash':
+      // "I don't want to stay in touch" on a later visit: the guest took back the yes they gave here.
+      return t(l, `Said no to messages by ${ch} on the Wi-Fi page.`, `Hat auf der WLAN-Seite Nachrichten per ${ch} abgelehnt.`);
     default:
       return t(l, `Said no to messages by ${ch}.`, `Hat Nachrichten per ${ch} abgelehnt.`);
   }

@@ -212,6 +212,11 @@ async function submitConsent(marketing) {
   var privacyPolicyConsent = { given: true,    timestamp: now, version: ver, text: consentText };
   var termsConsent         = { given: true,    timestamp: now, version: ver, text: consentText };
   var marketingConsent     = { given: marketing, timestamp: now, version: ver, text: consentText };
+  // Did the guest see the consent step and tap Accept or "I don't want to stay in touch"?
+  // Not when the venue hides the step: that "no" is ours, so Adaptive must not read it as
+  // the guest taking back an earlier yes. Sent beside marketingConsent, never stored in it.
+  var consentStep  = document.getElementById('step2');
+  var consentAsked = !!consentStep && !consentStep.classList.contains('hidden');
 
   // GDPR audit cookie — 1 year
   document.cookie = 'gdpr_consent=' + encodeURIComponent(JSON.stringify({
@@ -232,6 +237,7 @@ async function submitConsent(marketing) {
     privacyPolicyConsent: privacyPolicyConsent,
     termsConsent: termsConsent,
     marketingConsent: marketingConsent,
+    consentAsked: consentAsked,
   };
 
   // Verification sits AFTER consent, so a code is never sent to someone who then
@@ -722,6 +728,7 @@ async function completeSubmission(verificationToken) {
   var privacyPolicyConsent = p.privacyPolicyConsent;
   var termsConsent = p.termsConsent;
   var marketingConsent = p.marketingConsent;
+  var consentAsked = p.consentAsked === true;
 
   try {
     var res = await fetch('/api/create-user', {
@@ -738,6 +745,7 @@ async function completeSubmission(verificationToken) {
         privacyPolicyConsent,
         termsConsent,
         marketingConsent,
+        consentAsked,
         splashResponses,
         birthdayMonth,
         friendCode,
@@ -766,6 +774,7 @@ async function completeSubmission(verificationToken) {
           privacyPolicyConsent,
           termsConsent,
           marketingConsent,
+          consentAsked,
           splashResponses,
           birthdayMonth,
           friendCode,
