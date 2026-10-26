@@ -26,7 +26,7 @@ import { toJson } from '../store/serialize';
 import { tsMs } from '../store/time';
 import { now, refreshClock } from '../engine/clock';
 import { loadCatalogue, templateVersion, type Catalogue } from './catalogue';
-import { journeyAhead, journeyGoal, stepNamesOf } from '../core/owner/journeyAhead';
+import { goalStillOpen, journeyAhead, journeyGoal, stepNamesOf, waitsForOfferEnd } from '../core/owner/journeyAhead';
 import { venueScope } from '../identity/resolve';
 import { writeOwnerMarketing } from '../identity/consent';
 import { contactPointId } from '../identity/key';
@@ -367,6 +367,19 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
     stepNames: journeyStepNames(cat, lang),
   });
   const cv = cvSnap.data() as ContactVenueDoc;
+  // Guest full view: whether a goal can still end a journey early is read on the engine's clock.
+  await refreshClock();
+  const nowMs = now();
+  // Guest full view: credits per venue and channel, counted like `creditsUsed`.
+  const creditsByVenue: Record<string, { total: number; byChannel: Record<string, number> }> = {};
+  for (const s of Object.values(record.sends)) {
+    const n = s.mode === 'live' && s.status !== 'failed' ? Number(s.credits) || 0 : 0;
+    if (!n || !s.venueId || !venues[s.venueId]) continue;
+    const v = (creditsByVenue[s.venueId] ??= { total: 0, byChannel: {} });
+    v.total += n;
+    const ch = s.channel ?? 'other';
+    v.byChannel[ch] = (v.byChannel[ch] ?? 0) + n;
+  }
   return {
     contactId,
     guest: { ...maskedGuest(contact), lang: contact.lang ?? null },
@@ -385,6 +398,9 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
         // Guest full view ("What will happen"): what comes next and what ends the journey early.
         const def = instanceDefinition(cat, i.data.journeyKey, i.data.templateVersion);
         const steps = def ? stepNamesOf(def, lang) : {};
+        const goalOpen = active && def !== null && goalStillOpen(def, { goal: i.data.goal, startedAtMs: tsMs(i.data.startedAt) }, nowMs);
+        // A reached goal: the offer is used, and the journey ends once its thank-you goes.
+        const offerOpen = active && !i.data.goal;
         return {
           journeyKey: i.data.journeyKey,
           name: names[i.data.journeyKey] ?? i.data.journeyKey,
@@ -399,8 +415,9 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
           purpose: purposes[i.data.journeyKey] ?? null,
           waitingFor: active ? i.data.waiting?.kind ?? null : null,
           next: active && def ? journeyAhead(def, { status: i.data.status, waiting: i.data.waiting, cursor: i.data.cursor }, steps) : null,
-          offerEndsAt: active ? iso(i.data.vars?.offerExpiresAt) : null,
-          goal: def ? journeyGoal(def, steps) : null,
+          offerEndsAt: offerOpen ? iso(i.data.vars?.offerExpiresAt) : null,
+          endsWithOffer: offerOpen && def !== null && waitsForOfferEnd(def, i.data.waiting?.nodeId ?? i.data.cursor?.nodeId),
+          goal: goalOpen && def ? journeyGoal(def, steps) : null,
         };
       })
       .sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? ''))),
@@ -408,6 +425,7 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
       .filter((s) => venues[s.data.venueId])
       .map((s) => ({ stayId: s.id, venueId: s.data.venueId, checkIn: s.data.checkIn, checkOut: s.data.checkOut, nights: s.data.nights, status: s.data.status, linkedBy: s.data.linkedBy ?? 'guest' })),
     creditsUsed: Object.values(record.sends).reduce((sum, s) => sum + (s.mode === 'live' && s.status !== 'failed' ? Number(s.credits) || 0 : 0), 0),
+    creditsByVenue,
     timeline,
     truncated: record.truncated,
   };

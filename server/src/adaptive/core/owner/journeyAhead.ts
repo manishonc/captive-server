@@ -10,6 +10,7 @@
  */
 
 import { pickLang, type JourneyDefinition } from '../schemas';
+import { durationMs } from '../runtime/time';
 
 export interface OwnerStep {
   key: string;
@@ -87,6 +88,43 @@ export function journeyAhead(def: JourneyDefinition, state: AheadState, names: R
     key = next.edges[way];
   }
   return null;
+}
+
+/**
+ * The journey waits for its issued offer to run out on some way on from `from` (a wait_until
+ * anchored on the offer's end, as Welcome → come back v2 does), so the offer's end is also when
+ * the journey ends. False for a journey that ends earlier whatever the offer (v1 ends ~5 days in).
+ */
+export function waitsForOfferEnd(def: JourneyDefinition, from: string | null | undefined): boolean {
+  if (!from || !def.nodes[from]) return false;
+  const seen = new Set<string>();
+  const queue = [from];
+  while (queue.length) {
+    const key = queue.shift() as string;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const node = def.nodes[key];
+    if (!node) continue;
+    if (node.type === 'wait_until' && (node.config as { anchor?: unknown }).anchor === 'offer.expiresAt') return true;
+    queue.push(...Object.values(node.edges));
+  }
+  return false;
+}
+
+/**
+ * The goal can still end the journey early: not reached yet (a reached goal leaves the journey
+ * running only until its thank-you goes, often held overnight), and its window (`within`,
+ * counted from the start) not over.
+ */
+export function goalStillOpen(def: JourneyDefinition, inst: { goal?: unknown; startedAtMs: number | null }, nowMs: number): boolean {
+  if (!def.goal || inst.goal) return false;
+  let within: number | null = null;
+  try {
+    within = durationMs(def.goal.within);
+  } catch {
+    within = null;
+  }
+  return !(within !== null && inst.startedAtMs !== null && nowMs - inst.startedAtMs > within);
 }
 
 /** The journey's goal and the message after it; null for a journey without a goal. */

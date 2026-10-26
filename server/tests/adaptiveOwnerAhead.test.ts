@@ -9,8 +9,9 @@
  */
 
 import { journeyDefinitionSchema, type JourneyDefinition } from '../src/adaptive/core/schemas';
-import { journeyAhead, journeyGoal, stepNamesOf } from '../src/adaptive/core/owner/journeyAhead';
+import { goalStillOpen, journeyAhead, journeyGoal, stepNamesOf, waitsForOfferEnd } from '../src/adaptive/core/owner/journeyAhead';
 import { welcomeSecondVisitV2 } from '../src/adaptive/seed/definitions/journeysWelcomeV2';
+import { welcomeSecondVisit } from '../src/adaptive/seed/definitions/journeysRestaurant';
 import { wifiInfoCard } from '../src/adaptive/seed/definitions/journeysGuestInfo';
 
 let passed = 0;
@@ -82,6 +83,23 @@ test('nothing ahead for an ended journey, one that waits for nothing, an unknown
 test("the goal: Welcome → come back ends early when the offer is used, with a thank-you; the Wi-Fi card has none", () => {
   assertEqual(journeyGoal(welcome, EN), { event: 'offer.redeemed', step: { key: 'thanks', name: 'Thank you' } }, 'welcome');
   assertEqual(journeyGoal(wifi, stepNamesOf(wifi, 'en')), null, 'Wi-Fi card');
+});
+
+test('the offer’s end is the journey’s end only where the journey waits for it (v2), never on v1 or after the wait', () => {
+  const v1 = journeyDefinitionSchema.parse(welcomeSecondVisit.definition);
+  assertEqual(['w1', 'w2', 'w_redeem', 'w_offer', 'last'].map((k) => waitsForOfferEnd(welcome, k)), [true, true, true, true, true], 'v2 waits for the offer from every step before it');
+  assertEqual(['w1', 'w2', 'w_redeem', 'last'].map((k) => waitsForOfferEnd(v1, k)), [false, false, false, false], 'v1 ends earlier whatever the offer');
+  assertEqual([waitsForOfferEnd(welcome, 'x_exhausted'), waitsForOfferEnd(welcome, null), waitsForOfferEnd(welcome, 'gone')], [false, false, false], 'from an end, nothing or an unknown step');
+});
+
+test('the goal is open until it is reached or its window is over', () => {
+  const start = Date.UTC(2026, 9, 20, 17, 42);
+  const day = 24 * 3600 * 1000;
+  assertEqual(goalStillOpen(welcome, { goal: null, startedAtMs: start }, start + day), true, 'open');
+  assertEqual(goalStillOpen(welcome, { goal: { reachedAt: start + day, eventId: 'ev' }, startedAtMs: start }, start + day), false, 'reached: the thank-you is on its way');
+  assertEqual(goalStillOpen(welcome, { goal: null, startedAtMs: start }, start + 91 * day), false, 'past its 90-day window');
+  assertEqual(goalStillOpen(welcome, { goal: null, startedAtMs: null }, start + 91 * day), true, 'no start time: kept');
+  assertEqual(goalStillOpen(wifi, { goal: null, startedAtMs: start }, start), false, 'no goal');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

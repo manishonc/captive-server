@@ -211,10 +211,13 @@ message in the timeline's language — "Welcome offer", "Last chance" — else `
 the send's key). Every `journeys[]` entry also has `waitingFor` (`timer` | `events` | `send_due`
 while running, like the list rows), `next` (`{ kind: 'message' | 'end', step, afterWait, ifNoReaction }`:
 the next message step, or that the journey ends when its wait is over; `null` when it isn't running
-or the way on depends on the guest), `offerEndsAt` (the issued offer's end, while running) and
-`goal` (`{ event, step }`: what ends it early — `offer.redeemed` … — and the message after it).
-`ifNoReaction: true` means the guest is being waited for: `next` only comes if they don't react
-before `nextAt`. An older cms ignores them.
+or the way on depends on the guest), `offerEndsAt` (the issued offer's end, while running and not
+yet used), `endsWithOffer` (the journey waits for that end, as Welcome → come back v2 does: the
+offer's end is also the journey's; `false` on v1, which ends earlier) and `goal` (`{ event, step }`:
+what ends it early — `offer.redeemed` … — and the message after it; `null` once reached or past its
+`within` window). `ifNoReaction: true` means the guest is being waited for: `next` only comes if
+they don't react before `nextAt`. `creditsByVenue` (`{ [venueId]: { total, byChannel } }`) counts
+like `creditsUsed`, per venue. An older cms ignores them.
 
 ### Guest pages — `/public/…` (server-to-server; the cms page calls it)
 
