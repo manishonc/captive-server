@@ -39,6 +39,7 @@ import { loadCatalogue, templateVersion } from './catalogue';
 import { loadGuestInfo, loadVenueContext } from '../engine/context';
 import { linkGates, missingReason, renderMessage, renderValues, variantContent, variantEligible, type LinkKind } from '../engine/renderSend';
 import { composeEmail, maskSecretValues, placeholderLink, SHORT_CODE_LENGTH, smsFinalText } from '../send/compose';
+import { loadDesignBrand } from '../send/designBrand';
 import { renderText } from '../core/render';
 import { VISITOR_BASE_URL, validBookingUrl } from '../send/links';
 import { registerAdapters, type AdapterRegistry } from '../send/adapters';
@@ -287,10 +288,28 @@ export async function testSend(tenantUserId: string, venueId: string, body: unkn
     const email = content.content as { preheader?: string; bodyFormat?: 'text' | 'html' | 'blocks' };
     const pre = renderText(email.preheader ?? '', values).text;
     // The footer tag as guests get it: hidden when the account's plan hides it (engine/sendPath.ts).
-    const poweredBy = await getEntitlements(tenantUserId)
-      .then((e) => !e.flags?.hidePoweredBy)
-      .catch(() => true);
-    const composed = composeEmail({ body: rendered.text, bodyFormat: email.bodyFormat ?? 'text', preheader: pre, lang: wordingLang, unsubscribeUrl: null, poweredBy });
+    const [poweredBy, brand] = await Promise.all([
+      getEntitlements(tenantUserId)
+        .then((e) => !e.flags?.hidePoweredBy)
+        .catch(() => true),
+      // The guest's design: the account's branding and this venue's name, address and logo.
+      loadDesignBrand(tenantUserId, { name: ctx?.venueName || venue.name || '', address: ctx?.venueAddress ?? venue.address, logoUrl: ctx?.venueLogoUrl }, { fresh: true }),
+    ]);
+    const offer = typeof vars.offerKey === 'string' ? offers.find((o) => o.offerKey === vars.offerKey) : undefined;
+    const composed = composeEmail({
+      body: rendered.text,
+      bodyFormat: email.bodyFormat ?? 'text',
+      preheader: pre,
+      lang: wordingLang,
+      unsubscribeUrl: null,
+      poweredBy,
+      design: {
+        brand,
+        content: content.content as { subject?: string; preheader?: string; body: string; bodyFormat?: 'text' | 'html' | 'blocks' },
+        values,
+        facts: { purpose, pool, offer: offer ? { kind: offer.kind, value: offer.value, currency: offer.currency } : null },
+      },
+    });
     if ('error' in composed) throw new ApiError('bad_request', "This email's format can't be sent yet");
     result = await adapter.send({ kind: 'email', to, subject: `[Test] ${rendered.subject ?? ''}`, html: composed.html, text: composed.text, sendKey, unsubscribeUrl: null });
   }

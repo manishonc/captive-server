@@ -28,6 +28,9 @@ export interface VenueContext {
   tenantUserId: string;
   venueName: string;
   venueType: string;
+  /** The venue's address and own logo as the venue doc has them (the email footer and logo). */
+  venueAddress?: unknown;
+  venueLogoUrl?: unknown;
   tz: string;
   adaptive: AdaptiveVenueDoc;
   /** The one active marketing playbook, when the venue is on. */
@@ -69,6 +72,8 @@ export async function loadVenueContext(venueId: string): Promise<VenueContext | 
     tenantUserId: adaptive.tenantUserId,
     venueName: String(venue.venue_name ?? venue.name ?? ''),
     venueType: String(venue.venue_type ?? adaptive.businessType ?? 'other'),
+    venueAddress: venue.address,
+    venueLogoUrl: venue.logoUrl,
     tz: tz ?? 'Europe/Zurich',
     adaptive,
     marketing,

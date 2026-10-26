@@ -61,10 +61,12 @@ import {
   type OwnerPlaybookView,
 } from './catalogue';
 import { getCreditConfig } from '../../services/credits';
-import { isLapsedForSending } from '../../services/entitlements';
+import { getEntitlements, isLapsedForSending } from '../../services/entitlements';
 import { applyAudienceToStats } from './audience';
 import { launchAwareOverview } from './startSending';
 import { previewVersionsFor, type PreviewVersion } from './previewVersions';
+import { loadPreviewBrand } from '../send/designBrand';
+import { blocksTemplateText } from '../core/emailBlocks';
 import { cachedEngineSettings, whatsappSendingOn } from '../store/engineSettings';
 
 /** PR W3: the channels journeys send on now (the owner screens show WhatsApp as used only when it is). */
@@ -361,7 +363,9 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
       const email = c as NonNullable<ChannelContent['email']>;
       const subject = renderText(email.subject, values);
       const pre = renderText(email.preheader || '', values);
-      const bodyText = renderText(email.body, values);
+      // A blocks wording reads as text, as the engine reads it; never the raw JSON.
+      const template = email.bodyFormat === 'blocks' ? blocksTemplateText(email.body) : email.body;
+      const bodyText = template === null ? { text: '', unknown: ['email.blocks'] } : renderText(template, values);
       return {
         ...base,
         channel: 'email' as const,
@@ -375,6 +379,13 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
     const sms = renderText((c as NonNullable<ChannelContent['sms']>).text, values);
     return { ...base, channel: 'sms' as const, variantName: variant.name, text: sms.text, unknown: sms.unknown };
   });
+  // The email as guests see it: the account's branding (no branding saved: the neutral look).
+  const [brand, poweredBy] = await Promise.all([
+    loadPreviewBrand(tenantUserId, input.venueId, venueName),
+    getEntitlements(tenantUserId)
+      .then((e) => !e.flags?.hidePoweredBy)
+      .catch(() => true),
+  ]);
   // PR PV: each message on every channel it can go by (the engine picks the channel per guest).
   const versions = await previewVersionsFor({
     journeyKey: input.journeyKey,
@@ -385,6 +396,7 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
     venueName,
     slots,
     offers: content.offerMenuDefaults,
+    design: { brand, poweredBy },
   });
   messages.forEach((m, i) => {
     const v = versions[i];

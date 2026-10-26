@@ -66,9 +66,10 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
   once the gate says yes); the SMS gets a STOP line in the guest's language; credits = rate card ×
   parts of that exact text, counted as the carrier bills them (PR F0: `core/runtime/smsParts.ts`, an emoji
   is two UTF-16 units). Adaptive always charges, whatever `ENFORCE_CREDITS` says.
-- **Email:** plain-text wording becomes simple HTML (escaped), with the preheader, a localized unsubscribe
-  footer + `List-Unsubscribe` headers (marketing), "Powered by HeidiFi" unless the plan hides it, and the
-  sendKey in `X-Mailin-custom` so Brevo webhooks find the send. No open pixel.
+- **Email:** the wording is drawn in the venue's email design (Voucher, see "Email design" below), with the
+  preheader, a localized footer with the unsubscribe link + `List-Unsubscribe` headers (marketing), "Powered by
+  HeidiFi" unless the plan hides it, and the sendKey in `X-Mailin-custom` so Brevo webhooks find the send. If the
+  design can't draw a plain-text wording, it goes out in the old simple HTML (escaped). No open pixel.
 - **SMS:** the same Twilio sender and status-callback URL as today (the webhook's signature check
   depends on it); statuses are matched by the message SID.
 - A channel without credentials is skipped (the ladder moves on) and HeidiFi is alerted.
@@ -697,6 +698,47 @@ Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-w3-brief.md`. Journeys
   WhatsApp rule is reported before "no wording".
 - **Owner screens:** the overview and the preview answer `sendingChannels` (`['sms','email']`, + `'whatsapp'`
   when on); W01 (setup info) shows only while off.
+
+## Email design (Voucher)
+
+Approved by Manish on 2026-10-26 (`send/design/`, pure; the branding read is `send/designBrand.ts`). Every journey
+email has the same frame: the venue's logo (or its name as a wordmark), a short note, **one slip** on the venue's
+background colour, the sign-off, and a footer with the venue's address, why the guest gets it, Unsubscribe
+(marketing), its social links and "Powered by HeidiFi". The slip holds the one thing the guest can use:
+
+| Wording uses | Slip |
+|---|---|
+| `{{link.offer}}` (or `{{link.booking}}` on a journey with an offer) | Voucher: the offer's value from the offer menu (10 %, CHF 5; a free item shows its label), what it is, "Valid until" + the date, the button on a perforated stub |
+| `{{link.rating}}` | Five stars, each opening the rating page |
+| `{{link.hub}}` on `stay_welcome` / `stay_checkout` / `checkout_info` / `wifi_info` | Key card from Guest info: check-in or check-out time and date, the Wi-Fi network, the address (never a password or door code the wording didn't use); the button under the slip |
+| a "Your code: `{{referral.code}}`" line | The Bring-a-friend code |
+| `{{link.hub}}` elsewhere, `{{link.booking}}` without an offer | No slip, one button |
+
+- **Brand.** The account's Branding page (`CaptivePortal_TenantBranding/{tenantUserId}`): logo, dark-background
+  logo, primary / secondary / accent colour, font (5 email-safe ones), website and social links; the venue's
+  name, address and own logo (used when the account has none). Read once per account per 5 minutes per process.
+  No branding saved: neutral ink, Helvetica, the venue name as the wordmark. A failed read: the same.
+- **Readable whatever the brand.** Text on the brand fill is white or dark ink, whichever reads better (4.5:1;
+  if neither does, the fill moves, never the text); the brand as text is darkened to 4.5:1; the secondary colour
+  is the page only when dark text reads on it, else a light tint of the primary; stars use the accent at 3:1, else
+  the primary. Dark mode (Apple Mail / iOS `prefers-color-scheme`, Outlook.com `[data-ogsc]`): a designed dark
+  version with the logos swapped (the light logo on a white plate when there is no dark one).
+- **Plain-text wordings** (all seeded ones) are read as blocks at send time, never changed in the database
+  (`send/design/fromText.ts`): the subject is the heading; paragraphs stay in order; the wording's first journey
+  link leaves the text and becomes the slip's button (a paragraph that only labelled it, "Your offer:", goes with
+  it), and the slip sits where the link was; the last paragraph is the sign-off when it ends with
+  `{{venue.name}}`. The design only turns links the wording already has into buttons, so every link is still one
+  the engine minted. The text/plain part is the wording as before.
+- **Blocks wordings** (`bodyFormat: 'blocks'`, the contract for the AI copy writer, F2b): the body is JSON
+  `{"v":1,"blocks":[…]}`, checked by `core/emailBlocks.ts`: one `heading` (≤ 64 characters, no emoji), 1–3
+  `text` (≤ 300 each), at most one of `offer` / `rating` / `info` (with `href` = `{{link.offer|rating|hub|booking}}`,
+  `offer`/`info` with an optional `button` label ≤ 24), at most one `button` (when no offer/info carries it),
+  one `image` (https, alt text), one `signoff` (≤ 40); merge fields count 12 characters; no typed links and no
+  journey links in text; at most one emoji per email. A body that breaks a rule is never sent (`missing_value:email.blocks`).
+- **Never breaks a send:** if the design throws, a plain-text wording goes out in the old simple HTML.
+- **Owner preview:** `POST /setups/preview` adds `html` (the light look) to every email version; the cms phone
+  shows it in a sandboxed frame (no scripts, no clicks).
+- Size: about 9–16 KB per email (Gmail clips at 102 KB). Outlook desktop draws square corners and no shadow.
 
 ## Signals coming back
 
