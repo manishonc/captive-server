@@ -16,8 +16,8 @@ import { db } from '../../firebase';
 import { COL, contactVenueId } from '../store/collections';
 import type { ConsentEntry, ContactDoc, ContactPointDoc, ContactVenueDoc, JourneySendDoc } from '../store/engineTypes';
 import { whatsappBlocked } from '../core/runtime/whatsappRules';
-import type { Actor } from '../core/schemas';
-import { pickLang } from '../core/schemas';
+import type { Actor, JourneyDefinition } from '../core/schemas';
+import { journeyDefinitionSchema, pickLang } from '../core/schemas';
 import type { Channel } from '../core/constants';
 import { ApiError, notFound } from '../api/errors';
 import { getVenues, listTenantVenues } from '../store/tenantData';
@@ -25,7 +25,8 @@ import { listVenuePlaybooks } from '../store/venueSetups';
 import { toJson } from '../store/serialize';
 import { tsMs } from '../store/time';
 import { now, refreshClock } from '../engine/clock';
-import { loadCatalogue } from './catalogue';
+import { loadCatalogue, templateVersion, type Catalogue } from './catalogue';
+import { goalStillOpen, journeyAhead, journeyGoal, stepNamesOf, waitsForOfferEnd } from '../core/owner/journeyAhead';
 import { venueScope } from '../identity/resolve';
 import { writeOwnerMarketing } from '../identity/consent';
 import { contactPointId } from '../identity/key';
@@ -75,6 +76,37 @@ async function journeyNames(lang: 'en' | 'de'): Promise<Record<string, string>> 
   const out: Record<string, string> = {};
   for (const [key, rec] of cat.templates) out[key] = pickLang(rec.header.name, lang);
   return out;
+}
+
+/**
+ * Guest full view: each journey's send steps by name, from every published version (the newest
+ * wins), so a guest still on an older version gets names too. Cached with the catalogue.
+ */
+const stepNameCache = new WeakMap<Catalogue, Partial<Record<'en' | 'de', Record<string, Record<string, string>>>>>();
+function journeyStepNames(cat: Catalogue, lang: 'en' | 'de'): Record<string, Record<string, string>> {
+  const hit = stepNameCache.get(cat)?.[lang];
+  if (hit) return hit;
+  const out: Record<string, Record<string, string>> = {};
+  for (const [key, rec] of cat.templates) {
+    const names: Record<string, string> = {};
+    for (const v of [...rec.versions].filter((x) => x.state === 'published').sort((a, b) => a.version - b.version)) {
+      const parsed = journeyDefinitionSchema.safeParse(v.definition);
+      if (parsed.success) Object.assign(names, stepNamesOf(parsed.data, lang));
+    }
+    out[key] = names;
+  }
+  stepNameCache.set(cat, { ...stepNameCache.get(cat), [lang]: out });
+  return out;
+}
+
+/** The definition an instance runs, or null when its version is gone or unreadable (the guest view still loads). */
+function instanceDefinition(cat: Catalogue, journeyKey: unknown, version: unknown): JourneyDefinition | null {
+  if (typeof journeyKey !== 'string') return null;
+  try {
+    return templateVersion(cat, journeyKey, Number(version))?.definition ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** PR F0: each journey's purpose, so the owner's guest row can tell an info journey from marketing. */
@@ -277,6 +309,7 @@ export async function loadGuestRecord(contactId: string, tenantUserId: string | 
       decision: d.decision ?? null,
       kind: d.kind ?? null,
       bandit: d.bandit ?? null,
+      nodeId: d.nodeId ?? null,
       raw: d,
     };
   }
@@ -319,6 +352,7 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
   ]);
   // PR F0: the cms drawer words a running marketing journey like the guest's row (the catalogue is cached).
   const purposes = await journeyPurposes();
+  const cat = await loadCatalogue();
   const timeline = buildTimeline({
     tenantUserId,
     events: record.events,
@@ -330,8 +364,22 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
     audience: 'owner',
     defaultTz: venues[venueId]?.tz,
     offerLabels,
+    stepNames: journeyStepNames(cat, lang),
   });
   const cv = cvSnap.data() as ContactVenueDoc;
+  // Guest full view: whether a goal can still end a journey early is read on the engine's clock.
+  await refreshClock();
+  const nowMs = now();
+  // Guest full view: credits per venue and channel, counted like `creditsUsed`.
+  const creditsByVenue: Record<string, { total: number; byChannel: Record<string, number> }> = {};
+  for (const s of Object.values(record.sends)) {
+    const n = s.mode === 'live' && s.status !== 'failed' ? Number(s.credits) || 0 : 0;
+    if (!n || !s.venueId || !venues[s.venueId]) continue;
+    const v = (creditsByVenue[s.venueId] ??= { total: 0, byChannel: {} });
+    v.total += n;
+    const ch = s.channel ?? 'other';
+    v.byChannel[ch] = (v.byChannel[ch] ?? 0) + n;
+  }
   return {
     contactId,
     guest: { ...maskedGuest(contact), lang: contact.lang ?? null },
@@ -345,24 +393,39 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
     },
     journeys: record.instances
       .filter((i) => venues[i.data.venueId])
-      .map((i) => ({
-        journeyKey: i.data.journeyKey,
-        name: names[i.data.journeyKey] ?? i.data.journeyKey,
-        venueId: i.data.venueId,
-        venueName: venues[i.data.venueId]?.name ?? null,
-        status: i.data.status,
-        mode: i.data.mode === 'live' ? 'live' : 'test',
-        startedAt: iso(i.data.startedAt),
-        endedAt: iso(i.data.endedAt),
-        exitReason: i.data.exitReason ?? null,
-        nextAt: i.data.status === 'active' ? iso(i.data.waiting?.untilAt) : null,
-        purpose: purposes[i.data.journeyKey] ?? null,
-      }))
+      .map((i) => {
+        const active = i.data.status === 'active';
+        // Guest full view ("What will happen"): what comes next and what ends the journey early.
+        const def = instanceDefinition(cat, i.data.journeyKey, i.data.templateVersion);
+        const steps = def ? stepNamesOf(def, lang) : {};
+        const goalOpen = active && def !== null && goalStillOpen(def, { goal: i.data.goal, startedAtMs: tsMs(i.data.startedAt) }, nowMs);
+        // A reached goal: the offer is used, and the journey ends once its thank-you goes.
+        const offerOpen = active && !i.data.goal;
+        return {
+          journeyKey: i.data.journeyKey,
+          name: names[i.data.journeyKey] ?? i.data.journeyKey,
+          venueId: i.data.venueId,
+          venueName: venues[i.data.venueId]?.name ?? null,
+          status: i.data.status,
+          mode: i.data.mode === 'live' ? 'live' : 'test',
+          startedAt: iso(i.data.startedAt),
+          endedAt: iso(i.data.endedAt),
+          exitReason: i.data.exitReason ?? null,
+          nextAt: active ? iso(i.data.waiting?.untilAt) : null,
+          purpose: purposes[i.data.journeyKey] ?? null,
+          waitingFor: active ? i.data.waiting?.kind ?? null : null,
+          next: active && def ? journeyAhead(def, { status: i.data.status, waiting: i.data.waiting, cursor: i.data.cursor }, steps) : null,
+          offerEndsAt: offerOpen ? iso(i.data.vars?.offerExpiresAt) : null,
+          endsWithOffer: offerOpen && def !== null && waitsForOfferEnd(def, i.data.waiting?.nodeId ?? i.data.cursor?.nodeId),
+          goal: goalOpen && def ? journeyGoal(def, steps) : null,
+        };
+      })
       .sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? ''))),
     stays: record.stays
       .filter((s) => venues[s.data.venueId])
       .map((s) => ({ stayId: s.id, venueId: s.data.venueId, checkIn: s.data.checkIn, checkOut: s.data.checkOut, nights: s.data.nights, status: s.data.status, linkedBy: s.data.linkedBy ?? 'guest' })),
     creditsUsed: Object.values(record.sends).reduce((sum, s) => sum + (s.mode === 'live' && s.status !== 'failed' ? Number(s.credits) || 0 : 0), 0),
+    creditsByVenue,
     timeline,
     truncated: record.truncated,
   };

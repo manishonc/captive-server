@@ -14,6 +14,7 @@ import { join } from 'path';
 import {
   TIMELINE_EVENT_TYPES,
   buildTimeline,
+  messageIdOf,
   offerLabelText,
   offerLabelsFrom,
   type BuildTimelineArgs,
@@ -669,6 +670,67 @@ test('offer.issued: German label in the German timeline; English unchanged; anot
   const admin = build({ events: [issued], lang: 'de', offerLabels, audience: 'admin' });
   assertEqual(admin[0].sentence, 'Angebot erhalten: „Gratis-Kaffee“, 14 Tage gültig.', 'the admin view');
   assertEqual((admin[0].detail?.data as Record<string, unknown>).label, 'Free coffee', 'the admin detail keeps what was stored');
+});
+
+// ── Guest full view: reason, step, messageId ─────────────────────────────────
+
+test('a skipped, held-back or not-started line carries its reason key; other lines carry none', () => {
+  const skip = decision({ result: 'skip', reason: 'guest_info_missing' });
+  const quiet = decision({ result: 'defer', rule: 'quiet_hours', reason: 'quiet_hours', until: T + HOUR_MS });
+  const items = build({
+    events: [
+      ev('send.skipped', { decision: skip }, { ...J, nodeId: 's', sendKey: 'js_skip' }),
+      ev('send.deferred', { decision: quiet }, { ...J, occurredAt: T - 1000 }),
+      ev('message.sent', { mode: 'live', channel: 'sms', credits: 15 }, { ...J, sendKey: 'js_live', channel: 'sms', occurredAt: T - 2000 }),
+      ev('journey.not_started', { reason: 'late_connect' }, { occurredAt: T - 3000 }),
+    ],
+  });
+  assertEqual(
+    items.map((i) => [i.kind, i.reason]),
+    [['send.skipped', 'guest_info_missing'], ['send.deferred', 'quiet_hours'], ['message.sent', null], ['journey.not_started', 'late_connect']],
+    'reasons',
+  );
+});
+
+test('send lines name their step from stepNames (a provider line through its send); without names, no step', () => {
+  const stepNames = { welcome: { s1: 'Welcome offer', last: 'Last chance' } };
+  const sends = { js_s1: send('js_s1', { nodeId: 's1' }) };
+  const quiet = decision({ result: 'defer', rule: 'quiet_hours', reason: 'quiet_hours', until: T + 9 * HOUR_MS });
+  const events = [
+    ev('message.sent', { mode: 'live', channel: 'sms', credits: 15 }, { ...J, nodeId: 's1', sendKey: 'js_s1', channel: 'sms' }),
+    ev('message.delivered', {}, { ...J, sendKey: 'js_s1', channel: 'sms', occurredAt: T + 1000 }),
+    ev('send.deferred', { decision: quiet }, { ...J, nodeId: 'last', occurredAt: T + 2000 }),
+    ev('journey.entered', { mode: 'live' }, { ...J, occurredAt: T - 1000 }),
+  ];
+  const byKind = Object.fromEntries(build({ stepNames, sends, events }).map((i) => [i.kind, i.step]));
+  assertEqual(byKind['message.sent'], { key: 's1', name: 'Welcome offer' }, 'the sent line');
+  assertEqual(byKind['message.delivered'], { key: 's1', name: 'Welcome offer' }, 'the delivered line, through its send');
+  assertEqual(byKind['send.deferred'], { key: 'last', name: 'Last chance' }, 'the held-back line');
+  assertEqual(byKind['journey.entered'], null, 'a journey line has no step');
+  assert(build({ sends, events }).every((i) => i.step === null), 'no stepNames → no step');
+});
+
+test('every line about one message shares an opaque messageId, never its send key; other lines have none', () => {
+  const sends = { js_s1: send('js_s1'), js_s2: send('js_s2', { channel: 'email' }) };
+  const items = build({
+    sends,
+    events: [
+      ev('message.sent', { mode: 'live', channel: 'sms', credits: 15 }, { ...J, sendKey: 'js_s1', channel: 'sms' }),
+      ev('message.delivered', {}, { ...J, sendKey: 'js_s1', channel: 'sms', occurredAt: T + 1000 }),
+      ev('message.clicked', {}, { ...J, sendKey: 'js_s1', channel: 'sms', occurredAt: T + 2000 }),
+      ev('message.sent', { mode: 'live', channel: 'email', credits: 1 }, { ...J, sendKey: 'js_s2', channel: 'email', occurredAt: T + 3000 }),
+      ev('visit.started', { visitNumber: 1, isFirstVisit: true }, { occurredAt: T - 5000 }),
+    ],
+    consents: [{ id: 'cs_yes', occurredAt: T - 6000, venueId: 'v_cafe', channel: 'sms', action: 'grant', source: 'splash', tenantUserId: TENANT }],
+  });
+  const sms = [...new Set(items.filter((i) => i.kind.startsWith('message.') && i.channel === 'sms').map((i) => i.messageId))];
+  const email = items.find((i) => i.kind === 'message.sent' && i.channel === 'email')?.messageId;
+  assertEqual(sms.length, 1, 'one id for the SMS lines');
+  assert(typeof sms[0] === 'string' && /^m_[0-9a-f]{16}$/.test(sms[0]), `opaque id (${sms[0]})`);
+  assertEqual(sms[0], messageIdOf('js_s1'), 'stable');
+  assert(email && email !== sms[0], 'another message, another id');
+  assert(!JSON.stringify(items).includes('js_s'), 'no send key in the owner items');
+  assertEqual(items.filter((i) => i.kind === 'visit.started' || i.kind === 'consent.granted').map((i) => i.messageId), [null, null], 'no id on visits and consent');
 });
 
 // ── Purity ───────────────────────────────────────────────────────────────────

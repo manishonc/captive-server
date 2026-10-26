@@ -65,6 +65,8 @@ export interface TimelineSendInput {
   kind?: string | null;
   /** PR F1: the send's bandit block (`JourneySends.bandit`, as stored); admin detail only. */
   bandit?: unknown;
+  /** The journey step that made this send (names a provider event's step, which carries none itself). */
+  nodeId?: string | null;
 }
 
 export interface TimelineConsentInput {
@@ -102,6 +104,15 @@ export interface TimelineItem {
   channel: string | null;
   /** Credits this item spent (live sends only; 0 = free). */
   credits: number | null;
+  /**
+   * Guest full view: why a step wasn't sent or was held back, as the decision's rule key
+   * (`guest_info_missing`, `quiet_hours` …), so the owner's screen can offer the fix. Null otherwise.
+   */
+  reason?: string | null;
+  /** Guest full view: the journey step a send line belongs to, by its key and name (the message's, in the timeline's language). */
+  step?: { key: string; name: string } | null;
+  /** Guest full view: the same opaque id on every line about one message (sent, delivered, opened …). Never the send's key. */
+  messageId?: string | null;
   /** Admins only. */
   detail?: Record<string, unknown>;
 }
@@ -124,6 +135,8 @@ export interface BuildTimelineArgs {
    * `offerLabelsFrom`). Only this tenant's venues. Left out → the label the event stored.
    */
   offerLabels?: OfferLabels;
+  /** By journeyKey, then step key: each send step's name in `lang` (see `stepNamesOf`). Left out → no `step` on the lines. */
+  stepNames?: Record<string, Record<string, string>>;
 }
 
 /** Offer labels by venueId, then offerKey. */
@@ -951,6 +964,25 @@ function iso(ms: number): string {
   return new Date(Number.isFinite(ms) ? ms : 0).toISOString();
 }
 
+/** The steps whose line says why something wasn't sent (or not yet): they carry the decision's reason key. */
+const REASON_TYPES = new Set(['send.skipped', 'send.blocked', 'send.deferred', 'journey.not_started']);
+
+/**
+ * An opaque, stable id for one message, from its send key (which owners never see): two
+ * FNV-1a hashes side by side. Only ties a message's lines together on the owner's screen.
+ */
+export function messageIdOf(sendKey: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  for (let i = 0; i < sendKey.length; i += 1) {
+    const c = sendKey.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x01000193) >>> 0;
+    b = (b ^ (b >>> 13)) >>> 0;
+  }
+  return `m_${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}`;
+}
+
 /** The guest's history, newest first. */
 export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
   const l: L = args.lang === 'de' ? 'de' : 'en';
@@ -959,6 +991,7 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
   const sends = args.sends ?? {};
   const names = args.journeyNames ?? {};
   const offerLabels = args.offerLabels ?? {};
+  const stepNames = args.stepNames ?? {};
   const fallbackTz = isValidTimeZone(args.defaultTz) ? args.defaultTz : FALLBACK_TZ;
   const own = (venueId: string | null | undefined) => typeof venueId === 'string' && Object.prototype.hasOwnProperty.call(venues, venueId);
   const tzOf = (venueId: string | null | undefined) => {
@@ -998,6 +1031,9 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
       mode: null,
       channel: c.channel ?? null,
       credits: null,
+      reason: null,
+      step: null,
+      messageId: null,
       _ms: Number.isFinite(c.occurredAt) ? c.occurredAt : 0,
       _id: `c:${c.id}`,
     };
@@ -1045,6 +1081,9 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
     }
 
     const hide = foreign && !admin;
+    const stepKey = str(ev.nodeId) ?? str(send?.nodeId);
+    const stepName = journeyKey && stepKey ? str(stepNames[journeyKey]?.[stepKey]) : null;
+    const reason = REASON_TYPES.has(ev.type) ? decision?.reason ?? str(data.reason) : null;
     const item: TimelineItem & { _ms: number; _id: string } = {
       at: iso(ev.occurredAt),
       kind: ev.type,
@@ -1055,6 +1094,9 @@ export function buildTimeline(args: BuildTimelineArgs): TimelineItem[] {
       mode: hide ? null : mode,
       channel: channel ?? null,
       credits,
+      reason: hide ? null : reason ?? null,
+      step: hide || !stepKey || !stepName ? null : { key: stepKey, name: stepName },
+      messageId: hide || typeof ev.sendKey !== 'string' || !ev.sendKey ? null : messageIdOf(ev.sendKey),
       _ms: Number.isFinite(ev.occurredAt) ? ev.occurredAt : 0,
       _id: `e:${ev.id}`,
     };

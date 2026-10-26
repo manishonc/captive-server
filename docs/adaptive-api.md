@@ -202,6 +202,23 @@ catalogue). The cms uses it to word a guest who said no on every sending channel
 journey reads "Unsubscribed — no more marketing here", an info journey keeps its own words. Deploy
 captive-server before the cms: without `purpose` the cms counts every running journey as marketing.
 
+Guest full view (cms "What will happen" / "What happened"; all additive, owner-safe): on
+`GET /venues/:v/guests/:contactId`, every `timeline[]` line also has `reason` (the decision's rule key
+on a skipped, held-back or not-started line — `guest_info_missing`, `quiet_hours` … — else `null`;
+the cms offers the fix), `step` (`{ key, name }`: the journey step of a send line, named after its
+message in the timeline's language — "Welcome offer", "Last chance" — else `null`) and `messageId`
+(an opaque id, the same on every line about one message: sent, delivered, opened, clicked …; never
+the send's key). Every `journeys[]` entry also has `waitingFor` (`timer` | `events` | `send_due`
+while running, like the list rows), `next` (`{ kind: 'message' | 'end', step, afterWait, ifNoReaction }`:
+the next message step, or that the journey ends when its wait is over; `null` when it isn't running
+or the way on depends on the guest), `offerEndsAt` (the issued offer's end, while running and not
+yet used), `endsWithOffer` (the journey waits for that end, as Welcome → come back v2 does: the
+offer's end is also the journey's; `false` on v1, which ends earlier) and `goal` (`{ event, step }`:
+what ends it early — `offer.redeemed` … — and the message after it; `null` once reached or past its
+`within` window). `ifNoReaction: true` means the guest is being waited for: `next` only comes if
+they don't react before `nextAt`. `creditsByVenue` (`{ [venueId]: { total, byChannel } }`) counts
+like `creditsUsed`, per venue. An older cms ignores them.
+
 ### Guest pages — `/public/…` (server-to-server; the cms page calls it)
 
 | Method & path | Query | Returns |
