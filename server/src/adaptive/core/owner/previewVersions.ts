@@ -11,6 +11,7 @@ import type { Channel, Lang } from '../constants';
 import { renderText, type RenderValues } from '../render';
 import type { ChannelContent } from '../schemas';
 import { prefillFromSms, type WaRequestable, type WaSource } from '../whatsapp/template';
+import { blocksTemplateText } from '../emailBlocks';
 
 /**
  * WhatsApp only: `approved` — what guests get once WhatsApp sends; `in_review` — sent to Meta, not
@@ -33,6 +34,8 @@ export interface PreviewVersion {
   button?: { text: string } | null;
   /** Blanks with no value (shown raw). */
   unknown: string[];
+  /** Email: the whole email as guests get it (the venue's design), when the server could draw it. */
+  html?: string;
 }
 
 /** After the journey's own ladder, the other channels in this order. */
@@ -51,7 +54,9 @@ export function emailSmsVersion(channel: 'sms' | 'email', content: unknown, lang
     const email = content as NonNullable<ChannelContent['email']>;
     const subject = renderText(email.subject, values);
     const pre = renderText(email.preheader || '', values);
-    const body = renderText(email.body, values);
+    // A blocks wording reads as text here, as the engine reads it (engine/renderSend.ts); never the raw JSON.
+    const template = email.bodyFormat === 'blocks' ? blocksTemplateText(email.body) : email.body;
+    const body = template === null ? { text: '', unknown: ['email.blocks'] } : renderText(template, values);
     return {
       channel,
       lang,

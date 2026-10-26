@@ -238,6 +238,15 @@ const BRAIN_MAY_REACH = new Set([
     'adaptive/queue/firestoreQueue.ts',
     // Pure text rendering, for the alert emails' HTML.
     'adaptive/send/compose.ts',
+    // Email design (Voucher): the guest email's pure HTML, which compose.ts draws with. No Firestore,
+    // no provider; the branding read (send/designBrand.ts) stays out of reach.
+    'adaptive/core/emailBlocks.ts',
+    'adaptive/send/design/brand.ts',
+    'adaptive/send/design/colors.ts',
+    'adaptive/send/design/fromText.ts',
+    'adaptive/send/design/index.ts',
+    'adaptive/send/design/labels.ts',
+    'adaptive/send/design/voucher.ts',
     'adaptive/store/agents.ts',
     'adaptive/store/collections.ts',
     'adaptive/store/engineSettings.ts',
