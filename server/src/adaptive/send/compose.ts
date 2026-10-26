@@ -11,10 +11,14 @@
  *    footer (marketing) and "Powered by HeidiFi" unless the plan hides it.
  *  - Pricing placeholders exactly as long as a real short link, so the SMS is
  *    priced (segments) on the text that will really be sent.
+ *  - With `design` (the venue's brand and the wording's templates), the email gets the
+ *    Voucher design (send/design/). If the design can't draw it, a plain-text wording
+ *    still goes out in the plain look above; a blocks wording is refused.
  */
 
 import type { Lang } from '../core/constants';
 import { injectPoweredBy } from '../../services/poweredBy';
+import { designEmail, type DesignInput } from './design';
 
 /** services/shortlinks.ts mints 8-character codes from a GSM-7 alphabet. */
 export const SHORT_CODE_LENGTH = 8;
@@ -90,13 +94,24 @@ export interface EmailComposeInput {
   /** Marketing: the unsubscribe link for the footer; service: null (no footer). */
   unsubscribeUrl: string | null;
   poweredBy: boolean;
+  /** The design system: brand, the wording's templates, the values and the journey's facts. */
+  design?: Omit<DesignInput, 'lang' | 'unsubscribeUrl' | 'poweredBy'>;
 }
 
 export type ComposedEmail = { html: string; text: string } | { error: 'unsupported_format' };
 
 export function composeEmail(i: EmailComposeInput): ComposedEmail {
-  if (i.bodyFormat === 'blocks') return { error: 'unsupported_format' };
   const footer = FOOTER[i.lang] ?? FOOTER.en;
+  const plain = (body: string) => (i.unsubscribeUrl ? `${body}\n\n${footer.why}\n${footer.link}: ${i.unsubscribeUrl}` : body);
+  if (i.design && i.bodyFormat !== 'html') {
+    try {
+      const designed = designEmail({ ...i.design, lang: i.lang, unsubscribeUrl: i.unsubscribeUrl, poweredBy: i.poweredBy });
+      if (!('error' in designed)) return { html: designed.html, text: plain(i.body.trim()) };
+    } catch (err) {
+      console.error('[ADAPTIVE] email design failed; the plain look goes out', (err as Error)?.message?.slice(0, 200));
+    }
+  }
+  if (i.bodyFormat === 'blocks') return { error: 'unsupported_format' };
   const footerHtml = i.unsubscribeUrl
     ? `<p style="margin:24px 0 0 0;font-size:12px;line-height:18px;color:#777;">${escapeHtml(footer.why)} <a href="${escapeHtml(i.unsubscribeUrl)}" style="color:#777;">${escapeHtml(footer.link)}</a></p>`
     : '';
@@ -112,8 +127,7 @@ export function composeEmail(i: EmailComposeInput): ComposedEmail {
   if (i.poweredBy) html = injectPoweredBy(html);
 
   const plainBody = i.bodyFormat === 'html' ? i.body.replace(/<[^>]+>/g, '') : i.body.trim();
-  const text = i.unsubscribeUrl ? `${plainBody}\n\n${footer.why}\n${footer.link}: ${i.unsubscribeUrl}` : plainBody;
-  return { html, text };
+  return { html, text: plain(plainBody) };
 }
 
 /** Secrets never reach a stored preview: Wi-Fi password, door code, key instructions. */

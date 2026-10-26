@@ -54,6 +54,7 @@ import { smsSegmentCount } from '../core/runtime/smsParts';
 import { maskDestination } from '../../services/phone';
 import type { ChannelAdapter, Outbound } from '../send/adapters/types';
 import { composeEmail, maskSecretValues, smsFinalText } from '../send/compose';
+import { loadDesignBrand } from '../send/designBrand';
 import { linkKindsUsed, mintLinks, pricingLinks, unsubscribeUrlFor, validBookingUrl } from '../send/links';
 import { MAX_DISPATCH_ATTEMPTS, callProvider, chargeSend, claimSend, dispatchLease, markStuckUnknown, recordResult, scheduleChargeRepair, type LiveSend } from '../send/dispatch';
 import { newestTouchAt } from '../send/touches';
@@ -905,9 +906,14 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
       sendKey,
     };
   } else {
-    const poweredBy = await getEntitlements(inst.meta.tenantUserId)
-      .then((e) => !e.flags?.hidePoweredBy)
-      .catch(() => true);
+    const [poweredBy, brand] = await Promise.all([
+      getEntitlements(inst.meta.tenantUserId)
+        .then((e) => !e.flags?.hidePoweredBy)
+        .catch(() => true),
+      loadDesignBrand(inst.meta.tenantUserId, { name: a.ctx?.venueName ?? '', address: a.ctx?.venueAddress, logoUrl: a.ctx?.venueLogoUrl }),
+    ]);
+    const offerKey = inst.state.vars.offerKey;
+    const offer = typeof offerKey === 'string' ? a.pinned.offers.find((o) => o.offerKey === offerKey) : undefined;
     const composed = composeEmail({
       body: final.text,
       bodyFormat: d.content.bodyFormat ?? 'text',
@@ -915,6 +921,12 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
       lang: d.locale,
       unsubscribeUrl: marketing ? d.unsubscribeUrl : null,
       poweredBy,
+      design: {
+        brand,
+        content: d.content,
+        values: finalValues,
+        facts: { purpose: d.cfg.purpose, pool: d.cfg.pool, offer: offer ? { kind: offer.kind, value: offer.value, currency: offer.currency } : null },
+      },
     });
     if ('error' in composed) return block('unsupported_format');
     message = { kind: 'email', to: address, subject: final.subject ?? '', html: composed.html, text: composed.text, sendKey, unsubscribeUrl: marketing ? d.unsubscribeUrl : null };

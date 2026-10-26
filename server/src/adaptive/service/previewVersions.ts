@@ -29,6 +29,7 @@ import {
 } from '../core/owner/previewVersions';
 import { variantContent, variantEligible } from '../engine/renderSend';
 import { STOP_LINES } from '../send/compose';
+import { designEmail, type DesignBrand } from '../send/design';
 import { loadWaPickContext, pickWaTemplate, type WaPickContext } from '../whatsapp/pick';
 import type { Catalogue } from './catalogue';
 
@@ -43,6 +44,48 @@ export interface PreviewVersionsInput {
   venueName: string;
   slots: Record<string, SlotValue>;
   offers: Offer[];
+  /** The venue's look: with it, each email version also carries the email as guests see it (`html`). */
+  design?: { brand: DesignBrand; poweredBy: boolean };
+}
+
+/**
+ * The offer a guest of this step would hold: the step's own offer blank, else the journey's first offer
+ * step whose blank names an offer from the menu (as service/testSend.ts). A journey without an offer step
+ * (Holidays) has none, so its booking link stays a plain button, as guests get it.
+ */
+function stepOffer(input: PreviewVersionsInput, offerSlot: string | undefined): Offer | null {
+  const steps = Object.values(input.definition.nodes ?? {}).filter((n) => n.type === 'issue_offer');
+  if (!steps.length) return null;
+  const blanks = [...(offerSlot ? [offerSlot] : []), ...steps.map((n) => String(n.config?.slot ?? '')), 'offer'];
+  for (const blank of blanks) {
+    const key = input.slots[blank];
+    const offer = typeof key === 'string' ? input.offers.find((o) => o.offerKey === key) : undefined;
+    if (offer) return offer;
+  }
+  return null;
+}
+
+/** The example email in the venue's design; null when it can't be drawn (the text version still shows). */
+function designedEmail(input: PreviewVersionsInput, poolKey: string, content: unknown, lang: Lang, values: RenderValues, offerSlot?: string): string | null {
+  try {
+    const purpose = input.definition.pools?.[poolKey]?.purpose === 'service' ? 'service' : 'marketing';
+    const offer = stepOffer(input, offerSlot);
+    const result = designEmail({
+      brand: { ...input.design!.brand, name: input.venueName },
+      lang,
+      content: content as { subject?: string; preheader?: string; body: string; bodyFormat?: 'text' | 'html' | 'blocks' },
+      values,
+      facts: { purpose, pool: poolKey, offer: offer ? { kind: offer.kind, value: offer.value, currency: offer.currency } : null },
+      unsubscribeUrl: purpose === 'marketing' ? values['link.unsubscribe'] ?? null : null,
+      poweredBy: input.design!.poweredBy,
+      // The owner's screen is light: show the light look (guests' emails follow their app).
+      colorScheme: 'light',
+    });
+    return 'error' in result ? null : result.html;
+  } catch (err) {
+    console.error('[ADAPTIVE PREVIEW] email design failed', poolKey, (err as Error)?.name ?? 'Error');
+    return null;
+  }
 }
 
 /** One entry per preview step: its versions, or null for the rating page (no message). */
@@ -119,7 +162,13 @@ export async function previewVersionsFor(input: PreviewVersionsInput): Promise<A
     return channels.map((channel): PreviewVersion => {
       if (channel === 'whatsapp') return whatsapp!;
       const found = channel === 'email' ? email! : sms!;
-      return emailSmsVersion(channel, found.content, found.locale, found.variant.name, valuesFor(found.locale, step.offerSlot));
+      const values = valuesFor(found.locale, step.offerSlot);
+      const version = emailSmsVersion(channel, found.content, found.locale, found.variant.name, values);
+      if (channel === 'email' && input.design) {
+        const html = designedEmail(input, poolKey, found.content, found.locale, values, step.offerSlot);
+        if (html) version.html = html;
+      }
+      return version;
     });
   });
 }

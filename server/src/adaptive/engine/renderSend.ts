@@ -21,6 +21,7 @@ import type { StayTimes } from '../stays/times';
 import { occasionMergeValues } from '../core/scans/occasions';
 import { waBodyValues } from '../core/whatsapp/sendValues';
 import type { WaCompiled, WaSource } from '../core/whatsapp/template';
+import { blocksTemplateText } from '../core/emailBlocks';
 
 export type LinkKind = 'offer' | 'rating' | 'hub' | 'booking' | 'unsubscribe';
 
@@ -232,6 +233,13 @@ export function renderMessage(content: any, channel: Channel, values: RenderValu
   }
   if (channel === 'email') {
     const subject = fill(String(content.subject ?? ''), false).replace(/[\r\n]+/g, ' ').trim();
+    if (content.bodyFormat === 'blocks') {
+      // The design draws the blocks (send/design/); here they are read as plain text for the text part,
+      // the stored preview and the merge-field checks. A body that isn't valid blocks is never sent.
+      const template = blocksTemplateText(String(content.body ?? ''));
+      if (template === null) return { subject, text: '', missing: [...missing, 'email.blocks'], fieldsUsed: [...fields] };
+      return { subject, text: fill(template, false), missing: [...missing], fieldsUsed: [...fields] };
+    }
     const body = fill(String(content.body ?? ''), content.bodyFormat === 'html');
     return { subject, text: body, missing: [...missing], fieldsUsed: [...fields] };
   }
