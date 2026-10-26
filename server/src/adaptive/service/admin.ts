@@ -40,6 +40,7 @@ import {
   type PlaybookContent,
 } from '../core/schemas';
 import { validatePlaybook } from '../core/validatePlaybook';
+import { buildWordingIndex } from '../core/wording';
 import { contentChecksum } from '../core/checksum';
 import { diffPlaybookContent, type DiffLine } from '../core/diff';
 import { describeJourneySteps } from '../core/describeJourney';
@@ -346,6 +347,7 @@ export async function listJourneyTemplates() {
       }
     }
   }
+  const wording = buildWordingIndex(cat.variants);
   return [...cat.templates.values()]
     .map(({ header, versions: vs }) => {
       const live = vs.find((v) => v.version === header.publishedVersion) ?? vs[0];
@@ -354,6 +356,19 @@ export async function listJourneyTemplates() {
         ...toJson(header),
         startsWhen: def ? describeTrigger(def.entry.trigger) : '',
         channels: def?.channelLadder ?? [],
+        // Journey channels: its messages (pools) and the languages their active SMS / email wording has.
+        messages: def
+          ? Object.entries(def.pools).map(([key, p]) => ({
+              key,
+              name: p.name ?? null,
+              purpose: p.purpose,
+              channels: p.channels,
+              languages: {
+                sms: p.channels.includes('sms') ? [...(wording.get(key)?.sms ?? [])].sort() : [],
+                email: p.channels.includes('email') ? [...(wording.get(key)?.email ?? [])].sort() : [],
+              },
+            }))
+          : [],
         slots: def ? Object.entries(def.slots).map(([k, s]) => ({ key: k, type: s.type, label: s.label, required: s.required })) : [],
         usedIn: usedIn.get(header.key) ?? [],
         versions: vs.map((v) => ({ version: v.version, state: v.state, changelog: v.changelog, publishedAt: toJson(v.publishedAt) })),

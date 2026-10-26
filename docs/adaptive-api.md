@@ -50,8 +50,37 @@ Nothing here sends a message. There is no engine yet, and
 | `GET /journey-templates` | — | `{ journeyTemplates[] }` (with `startsWhen`, `channels`, `usedIn`, `versions`) |
 | `GET /journey-templates/:key?version=` | — | `{ journey, version, versions, steps[], summary }` — steps in plain words |
 | `PATCH /journey-templates/:key` | `{ availability: 'available' \| 'coming_soon', actor }` | journey detail |
+| `GET /journey-templates/:key/messages?lang=&version=` | — | journey channels: `{ journeyKey, version, lang, example, whatsappReadable, messages[] }` — see "Journey channels" below |
 | `GET /question-bank` | — | `{ questions[] }` |
 | `GET /config` | — | `{ config, rules }` |
+
+### Journey channels (the admin journey page)
+
+Read-only additions for the admin journey page, where every message of a journey shows its SMS, email
+and WhatsApp per language (the WhatsApp states and actions stay the `admin/whatsapp…` routes below).
+
+- `GET /journey-templates` also returns `messages: [{ key, name, purpose, channels, languages: { sms, email } }]`
+  per journey: its messages (pools) of the live version and the languages their **active** SMS and email
+  wording has (`[]` for a channel the message doesn't use).
+- `GET /journey-templates/:key/messages?lang=en|de|fr|it&version=` (default: English, the live version; 400 for
+  another language, 404 for an unknown journey or version) → `{ journeyKey, version, lang, example: { guest, venue,
+  playbook: { key, name } | null, offer }, whatsappReadable, messages[] }`. The example is guest Anna at Café
+  Bellevue (the venue Meta's template examples use), with the blanks and offer menu of the published playbook that
+  uses the journey at the most venues (then by name; the journey's own defaults where it gives none) and the
+  no-branding email look. Each message: `{ poolKey, name (asked language), purpose, channels, requiredLocales,
+  languages: { sms, email } (as the list gives them, whatever the asked language), steps: [{ number, nodeId, detail }]
+  (the steps that send it), wordings[], whatsapp }`. Each wording (every status,
+  by letter): `{ id, letter, name, status, usable (false when the example's blanks rule it out), sms, email }` —
+  `sms: { lang, fallback, template, text, sent, parts, encoding: gsm7|ucs2, nonGsm[], credits, unknown[] } | null`
+  in the asked language or English (`fallback: true`), `sent` = the text plus the STOP line the engine adds (every
+  SMS), `credits` = parts × the rate card's SMS rate on marketing messages, 0 on info messages;
+  `email: { lang, fallback, subjectTemplate, preheaderTemplate, bodyTemplate, subject, preheader, text, html,
+  credits, unknown[] } | null` (`html`: the whole email in the Voucher design, light look; null when it can't be
+  drawn). `whatsapp` (null for a message that can't go by WhatsApp, or while the registry can't be read —
+  `whatsappReadable: false`): `{ rule: marketing|utility, linkField, templates: [{ id, name, lang, template, text,
+  footer, button, unknown[] }] (ours, not dismissed, rendered with the same example values), guest }` — `guest` is
+  what a guest who speaks `lang` gets, as "See what guests get" picks it (`approved` asked language else English,
+  else `in_review`, else an `example` from the SMS text, else `missing`). Never calls Meta.
 
 `PlaybookContent` (what a draft saves):
 
