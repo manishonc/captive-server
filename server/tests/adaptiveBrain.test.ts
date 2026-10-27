@@ -555,10 +555,10 @@ console.log('\nAnswers');
 const S = pingOutputSchema;
 
 test('only a normal end is read', () => {
-  const r = (stopReason: string | null, text = '{"reasoning":"x","echo":1}') => evaluateAnswer({ stopReason, text }, S);
+  const r = (stopReason: string | null, text = '{"note":"x","echo":1}') => evaluateAnswer({ stopReason, text }, S);
   const refusal = r('refusal');
   assert(!refusal.ok && refusal.problem === 'refusal', 'refusal');
-  const cut = r('max_tokens', '{"reasoning":"x","echo":1}');
+  const cut = r('max_tokens', '{"note":"x","echo":1}');
   assert(!cut.ok && cut.problem === 'cut_off', 'a cut-off answer is rejected even when it parses');
   const ctx = r('model_context_window_exceeded');
   assert(!ctx.ok && ctx.problem === 'cut_off', 'context exceeded');
@@ -572,9 +572,9 @@ test('no text, not JSON, the wrong shape', () => {
   assert(!none.ok && none.problem === 'no_text', 'no text');
   const prose = evaluateAnswer({ stopReason: 'end_turn', text: 'Sure! Here it is.' }, S);
   assert(!prose.ok && prose.problem === 'bad_json', 'not JSON');
-  const shape = evaluateAnswer({ stopReason: 'end_turn', text: '{"reasoning":"x","echo":1.5}' }, S);
+  const shape = evaluateAnswer({ stopReason: 'end_turn', text: '{"note":"x","echo":1.5}' }, S);
   assert(!shape.ok && shape.problem === 'bad_shape' && /echo/.test(shape.detail), 'a non-integer echo');
-  const extra = evaluateAnswer({ stopReason: 'end_turn', text: '{"reasoning":"x","echo":1,"more":true}' }, S);
+  const extra = evaluateAnswer({ stopReason: 'end_turn', text: '{"note":"x","echo":1,"more":true}' }, S);
   assert(!extra.ok && extra.problem === 'bad_shape', 'an extra field');
 });
 
@@ -789,10 +789,10 @@ test('its valid answer passes every check; a wrong echo fails', () => {
   const answer = pingJob.sandboxAnswer(built.pkg as never);
   const ev = evaluateAnswer({ stopReason: 'end_turn', text: JSON.stringify(answer) }, pingJob.outputSchema);
   assert(ev.ok, 'parses');
-  const prompt = pingJob.prompts['ping-v1'];
+  const prompt = pingJob.prompts['ping-v2'];
   assert(numbersCheck(pingJob.reasoningOf(answer), built.pkg, [prompt.system, prompt.instructions]).ok, 'numbers ok');
   assert(pingJob.check(answer, built.pkg as never).every((c) => c.ok), 'echo ok');
-  assert(!pingJob.check({ reasoning: 'x', echo: 1 }, built.pkg as never)[0].ok, 'a wrong echo');
+  assert(!pingJob.check({ note: 'x', echo: 1 }, built.pkg as never)[0].ok, 'a wrong echo');
 });
 
 test('the registry knows the ping job and (PR W2) the WhatsApp writer; defaults are allowed models, off', () => {
@@ -925,9 +925,9 @@ atest("the SDK's structured-output helper builds the ping schema (strict object,
   eq(f.type, 'json_schema', 'type');
   const schema = f.schema as { type?: string; properties?: Record<string, unknown>; additionalProperties?: boolean; required?: string[] };
   eq(schema.type, 'object', 'object');
-  eq(Object.keys(schema.properties ?? {}).sort(), ['echo', 'reasoning'], 'fields');
+  eq(Object.keys(schema.properties ?? {}).sort(), ['echo', 'note'], 'fields');
   eq(schema.additionalProperties, false, 'no extra keys');
-  eq([...(schema.required ?? [])].sort(), ['echo', 'reasoning'], 'required');
+  eq([...(schema.required ?? [])].sort(), ['echo', 'note'], 'required');
 });
 
 void chain.then(() => {

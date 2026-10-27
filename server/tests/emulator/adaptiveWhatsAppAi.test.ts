@@ -358,7 +358,7 @@ async function main() {
     await queueSandboxAnswers(WRITER, [
       {
         answer: {
-          reasoning: 'A warm welcome back.',
+          note: 'A warm welcome back.',
           language: 'en',
           body: 'Hello {{contact.firstName | default:"there"}}, thanks for visiting {{venue.name}} today, we hope to see you again soon.',
           buttonText: 'See offer',

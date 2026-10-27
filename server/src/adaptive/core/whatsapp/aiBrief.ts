@@ -132,7 +132,7 @@ export interface WriterLocal {
 
 export const writerAnswerSchema = z
   .object({
-    reasoning: z.string().min(1).max(1200),
+    note: z.string().min(1).max(1200),
     language: z.enum(LANGS),
     body: z.string().min(1).max(1600),
     buttonText: z.string().min(1).max(25).nullable(),
@@ -510,7 +510,7 @@ export function writerChecks(out: WriterAnswer, brief: WriterBrief, local: Write
   );
   const needsButton = Boolean(pool && (WA_BUTTON_FIELDS as readonly string[]).includes(pool.linkField ?? ''));
   add('WW09', !needsButton || Boolean(out.buttonText), needsButton ? (out.buttonText ? 'Has the button text the message’s link needs' : 'No button text, but this message’s link needs a button') : 'No button needed');
-  const contact = [out.body, out.buttonText ?? '', out.reasoning, out.categoryReason].some((t) => hasContactData(t));
+  const contact = [out.body, out.buttonText ?? '', out.note, out.categoryReason].some((t) => hasContactData(t));
   add('WW05', !contact, contact ? 'The answer holds contact data (an email or phone number)' : 'No contact data');
   const promo = brief.category === 'UTILITY' ? promoWordsIn(out.body) : [];
   add('WW06', !promo.length, promo.length ? `A service message with promotion: ${promo.join(', ')}` : 'No promotion in a service message');
@@ -815,7 +815,7 @@ const SANDBOX_BUTTON: Record<string, Record<Lang, string>> = {
  * message's name (so two messages never get the same text: Meta refuses duplicates, T18 — left out
  * of a service message whose name reads as promotion), a closing that changes with the bodies
  * already there (so a second Suggest isn't a duplicate), the button text the link needs, the
- * category asked for, no numbers in the reasoning.
+ * category asked for, no numbers in the note.
  */
 export function sandboxWriterAnswer(brief: WriterBrief): WriterAnswer {
   const t = SANDBOX_TEXT[brief.language] ?? SANDBOX_TEXT.en;
@@ -832,7 +832,7 @@ export function sandboxWriterAnswer(brief: WriterBrief): WriterAnswer {
   }
   const button = brief.button ? SANDBOX_BUTTON[brief.button.opens]?.[brief.language] ?? 'Open' : null;
   return {
-    reasoning: `A short ${brief.languageName} message for “${brief.message.name}” that names the venue and greets the guest by first name.`,
+    note: `A short ${brief.languageName} message for “${brief.message.name}” that names the venue and greets the guest by first name.`,
     language: brief.language,
     body,
     buttonText: button,
