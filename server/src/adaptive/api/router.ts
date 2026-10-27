@@ -20,6 +20,7 @@ import { zodIssues } from '../core/issues';
 import { actorSchema, setAvailabilityInputSchema, setListedInputSchema, venueActionInputSchema, type Actor } from '../core/schemas';
 import * as admin from '../service/admin';
 import * as tenant from '../service/tenant';
+import { journeyMessages } from '../service/journeyMessages';
 import engineRoutes from './engineRoutes';
 import ownerRoutes from './ownerRoutes';
 import publicRoutes from './publicRoutes';
@@ -117,6 +118,11 @@ router.get(
 router.patch(
   '/admin/journey-templates/:key',
   handle(async (req) => admin.setAvailability(req.params.key, setAvailabilityInputSchema.parse(req.body).availability, actorOf(req))),
+);
+// Journey channels: every message of a journey version in one language, as written and as the example guest gets it.
+router.get(
+  '/admin/journey-templates/:key/messages',
+  handle(async (req) => journeyMessages(req.params.key, req.query as Record<string, unknown>)),
 );
 router.get('/admin/question-bank', handle(async () => ({ questions: await admin.listQuestionBank() })));
 router.get('/admin/config', handle(async () => admin.getRules()));
