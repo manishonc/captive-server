@@ -12,7 +12,7 @@
 
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
-import type { VisitDoc } from '../store/engineTypes';
+import type { ContactDoc, VisitDoc } from '../store/engineTypes';
 import type { EngineEvent, RunMode } from '../core/runtime/types';
 import { eventIdFor } from '../core/runtime/ids';
 import { HOUR_MS, durationMs } from '../core/runtime/time';
@@ -265,8 +265,10 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     mode,
   });
 
-  const contact = await loadContact(resolved.contactId);
-  if (!contact) return;
+  const loaded = await loadContact(resolved.contactId);
+  if (!loaded) return;
+  // A login after the owner's "Cancel journeys" lifts it (a connect from before it doesn't).
+  const contact = await liftJourneysCancelled(resolved.contactId, loaded, event.occurredAt);
 
   // Sign-up breaker: an unusual burst of NEW people at one access point starts no
   // journeys for the rest of that hour (their contact and visit are still kept).
@@ -340,6 +342,24 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
 function isAlreadyExists(err: unknown): boolean {
   const e = err as { code?: number | string; message?: string };
   return e?.code === 6 || /ALREADY_EXISTS/i.test(String(e?.message));
+}
+
+/**
+ * The owner's "Cancel journeys" holds the guest until their next Wi-Fi login: this login lifts it
+ * when it happened after the cancel (a connect queued from before the cancel doesn't).
+ */
+async function liftJourneysCancelled(contactId: string, contact: ContactDoc, connectedAt: number): Promise<ContactDoc> {
+  const held = tsMs(contact.journeysCancelled?.at);
+  if (held === null || connectedAt <= held) return contact;
+  const ref = db.collection(COL.contacts).doc(contactId);
+  // Only the hold this login came after: a cancel made meanwhile stands.
+  const lifted = await db.runTransaction(async (tx) => {
+    const fresh = tsMs((await tx.get(ref)).get('journeysCancelled.at'));
+    if (fresh !== null && connectedAt <= fresh) return false;
+    if (fresh !== null) tx.update(ref, { journeysCancelled: null });
+    return true;
+  });
+  return lifted ? { ...contact, journeysCancelled: null } : contact;
 }
 
 /**
