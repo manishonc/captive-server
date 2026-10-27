@@ -47,7 +47,7 @@ const SYSTEM = [
   'The button: when the brief has a button, write its label (a short call to action in the same language, as few words as fit). When it has none, the label is null.',
   '',
   'The category: give the category the brief asks for, and in "categoryReason" one sentence on why the text fits it.',
-  'In "reasoning" and "categoryReason" never quote counts, lengths or other numbers.',
+  'In "note" and "categoryReason" never quote counts, lengths or other numbers.',
   'Answer only with the JSON the schema asks for.',
 ].join('\n');
 
@@ -73,10 +73,10 @@ export const waTemplateWriterJob: AgentJob<WriterBrief, WriterAnswer> = {
     effort: 'medium',
     maxRunsPerDay: 10,
     maxOutputTokens: 4000,
-    promptVersion: 'wa-writer-v1',
+    promptVersion: 'wa-writer-v2',
   },
   prompts: {
-    'wa-writer-v1': { system: SYSTEM, instructions: INSTRUCTIONS },
+    'wa-writer-v2': { system: SYSTEM, instructions: INSTRUCTIONS },
   },
   outputSchema: writerAnswerSchema,
   cacheSystem: true,
@@ -96,7 +96,7 @@ export const waTemplateWriterJob: AgentJob<WriterBrief, WriterAnswer> = {
   check(out, pkg, local) {
     return writerChecks(out, pkg, local as WriterLocal, hasContactData);
   },
-  reasoningOf: (out) => `${out.reasoning}\n${out.categoryReason}`,
+  reasoningOf: (out) => `${out.note}\n${out.categoryReason}`,
   sandboxAnswer: (pkg) => sandboxWriterAnswer(pkg),
   precheck: async (ctx) => (await drafts()).precheckWriter(ctx.params),
   async apply(tx, args): Promise<ApplyDecision> {

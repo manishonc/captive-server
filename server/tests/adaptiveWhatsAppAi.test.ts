@@ -228,7 +228,7 @@ test('each WW check rejects; a template error rejects under its T code; a warnin
   assert(fails(marketing, { category: 'UTILITY' }).includes('WW01'), 'WW01 category');
   assert(fails(marketing, { language: 'de' }).includes('WW02'), 'WW02 language');
   assert(fails(marketing, { buttonText: null }).includes('WW09'), 'WW09 button');
-  assert(fails(marketing, { reasoning: 'Call +41 79 123 45 67' }).includes('WW05'), 'WW05 contact data');
+  assert(fails(marketing, { note: 'Call +41 79 123 45 67' }).includes('WW05'), 'WW05 contact data');
   assert(fails(utility, { body: 'Hello {{contact.firstName | default:"there"}}, enjoy a free dessert at {{venue.name}} when you come back soon.' }).includes('WW06'), 'WW06 promotion');
   const { brief: b2, local: l2 } = built(marketing);
   const dupBrief = { ...b2, existingBodies: [sandboxWriterAnswer({ ...b2, existingBodies: [] }).body] };

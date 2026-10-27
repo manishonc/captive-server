@@ -160,7 +160,7 @@ export async function applyWriterAnswer(
     requestedBy: local.requestedBy,
     model: args.model,
     promptVersion: args.promptVersion,
-    reasoning: out.reasoning.slice(0, 1200),
+    reasoning: out.note.slice(0, 1200),
     categoryReason: out.categoryReason.slice(0, 300),
     at,
   };

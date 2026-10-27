@@ -17,7 +17,7 @@ export interface PingPackage {
 
 export const pingOutputSchema = z
   .object({
-    reasoning: z.string().min(1).max(400),
+    note: z.string().min(1).max(400),
     echo: z.number().int(),
   })
   .strict();
@@ -41,12 +41,12 @@ export const pingJob: AgentJob<PingPackage, PingOutput> = {
     effort: 'low',
     maxRunsPerDay: 10,
     maxOutputTokens: 2048,
-    promptVersion: 'ping-v1',
+    promptVersion: 'ping-v2',
   },
   prompts: {
-    'ping-v1': {
+    'ping-v2': {
       system: "You check that HeidiFi's connection to the model works. Answer with the JSON the schema asks for and nothing else.",
-      instructions: 'Below is a test package in JSON. Put its "nonce" into "echo", and write one short sentence in "reasoning" that mentions the nonce.',
+      instructions: 'Below is a test package in JSON. Put its "nonce" into "echo", and write one short sentence in "note" that mentions the nonce.',
     },
   },
   outputSchema: pingOutputSchema,
@@ -62,6 +62,6 @@ export const pingJob: AgentJob<PingPackage, PingOutput> = {
         : { code: 'echo', ok: false, detail: `The model echoed ${out.echo}, not ${pkg.nonce}` },
     ];
   },
-  reasoningOf: (out) => out.reasoning,
-  sandboxAnswer: (pkg) => ({ reasoning: `The nonce in the test package is ${pkg.nonce}.`, echo: pkg.nonce }),
+  reasoningOf: (out) => out.note,
+  sandboxAnswer: (pkg) => ({ note: `The nonce in the test package is ${pkg.nonce}.`, echo: pkg.nonce }),
 };
