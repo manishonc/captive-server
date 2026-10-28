@@ -15,6 +15,10 @@
  *  - The contact is held (`journeysCancelled`): no new journey starts — a pending visit end, a
  *    scan, a stay moment — until the guest's next Wi-Fi login lifts it (engine/route.ts).
  *  - Calling it twice is safe: the second call finds nothing active and cancels nothing.
+ *
+ * The Adaptive guest drawer (2026-10-28) cancels by contact instead (`cancelContactJourneys`):
+ * the same cancel, for a guest the owner already has open. Either way it covers every venue of
+ * the account, since the contact and the hold are the account's.
  */
 
 import { FieldPath } from 'firebase-admin/firestore';
@@ -175,12 +179,8 @@ async function cancelInstance(instanceId: string, tenantUserId: string, actor: A
   throw new Error(`instance ${instanceId} kept changing; try again`);
 }
 
-/** POST …/guests/by-guest/:guestId/journeys/cancel — stop every running journey of this guest. */
-export async function cancelGuestJourneys(tenantUserId: string, guestIdRaw: string, body: unknown, actor: Actor) {
-  const guestId = guestIdSchema.parse(guestIdRaw);
-  const lang = langOf((body as { lang?: unknown } | null)?.lang);
-  const contactId = await contactIdOfGuest(tenantUserId, guestId);
-  if (!contactId) return { guestId, contactId: null, cancelled: 0, journeys: [], running: [] };
+/** Holds the contact and ends each of their running journeys; what stopped and what still runs. */
+async function cancelAllOf(tenantUserId: string, contactId: string, lang: 'en' | 'de', actor: Actor) {
   // First the hold, so nothing new starts while we end the running ones (a pending visit end,
   // a scan, a queued start): it stays until the guest's next Wi-Fi login (engine/enrol.ts).
   await refreshClock();
@@ -193,5 +193,22 @@ export async function cancelGuestJourneys(tenantUserId: string, guestIdRaw: stri
   // Re-read: a journey that started while we worked is reported, so the CMS doesn't offer Remove.
   const still = await runningOf(tenantUserId, contactId, lang);
   const strip = ({ instanceId: _id, ...j }: RunningJourney) => j;
-  return { guestId, contactId, cancelled: stopped.length, journeys: stopped.map(strip), running: still.map(strip) };
+  return { cancelled: stopped.length, journeys: stopped.map(strip), running: still.map(strip) };
+}
+
+/** POST …/guests/by-guest/:guestId/journeys/cancel — stop every running journey of this guest. */
+export async function cancelGuestJourneys(tenantUserId: string, guestIdRaw: string, body: unknown, actor: Actor) {
+  const guestId = guestIdSchema.parse(guestIdRaw);
+  const lang = langOf((body as { lang?: unknown } | null)?.lang);
+  const contactId = await contactIdOfGuest(tenantUserId, guestId);
+  if (!contactId) return { guestId, contactId: null, cancelled: 0, journeys: [], running: [] };
+  return { guestId, contactId, ...(await cancelAllOf(tenantUserId, contactId, lang, actor)) };
+}
+
+/** POST …/guests/:contactId/journeys/cancel — the same, for the guest open in the Adaptive drawer. */
+export async function cancelContactJourneys(tenantUserId: string, contactId: string, body: unknown, actor: Actor) {
+  const lang = langOf((body as { lang?: unknown } | null)?.lang);
+  const contact = await db.collection(COL.contacts).doc(contactId).get();
+  if (!contact.exists || contact.get('tenantUserId') !== tenantUserId) throw notFound('No such guest in this account');
+  return { contactId, ...(await cancelAllOf(tenantUserId, contactId, lang, actor)) };
 }
