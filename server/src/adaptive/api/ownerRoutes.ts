@@ -17,6 +17,7 @@
  *   guests/find    POST {guestId | contactId | email | phone}   (the MCP's lookup; a read)
  *   guests/by-guest/:guestId/journeys   GET ?lang · POST cancel {lang?}   (the CMS guest list's Cancel journeys)
  *   guests/:contactId/journeys          POST cancel {lang?}   (the Adaptive guest drawer's Cancel journeys; all venues)
+ *   guests/by-guest/:guestId/forget     POST   (the CMS Remove guest, before it deletes the row: the account forgets the person)
  *
  * No catch-all here: a path nobody matches falls through to router.ts's JSON 404.
  */
@@ -31,6 +32,7 @@ import { getResults } from '../service/results';
 import { findGuest, getGuest, listGuests, listMessages, setGuestMarketing } from '../service/guests';
 import { startSending } from '../service/startSending';
 import { cancelContactJourneys, cancelGuestJourneys, getGuestJourneys } from '../service/guestJourneys';
+import { forgetGuest } from '../service/guestForget';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE OWNER API');
@@ -105,6 +107,8 @@ router.post(
   `${T}/guests/:contactId/journeys/cancel`,
   handle(async (req) => cancelContactJourneys(tenantOf(req), idParam(req.params.contactId, 'contactId'), req.body, ownerActorOf(req))),
 );
+// Remove guest (erase step 2): the account forgets the person; the CMS deletes its row after.
+router.post(`${T}/guests/by-guest/:guestId/forget`, handle(async (req) => forgetGuest(tenantOf(req), idParam(req.params.guestId, 'guestId'), ownerActorOf(req))));
 
 // ── Start sending ────────────────────────────────────────────────────────────
 

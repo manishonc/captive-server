@@ -20,7 +20,7 @@ import { normalizeE164, normalizeEmail } from '../../services/phone';
 import { LANGS, type Lang } from '../core/constants';
 import { resolveContact } from '../identity/resolve';
 import { recordConnect, revisitGapHours } from '../identity/visits';
-import { identityReady } from '../identity/key';
+import { contactPointId, identityReady } from '../identity/key';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { accountLiveSince, venueModeFor, type EngineSettings } from '../store/engineSettings';
 import { tsMs } from '../store/time';
@@ -196,6 +196,16 @@ async function legacyEmailUnsubscribed(typed: Array<string | null | undefined>, 
   return aps.some((ap) => ap.get('venueId') === venueId);
 }
 
+/** Did this login happen before the account forgot the person (`forgottenAt` on their points)? */
+async function loginBeforeForget(tenantUserId: string, email: string | null, phoneE164: string | null, occurredAt: number): Promise<boolean> {
+  const ids = [email ? contactPointId('email', email) : null, phoneE164 ? contactPointId('phone', phoneE164) : null].filter((id): id is string => id !== null);
+  const points = await db.getAll(...ids.map((id) => db.collection(COL.contactPoints).doc(id)));
+  return points.some((p) => {
+    const at = tsMs((p.get('forgottenAt') as Record<string, unknown> | undefined)?.[tenantUserId]);
+    return at !== null && occurredAt <= at;
+  });
+}
+
 async function handleConnect(event: EngineEvent, guest: GuestPayload, env: RouteEnv): Promise<void> {
   const venueId = event.venueId;
   const guestId = String(event.data.guestId ?? '');
@@ -215,6 +225,9 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
   const email = normalizeEmail(guest.email ?? g.email ?? '');
   const phoneE164 = guest.phoneE164 ?? g.phoneE164 ?? normalizeE164(guest.phoneCountryCode ?? g.phoneCountryCode ?? '', guest.phone ?? g.phone ?? '');
   if (!email && !phoneE164) return; // nothing to reach this guest on
+  // Remove guest (erase step 2): a login from before the owner forgot this person is dropped, so
+  // a late retry can't bring them back. A login after it is a new guest.
+  if (await loginBeforeForget(ctx.tenantUserId, email, phoneE164, event.occurredAt)) return;
 
   const [stops, emailUnsubscribed] = await Promise.all([
     phoneE164 ? legacyPhoneStops(phoneE164) : { sms: false, whatsapp: false },

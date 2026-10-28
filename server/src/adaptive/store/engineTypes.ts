@@ -54,6 +54,11 @@ export interface ContactPointDoc {
   whatsappUnreachableUntil?: StoredTime;
   /** PR W3: the point id of Meta's WhatsApp id for this number, when it differs (a STOP from it applies here too). */
   whatsappWaIdOf?: string | null;
+  /**
+   * Remove guest (erase step 2): when each owner forgot the person on this point. A login from
+   * before it is dropped (engine/route.ts), so a late retry can't bring them back.
+   */
+  forgottenAt?: Record<string, StoredTime>;
   createdAt: StoredTime;
   updatedAt: StoredTime;
   schemaVersion: number;

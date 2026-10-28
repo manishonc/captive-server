@@ -296,7 +296,8 @@ export async function applyWhatsAppStart(pointId: string, at: number, ref: Recor
 
 /**
  * Email consent revoked for one venue (unsubscribe link, Brevo unsubscribed, spam).
- * `spam` also blocks the address for every owner.
+ * `spam` also blocks the address for every owner — when the owner removed the guest (erase
+ * step 2, no contact any more) on `pointId`, the address the message went to.
  */
 export async function applyEmailRevoke(args: {
   contactId: string;
@@ -304,20 +305,22 @@ export async function applyEmailRevoke(args: {
   source: Extract<ConsentSource, 'unsubscribe_page' | 'brevo_unsubscribed' | 'brevo_spam'>;
   at: number;
   ref?: Record<string, unknown>;
+  pointId?: string | null;
 }): Promise<number> {
   return db.runTransaction(async (tx) => {
     const contactRef = db.collection(COL.contacts).doc(args.contactId);
     const snap = await tx.get(contactRef);
-    if (!snap.exists) return 0;
-    const contact = snap.data() as ContactDoc;
+    const contact = snap.exists ? (snap.data() as ContactDoc) : null;
+    const spamPointId = args.source === 'brevo_spam' ? (contact ? contact.emailPointId : args.pointId) ?? null : null;
     let point: ContactPointDoc | null = null;
-    if (args.source === 'brevo_spam' && contact.emailPointId) {
-      const cp = await tx.get(db.collection(COL.contactPoints).doc(contact.emailPointId));
+    if (spamPointId) {
+      const cp = await tx.get(db.collection(COL.contactPoints).doc(spamPointId));
       point = cp.exists ? (cp.data() as ContactPointDoc) : null;
     }
-    if (args.source === 'brevo_spam' && contact.emailPointId && point) {
-      writeSuppression(tx, contact.emailPointId, point, 'email', { reason: 'spam_complaint', source: 'brevo', at: args.at, sendKey: (args.ref?.sendKey as string) ?? null });
+    if (spamPointId && point) {
+      writeSuppression(tx, spamPointId, point, 'email', { reason: 'spam_complaint', source: 'brevo', at: args.at, sendKey: (args.ref?.sendKey as string) ?? null });
     }
+    if (!contact) return 0;
     return writeConsentChanges(
       tx,
       args.contactId,
