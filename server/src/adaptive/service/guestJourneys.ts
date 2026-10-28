@@ -42,9 +42,9 @@ import { assertLookupKeyMatches } from './identityGuard';
 export const GUEST_CANCELLED = 'guest_cancelled';
 const MAX_CONFLICT_RETRIES = 5;
 /** Like a cancelled task in queue/firestoreQueue.ts: kept a week, then the TTL removes it. */
-const TASK_DONE_TTL_MS = 7 * DAY_MS;
+export const TASK_DONE_TTL_MS = 7 * DAY_MS;
 
-const guestIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+export const guestIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 
 /**
  * This owner's Adaptive contact for a CMS guest, or null when Adaptive never saw them. Throws
@@ -180,7 +180,7 @@ async function cancelInstance(instanceId: string, tenantUserId: string, actor: A
 }
 
 /** Holds the contact and ends each of their running journeys; what stopped and what still runs. */
-async function cancelAllOf(tenantUserId: string, contactId: string, lang: 'en' | 'de', actor: Actor) {
+export async function cancelAllOf(tenantUserId: string, contactId: string, lang: 'en' | 'de', actor: Actor) {
   // First the hold, so nothing new starts while we end the running ones (a pending visit end,
   // a scan, a queued start): it stays until the guest's next Wi-Fi login (engine/enrol.ts).
   await refreshClock();

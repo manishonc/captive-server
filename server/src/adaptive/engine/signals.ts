@@ -240,7 +240,9 @@ async function applyConsentSignal(event: EngineEvent, guest: Record<string, unkn
   if (event.type !== 'consent.revoked') return;
   const emailSource = source === 'brevo_spam' ? 'brevo_spam' : source === 'brevo_unsubscribed' ? 'brevo_unsubscribed' : 'unsubscribe_page';
   if (event.contactId && event.venueId) {
-    await applyEmailRevoke({ contactId: event.contactId, venueId: event.venueId, source: emailSource, at: env.now, ref });
+    // A spam complaint blocks the address the message went to, even once the guest was removed.
+    const pointId = emailSource === 'brevo_spam' && event.sendKey ? ((await db.collection(COL.journeySends).doc(event.sendKey).get()).get('toPointId') as string | undefined) ?? null : null;
+    await applyEmailRevoke({ contactId: event.contactId, venueId: event.venueId, source: emailSource, at: env.now, ref, pointId });
     return;
   }
   // An unsubscribe from a legacy email: guest doc → address → this owner's contact.

@@ -261,6 +261,7 @@ export async function handleStayRelinked(event: EngineEvent, env: { now: number;
       ]);
       const d = instSnap.data() as Record<string, any> | undefined;
       if (!d || d.status !== 'cancelled' || d.exitReason !== 'stay_unlinked') return;
+      if (!cvSnap.exists) return; // the owner removed the guest (erase step 2): nothing to resume
       if (staySnap.get('contactId') !== contactId || (Number(staySnap.get('linkSeq')) || 0) !== linkSeq || staySnap.get('status') === 'cancelled') return;
       const w = d.waiting as { nodeId?: string; token?: string } | null;
       if (!w?.nodeId || !w.token) return;

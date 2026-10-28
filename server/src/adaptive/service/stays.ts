@@ -389,6 +389,59 @@ export async function unlinkStay(tenantUserId: string, venueId: string, stayId: 
 }
 
 /**
+ * Remove guest (erase step 2, 2026-10-28): every stay of the account still linked to this
+ * contact is unlinked like the owner's Unlink (link generation bumped, `stay.unlinked` logged),
+ * and the id leaves the "never link again" lists: the person is forgotten, so the booking links
+ * to whoever connects next — them too, as a new guest. Their journeys are already cancelled, so
+ * no task is queued. Returns how many stays changed.
+ */
+export async function unlinkContactStays(tenantUserId: string, contactId: string, by: string): Promise<number> {
+  await refreshClock();
+  const t = now();
+  const [linked, listed] = await Promise.all([
+    db.collection(COL.stays).where('contactId', '==', contactId).get(),
+    db.collection(COL.stays).where('unlinkedContactIds', 'array-contains', contactId).get(),
+  ]);
+  const venues = new Set<string>();
+  let changed = 0;
+  for (const id of new Set([...linked.docs, ...listed.docs].map((d) => d.id))) {
+    const did = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(stayRef(id));
+      if (!snap.exists) return false;
+      const s = toStay(snap.id, snap.data() as Partial<StayDoc>);
+      if (s.tenantUserId !== tenantUserId) return false;
+      const unlinkedContactIds = s.unlinkedContactIds.filter((c) => c !== contactId);
+      if (s.contactId !== contactId) {
+        if (unlinkedContactIds.length === s.unlinkedContactIds.length) return false;
+        tx.update(stayRef(id), { unlinkedContactIds, updatedAt: new Date() });
+        return true;
+      }
+      const linkSeq = s.linkSeq + 1;
+      tx.update(stayRef(id), {
+        contactId: null,
+        linkedAt: null,
+        linkedGuestId: null,
+        linkMode: null,
+        linkedBy: null,
+        linkSeq,
+        unlinkedContactIds,
+        unlinkedAt: new Date(t),
+        unlinkedBy: by,
+        updatedAt: new Date(),
+      });
+      const eventId = eventIdFor('cms', `stay:${s.id}:unlinked:${linkSeq}`);
+      tx.set(eventRef(eventId), eventDoc({ type: 'stay.unlinked', occurredAt: t, tenantUserId: s.tenantUserId, venueId: s.venueId, contactId, source: 'cms', data: { stayId: s.id, linkSeq, by, reason: 'guest_removed' } }));
+      venues.add(s.venueId);
+      return true;
+    });
+    if (did) changed += 1;
+  }
+  // Written outside a worker task: arm the venues' daily numbers here.
+  for (const venueId of venues) await ensureRollup(venueId, tenantUserId);
+  return changed;
+}
+
+/**
  * The owner links the right guest to a stay by hand, picked from the guests seen at this venue.
  * Replacing someone already linked needs `expectContactId` naming them (they are unlinked in the
  * same transaction). The guest gets the stay's remaining moments (more than 12 h past are
