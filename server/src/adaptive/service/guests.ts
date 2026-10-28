@@ -383,6 +383,8 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
   return {
     contactId,
     guest: { ...maskedGuest(contact), lang: contact.lang ?? null },
+    // Set by Cancel journeys (every venue) until the guest's next Wi-Fi login; null otherwise.
+    journeysCancelledAt: iso(contact.journeysCancelled?.at),
     venue: {
       venueId,
       firstVisitAt: iso(cv.firstVisitAt),

@@ -13,6 +13,9 @@
  *  - Twice is safe: the second call cancels nothing. Nothing about the person is deleted.
  *  - Another owner's guest is a 404; a guest Adaptive never saw has nothing running.
  *  - The owner's timeline says the owner cancelled it.
+ *  - The Adaptive guest drawer cancels by contact (2026-10-28): the guest's journeys at both of
+ *    the account's venues end, the guest detail shows the hold (`journeysCancelledAt`) until a
+ *    login at either venue lifts it; another owner's contact is a 404.
  */
 
 import {
@@ -45,8 +48,10 @@ import { taskIdFor } from '../../src/adaptive/core/runtime/ids';
 
 const RS: VenueFixture = { tenant: 'tenant_cg', venueId: 'venue_cg', apId: 'ap_cg', apMac: 'aa:dd:dd:dd:dd:01' };
 const XX: VenueFixture = { tenant: 'tenant_cg_other', venueId: 'venue_cg_x', apId: 'ap_cg_x', apMac: 'aa:dd:dd:dd:dd:02' };
+const RS2: VenueFixture = { tenant: 'tenant_cg', venueId: 'venue_cg_2', apId: 'ap_cg_2', apMac: 'aa:dd:dd:dd:dd:03' };
 
 const path = (tenant: string, guestId: string) => `/tenants/${tenant}/guests/by-guest/${guestId}/journeys`;
+const contactCancel = (tenant: string, contactId: string) => `/tenants/${tenant}/guests/${contactId}/journeys/cancel`;
 
 async function start(): Promise<void> {
   await resetEmulator();
@@ -166,6 +171,43 @@ async function main() {
       }
       await runUntil(now() + 30 * DAY_MS);
       assertEqual((await sentTo('cara.cg@test.local')) + (await sentTo('+41791117003')), sentBefore, 'no message after the cancel');
+    });
+
+    await test('the guest drawer cancels by contact: journeys at both venues end, the detail shows the hold until a login', async () => {
+      await start();
+      await setupVenue(RS2);
+      const atOne = await connect({ venue: RS, firstName: 'Eva', email: 'eva.cg@test.local', consent: true });
+      const atTwo = await connect({ venue: RS2, firstName: 'Eva', email: 'eva.cg@test.local', consent: true });
+      await runDue();
+      const contactId = await contactIdFor(RS.tenant, atOne);
+      assertEqual(await contactIdFor(RS.tenant, atTwo), contactId, 'one contact for both venues');
+      const running = (await docsWhere(COL.journeyInstances, 'contactId', contactId)).filter((i) => i.status === 'active');
+      assertEqual([...new Set(running.map((i) => i.venueId))].sort(), [RS.venueId, RS2.venueId].sort(), 'journeys at both venues');
+
+      const detail = `/tenants/${RS.tenant}/venues/${RS.venueId}/guests/${contactId}`;
+      assertEqual((await api.get(detail)).body.journeysCancelledAt, null, 'no hold yet');
+
+      const res = await api.call('POST', contactCancel(RS.tenant, contactId), { actor: OWNER_ACTOR });
+      assertEqual(res.status, 200, `cancel: ${res.text}`);
+      assertEqual(res.body.contactId, contactId, 'the contact');
+      assertEqual(res.body.cancelled, running.length, "both venues' journeys cancelled");
+      assertEqual(res.body.running, [], 'nothing left running');
+      assert(!('instanceId' in res.body.journeys[0]), 'instance ids stay inside');
+      const insts = await docsWhere(COL.journeyInstances, 'contactId', contactId);
+      assert(insts.every((i) => i.status === 'cancelled' && i.exitReason === 'guest_cancelled'), `all cancelled: ${JSON.stringify(insts.map((i) => [i.venueId, i.status]))}`);
+      assert((await api.get(detail)).body.journeysCancelledAt, 'the detail shows the hold');
+      assertEqual((await api.call('POST', contactCancel(RS.tenant, contactId), { actor: OWNER_ACTOR })).body.cancelled, 0, 'twice is safe');
+
+      // A login at the other venue lifts it: the hold is the account's, like the cancel.
+      await advance(MINUTE_MS);
+      await connect({ venue: RS2, firstName: 'Eva', email: 'eva.cg@test.local', consent: true, guestId: atTwo });
+      await runDue();
+      assertEqual((await api.get(detail)).body.journeysCancelledAt, null, 'the next login lifted it');
+
+      assertEqual((await api.call('POST', contactCancel(XX.tenant, contactId), { actor: OWNER_ACTOR })).status, 404, "another owner's contact");
+      assertEqual((await api.call('POST', contactCancel(RS.tenant, 'missingContact'), { actor: OWNER_ACTOR })).status, 404, 'a missing contact');
+      assertEqual((await api.call('POST', contactCancel(RS.tenant, 'no.such'), { actor: OWNER_ACTOR })).status, 400, 'a bad id');
+      assert((await api.call('POST', contactCancel(RS.tenant, contactId), {})).status >= 400, 'a cancel needs a person');
     });
 
     await test("another owner's guest is a 404; a guest Adaptive never saw has nothing running; a bad id is a 400", async () => {
