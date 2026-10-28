@@ -116,6 +116,9 @@ export async function enrolForEvent(args: {
     console.warn('[ADAPTIVE] account is live but no sending channel is set up — no journeys started');
     return created;
   }
+  // The owner cancelled this guest's journeys: nothing starts (a visit end, a scan, a stay
+  // moment, a queued start) until their next Wi-Fi login lifts it.
+  if (tsMs(who.contact.journeysCancelled?.at) !== null) return created;
   for (const j of await enabledJourneys(ctx)) {
     if (args.onlyJourney && j.journeyKey !== args.onlyJourney) continue;
     if (!triggerMatches(j.definition.entry.trigger, event, j.journeyKey)) continue;

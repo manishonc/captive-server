@@ -15,6 +15,7 @@
  *   messages       GET ?kind&days&cursor&limit&lang
  *   start-sending  POST
  *   guests/find    POST {guestId | contactId | email | phone}   (the MCP's lookup; a read)
+ *   guests/by-guest/:guestId/journeys   GET ?lang · POST cancel {lang?}   (the CMS guest list's Cancel journeys)
  *
  * No catch-all here: a path nobody matches falls through to router.ts's JSON 404.
  */
@@ -28,6 +29,7 @@ import { testSend } from '../service/testSend';
 import { getResults } from '../service/results';
 import { findGuest, getGuest, listGuests, listMessages, setGuestMarketing } from '../service/guests';
 import { startSending } from '../service/startSending';
+import { cancelGuestJourneys, getGuestJourneys } from '../service/guestJourneys';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE OWNER API');
@@ -93,6 +95,10 @@ router.post(
 );
 router.get(`${V}/messages`, handle(async (req) => listMessages(tenantOf(req), venueOf(req), req.query as Record<string, unknown>)));
 router.post(`${T}/guests/find`, handle(async (req) => findGuest(tenantOf(req), req.body)));
+// A CMS guest (CaptivePortal_Users id): their running journeys, and Cancel journeys (nothing is deleted).
+const G = `${T}/guests/by-guest/:guestId/journeys`;
+router.get(G, handle(async (req) => getGuestJourneys(tenantOf(req), idParam(req.params.guestId, 'guestId'), req.query as Record<string, unknown>)));
+router.post(`${G}/cancel`, handle(async (req) => cancelGuestJourneys(tenantOf(req), idParam(req.params.guestId, 'guestId'), req.body, ownerActorOf(req))));
 
 // ── Start sending ────────────────────────────────────────────────────────────
 

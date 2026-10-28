@@ -393,6 +393,7 @@ function journeyExited(c: Ctx, j: string, data: Record<string, unknown>): string
   const reason = str(data.reason) ?? '';
   if (reason === 'stay_cancelled') return t(l, `Journey ${j} ended: the booking was cancelled.`, `Journey ${j} beendet: die Buchung wurde storniert.`);
   if (reason === 'stay_unlinked') return t(l, `Journey ${j} ended: the booking was unlinked from this guest.`, `Journey ${j} beendet: die Buchung wurde von diesem Gast getrennt.`);
+  if (reason === 'guest_cancelled') return t(l, `Journey ${j} ended: you cancelled this guest's journeys.`, `Journey ${j} beendet: du hast die Journeys dieses Gasts abgebrochen.`);
   if (reason === 'switched_off') return t(l, `Journey ${j} ended: it or the venue was switched off.`, `Journey ${j} beendet: sie oder der Standort wurde ausgeschaltet.`);
   if (reason === 'goal' || status === 'converted') return t(l, `Journey ${j} finished: goal reached.`, `Journey ${j} abgeschlossen: Ziel erreicht.`);
   if (reason.startsWith('exit_on:')) {
