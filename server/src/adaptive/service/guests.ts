@@ -26,7 +26,9 @@ import { toJson } from '../store/serialize';
 import { tsMs } from '../store/time';
 import { now, refreshClock } from '../engine/clock';
 import { loadCatalogue, templateVersion, type Catalogue } from './catalogue';
-import { goalStillOpen, journeyAhead, journeyGoal, stepNamesOf, waitsForOfferEnd } from '../core/owner/journeyAhead';
+import { goalStillOpen, journeyAhead, journeyGoal, journeyHold, stepNamesOf, waitsForOfferEnd, type CreditNeed } from '../core/owner/journeyAhead';
+import { getWalletSnapshot } from '../../services/credits';
+import { spendableForChannel } from '../../services/creditBuckets';
 import { venueScope } from '../identity/resolve';
 import { writeOwnerMarketing } from '../identity/consent';
 import { contactPointId } from '../identity/key';
@@ -54,6 +56,20 @@ import {
 import { assertLookupKeyMatches } from './identityGuard';
 
 const TIMELINE_LIMIT = 500;
+
+/**
+ * Can the wallet pay a held message now (engine/sendPath.ts `stillCreditsShort`)? Read once, and
+ * only when a message waits short of credits; null when it can't be read (the last look stands).
+ */
+async function walletCanPay(tenantUserId: string, waits: Array<Record<string, any> | null | undefined>): Promise<((need: CreditNeed) => boolean) | null> {
+  if (!waits.some((w) => w?.kind === 'send_due' && w.creditsShort === true)) return null;
+  try {
+    const w = await getWalletSnapshot(tenantUserId);
+    return (need) => !w.suspended && spendableForChannel(w.channelBalances, need.channel as Parameters<typeof spendableForChannel>[1]) >= need.price;
+  } catch {
+    return null;
+  }
+}
 const CHANNELS: Channel[] = ['email', 'sms', 'whatsapp'];
 
 async function ownedVenue(tenantUserId: string, venueId: string) {
@@ -218,19 +234,23 @@ export async function listGuests(tenantUserId: string, venueId: string, query: {
   const insts = new Map(instSnaps.filter((s) => s.exists).map((s) => [s.id, s.data() as Record<string, any>]));
   const names = await journeyNames(lang);
   const purposes = await journeyPurposes();
+  const canPay = await walletCanPay(tenantUserId, [...insts.values()].filter((d) => d.status === 'active').map((d) => d.waiting));
   const guests = cvs.map((c, i) => {
     const contact = (contactSnaps[i]?.data() ?? null) as ContactDoc | null;
     const journeys = Object.entries(c.doc.journeys ?? {})
       .map(([key, j]) => {
         const inst = j.activeInstanceId ? insts.get(j.activeInstanceId) : undefined;
+        const running = Boolean(inst && inst.status === 'active');
         return {
           journeyKey: key,
           name: names[key] ?? key,
           purpose: purposes[key] ?? null,
-          running: Boolean(inst && inst.status === 'active'),
+          running,
           mode: inst?.mode === 'live' ? 'live' : inst ? 'test' : null,
           nextAt: iso(inst?.waiting?.untilAt),
           waitingFor: inst?.waiting?.kind ?? null,
+          // Why the next message waits (quiet hours, credits …), for the list's status.
+          ...journeyHold(running ? inst?.waiting : null, canPay),
           lastExitReason: j.lastExitReason ?? null,
           lastEnteredAt: iso(j.lastEnteredAt),
         };
@@ -370,6 +390,8 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
   // Guest full view: whether a goal can still end a journey early is read on the engine's clock.
   await refreshClock();
   const nowMs = now();
+  // "What will happen": a held message short of credits, measured against the wallet now.
+  const canPay = await walletCanPay(tenantUserId, record.instances.filter((i) => i.data.status === 'active').map((i) => i.data.waiting));
   // Guest full view: credits per venue and channel, counted like `creditsUsed`.
   const creditsByVenue: Record<string, { total: number; byChannel: Record<string, number> }> = {};
   for (const s of Object.values(record.sends)) {
@@ -416,6 +438,8 @@ export async function getGuest(tenantUserId: string, venueId: string, contactId:
           nextAt: active ? iso(i.data.waiting?.untilAt) : null,
           purpose: purposes[i.data.journeyKey] ?? null,
           waitingFor: active ? i.data.waiting?.kind ?? null : null,
+          // "What will happen": why the next message waits past its time (2026-10-29).
+          ...journeyHold(active ? i.data.waiting : null, canPay),
           next: active && def ? journeyAhead(def, { status: i.data.status, waiting: i.data.waiting, cursor: i.data.cursor }, steps) : null,
           offerEndsAt: offerOpen ? iso(i.data.vars?.offerExpiresAt) : null,
           endsWithOffer: offerOpen && def !== null && waitsForOfferEnd(def, i.data.waiting?.nodeId ?? i.data.cursor?.nodeId),

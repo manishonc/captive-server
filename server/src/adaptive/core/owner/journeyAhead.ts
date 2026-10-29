@@ -134,3 +134,39 @@ export function journeyGoal(def: JourneyDefinition, names: Record<string, string
   const onReach = def.goal?.onReach;
   return { event, step: onReach && names[onReach] ? { key: onReach, name: names[onReach] } : null };
 }
+
+/**
+ * Why a running journey's next message waits past its time (2026-10-29, "What will happen"):
+ * the reason the engine kept on the held send (`waiting.lastDeferReason`). A message planned for
+ * a time of day (`slot`) isn't held, and only a send that waits is (`send_due`).
+ */
+export const HOLD_REASONS = ['quiet_hours', 'spacing', 'credits', 'paused', 'lapse_unknown', 'venue_ceiling', 'platform_ceiling', 'provider_retry'] as const;
+export type HoldReason = (typeof HOLD_REASONS)[number];
+
+export interface JourneyHold {
+  heldBecause: HoldReason | null;
+  /** The message can't be paid now, even when another rule (quiet hours, a pause) set its time. */
+  creditsShort: boolean;
+}
+
+/** What a held message's credit shortage was measured for (`waiting.creditsShortFor`). */
+export interface CreditNeed {
+  channel: string;
+  price: number;
+}
+
+/**
+ * `canPayNow`: the wallet now, as the engine checks it at a send (`stillCreditsShort`), so a
+ * top-up shows at once rather than at the message's next look: no shortage then, and a message
+ * held only for credits just waits for that look (its time is shown). Without it (the wallet
+ * couldn't be read) the last look stands.
+ */
+export function journeyHold(
+  waiting: { kind?: string | null; lastDeferReason?: string | null; creditsShort?: boolean | null; creditsShortFor?: CreditNeed | null } | null | undefined,
+  canPayNow?: ((need: CreditNeed) => boolean) | null,
+): JourneyHold {
+  if (waiting?.kind !== 'send_due') return { heldBecause: null, creditsShort: false };
+  const reason = (HOLD_REASONS as readonly string[]).includes(String(waiting.lastDeferReason)) ? (waiting.lastDeferReason as HoldReason) : null;
+  const paid = waiting.creditsShort === true && Boolean(waiting.creditsShortFor && canPayNow?.(waiting.creditsShortFor));
+  return { heldBecause: reason === 'credits' && paid ? null : reason, creditsShort: waiting.creditsShort === true && !paid };
+}

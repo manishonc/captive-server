@@ -1,7 +1,8 @@
 /**
  * Guest full view, "What will happen": a running journey's next step in the owner's terms
  * (`journeyAhead`), its goal (`journeyGoal`) and the step names (`stepNamesOf`), on the real
- * seeded Welcome → come back v2 and Wi-Fi & info card definitions.
+ * seeded Welcome → come back v2 and Wi-Fi & info card definitions; and why the next message
+ * waits past its time (`journeyHold`, 2026-10-29).
  *
  * Run: npx tsx tests/adaptiveOwnerAhead.test.ts   (from captive-server/server)
  *
@@ -9,7 +10,7 @@
  */
 
 import { journeyDefinitionSchema, type JourneyDefinition } from '../src/adaptive/core/schemas';
-import { goalStillOpen, journeyAhead, journeyGoal, stepNamesOf, waitsForOfferEnd } from '../src/adaptive/core/owner/journeyAhead';
+import { HOLD_REASONS, goalStillOpen, journeyAhead, journeyGoal, journeyHold, stepNamesOf, waitsForOfferEnd } from '../src/adaptive/core/owner/journeyAhead';
 import { welcomeSecondVisitV2 } from '../src/adaptive/seed/definitions/journeysWelcomeV2';
 import { welcomeSecondVisit } from '../src/adaptive/seed/definitions/journeysRestaurant';
 import { wifiInfoCard } from '../src/adaptive/seed/definitions/journeysGuestInfo';
@@ -100,6 +101,29 @@ test('the goal is open until it is reached or its window is over', () => {
   assertEqual(goalStillOpen(welcome, { goal: null, startedAtMs: start }, start + 91 * day), false, 'past its 90-day window');
   assertEqual(goalStillOpen(welcome, { goal: null, startedAtMs: null }, start + 91 * day), true, 'no start time: kept');
   assertEqual(goalStillOpen(wifi, { goal: null, startedAtMs: start }, start), false, 'no goal');
+});
+
+test('a held message: the engine’s reason for each hold; not a planned time of day, not another wait; credits short on its own', () => {
+  for (const reason of HOLD_REASONS) {
+    assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: reason }), { heldBecause: reason, creditsShort: false }, reason);
+  }
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'quiet_hours', creditsShort: true }), { heldBecause: 'quiet_hours', creditsShort: true }, 'quiet hours set the time, credits are short too');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'slot' }), { heldBecause: null, creditsShort: false }, 'planned for the afternoon: not held');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'defer' }), { heldBecause: null, creditsShort: false }, 'an unnamed reason: nothing guessed');
+  assertEqual(journeyHold({ kind: 'send_due' }), { heldBecause: null, creditsShort: false }, 'a send with no reason yet');
+  assertEqual(journeyHold({ kind: 'timer', lastDeferReason: 'quiet_hours', creditsShort: true }), { heldBecause: null, creditsShort: false }, 'a timer (the 15-minute wait): not a held message');
+  assertEqual(journeyHold(null), { heldBecause: null, creditsShort: false }, 'not running');
+});
+
+test('a held message and the wallet now: a top-up clears the shortage at once; a message held only for credits then just waits for its look', () => {
+  const need = { channel: 'sms', price: 15 };
+  const canPay = (n: { channel: string; price: number }) => n.price <= 20;
+  const cannot = () => false;
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'credits', creditsShort: true, creditsShortFor: need }, canPay), { heldBecause: null, creditsShort: false }, 'credits only, paid now');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'quiet_hours', creditsShort: true, creditsShortFor: need }, canPay), { heldBecause: 'quiet_hours', creditsShort: false }, 'quiet hours, paid now');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'credits', creditsShort: true, creditsShortFor: need }, cannot), { heldBecause: 'credits', creditsShort: true }, 'still short');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'credits', creditsShort: true }, canPay), { heldBecause: 'credits', creditsShort: true }, 'no measure of the need: the last look stands');
+  assertEqual(journeyHold({ kind: 'send_due', lastDeferReason: 'credits', creditsShort: true, creditsShortFor: need }, null), { heldBecause: 'credits', creditsShort: true }, 'the wallet could not be read');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
