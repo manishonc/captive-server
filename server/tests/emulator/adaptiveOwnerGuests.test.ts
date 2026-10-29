@@ -7,7 +7,8 @@
  *  - Results: the running-card numbers equal the JourneyStats docs after a rollup; credits
  *    equal the ledger; revenue = came back × the venue's average spend; the test run apart;
  *    every venue at once without `venueId`; waiting for credits; 400 / 403.
- *  - Guests: a masked list with a cursor, newest first; a foreign contact id names nothing.
+ *  - Guests: a masked list with a cursor, newest first; a foreign contact id names nothing; why
+ *    the next message waits (`heldBecause`, `creditsShort`, 2026-10-29) on the row and the drawer.
  *  - A STOP through another account's message shows as "another place" and none of its ids.
  *  - Stop marketing (scope venue / all): the next marketing step is skipped, service messages
  *    go on, a reconnect with the box ticked (even with a new phone) doesn't re-grant, idempotent;
@@ -448,6 +449,47 @@ async function main() {
       assertEqual([messages.status, messages.body.messages?.length, typeof messages.body.nextCursor], [200, 2, 'string'], `messages?limit=2.5: ${messages.text.slice(0, 200)}`);
       const rest = await api.get(`${V}/messages?limit=2.5&cursor=${encodeURIComponent(messages.body.nextCursor)}`);
       assert(rest.status === 200 && rest.body.messages?.length >= 1, `the next page: ${rest.status} ${rest.text.slice(0, 200)}`);
+    });
+
+    await test("guests: why the next message waits (heldBecause) — the 15-minute wait isn't a hold; live without credits → credits; then quiet hours with the credits still short; a top-up shows at once; a test run at night → quiet hours only", async () => {
+      await resetEmulator();
+      await seedCatalogue();
+      await setupVenue(RS);
+      await setupVenue(X);
+      // The welcome only: the review ask (a second marketing message) switched off.
+      for (const f of [RS, X]) {
+        await saveSetups(f.tenant, { playbookKey: 'restaurant_growth', venueIds: [f.venueId], journeys: { review_ask: { enabled: false, slots: {} } } }, { uid: `${f.tenant}_owner`, kind: 'tenant_user', role: 'ADMIN' });
+      }
+      clearCaches();
+      const t0 = nextTuesday1240() + 7 * HOUR_MS; // 19:40 in Zurich; quiet hours are 21:00–09:00
+      await setClock(t0);
+      await setLaunch({ [RS.tenant]: 'live', [X.tenant]: 'test' }, { paused: false }); // no wallet for RS
+      const welcomeOf = async (f: VenueFixture, contactId: string) => {
+        const V = `/tenants/${f.tenant}/venues/${f.venueId}`;
+        const [detail, list] = [await api.get(`${V}/guests/${contactId}`), await api.get(`${V}/guests`)];
+        assertEqual([detail.status, list.status], [200, 200], 'GET guest and guests');
+        const d = detail.body.journeys.find((j: any) => j.journeyKey === A1);
+        const row = list.body.guests.find((g: any) => g.contactId === contactId)?.journeys.find((j: any) => j.journeyKey === A1);
+        return { detail: [d?.waitingFor, d?.heldBecause, d?.creditsShort], row: [row?.waitingFor, row?.heldBecause, row?.creditsShort] };
+      };
+
+      const live = await joined(RS.tenant, { venue: RS, email: 'held.live@test.local', consent: true });
+      assertEqual(await welcomeOf(RS, live), { detail: ['timer', null, false], row: ['timer', null, false] }, 'the 15-minute wait is not a hold');
+      await advance(15 * MINUTE_MS);
+      await runDue();
+      assertEqual(await welcomeOf(RS, live), { detail: ['send_due', 'credits', true], row: ['send_due', 'credits', true] }, 'waiting for credits');
+      // The hourly re-checks run into quiet hours: quiet hours win the 21:55 look, the credits are still short.
+      await runUntil(t0 + 2 * HOUR_MS + 30 * MINUTE_MS);
+      assertEqual(await welcomeOf(RS, live), { detail: ['send_due', 'quiet_hours', true], row: ['send_due', 'quiet_hours', true] }, 'quiet hours set the time; still short of credits');
+      // A top-up shows at once (the wallet now, as the engine reads it), not only at the next look.
+      await seedWallet(RS.tenant, 5000);
+      assertEqual(await welcomeOf(RS, live), { detail: ['send_due', 'quiet_hours', false], row: ['send_due', 'quiet_hours', false] }, 'credits added: quiet hours only');
+
+      // 22:10: a test run needs no credits, so quiet hours alone hold its welcome.
+      const night = await joined(X.tenant, { venue: X, email: 'held.test@test.local', consent: true });
+      await advance(15 * MINUTE_MS);
+      await runDue();
+      assertEqual((await welcomeOf(X, night)).detail, ['send_due', 'quiet_hours', false], 'a test run at night: quiet hours only');
     });
 
     await test("a STOP caused by another account's message: none of its ids (send key, venue, account, contact) in the owner's answers", async () => {
