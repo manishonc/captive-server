@@ -32,6 +32,7 @@ interface Probe {
 }
 
 import { birthdayMonthQuery, lastVisitRangeQuery } from '../scans/finders';
+import { contactAllEventsQuery, contactReferralCodesQuery, contactSendsInStatusQuery, contactVisitsQuery, friendOnCodesQuery } from '../erase/history';
 const past = () => new Date(Date.now() - 1000);
 
 const PROBES: Probe[] = [
@@ -95,6 +96,13 @@ const PROBES: Probe[] = [
   { name: 'AdaptiveVenues(status)', run: () => db.collection(COL.adaptiveVenues).where('status', '==', 'on').limit(1).get() },
   // An owner's link by hand gives back that guest's journeys of the stay (PR D).
   { name: 'JourneyInstances(context.stayId, contactId)', run: () => stayContactInstancesQuery('_probe', '_probe').limit(1).get() },
+  // Erase step 3: a removed guest's history — equality only (merged single-field indexes; must not
+  // be exempted). The admin card's count of erases on their way isn't probed: it shows "—" instead.
+  { name: 'JourneyEvents(contactId)', run: () => contactAllEventsQuery('_probe').limit(1).get() },
+  { name: 'Visits(contactId)', run: () => contactVisitsQuery('_probe').limit(1).get() },
+  { name: 'JourneySends(contactId, status)', run: () => contactSendsInStatusQuery('_probe', 'dispatching').limit(1).get() },
+  { name: 'ReferralCodes(contactId)', run: () => contactReferralCodesQuery('_probe').limit(1).get() },
+  { name: 'ReferralCodes(friendContactIds contains)', run: () => friendOnCodesQuery('_probe').limit(1).get() },
 ];
 
 export interface IndexCheckResult {

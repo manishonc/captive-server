@@ -20,6 +20,9 @@
  *  - AI agents (PR F2a): an `agent_run` task only starts in the AI lane (brain/lane.ts) — one
  *    run at a time, outside the claimed batch, so due sends never wait for a model. This is the
  *    only process that calls a model (through the cms relay).
+ *  - erase step 3: `erase_history` deletes a removed guest's history once their venues' numbers
+ *    have counted it (it waits and tries again until then), `erase_sweep` is the admin's
+ *    "Erase leftover history" (erase/).
  *
  * Identity-key guard (the key is derived from GUEST_OTP_PEPPER, see identity/key.ts).
  * The first connect task whose key (the API's, carried on the task) equals this
@@ -65,6 +68,8 @@ import { scanWatchdog, type ScanVenuePayload } from '../scans/schedule';
 import { handleScanVenue } from '../scans/run';
 import { handleScanTrigger, type ScanTriggerPayload } from '../scans/trigger';
 import { closeAbandonedRuns, sweepPendingApplies } from '../brain/run';
+import { ERASE_WAIT_MS, eraseHistory } from '../erase/history';
+import { runEraseSweep } from '../erase/sweep';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -352,6 +357,26 @@ export class AdaptiveWorker {
           // batch, due sends above all, never waits for a model.
           await this.aiLane.take(task, env);
           return;
+        case 'erase_history': {
+          // Erase step 3: a removed guest's history, once their venues' numbers have it all.
+          const contactId = typeof task.payload.contactId === 'string' ? task.payload.contactId : '';
+          if (!contactId || !task.tenantUserId) break;
+          const r = await eraseHistory(task.tenantUserId, contactId, { onProgress: () => extendLease(task.id, this.id) });
+          if (r.outcome === 'waiting' || r.outcome === 'more') {
+            await releaseTask(task.id, this.id, r.outcome === 'waiting' ? ERASE_WAIT_MS : 5_000, env.now);
+            return;
+          }
+          const erased = Object.entries(r.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`);
+          console.log(`[ADAPTIVE WORKER] erase ${contactId}: ${r.outcome === 'kept' ? 'the contact exists — nothing erased' : erased.join(', ') || 'nothing left'}`);
+          break;
+        }
+        case 'erase_sweep': {
+          // Erase step 3: the admin's "Erase leftover history" — queues the erases it finds.
+          const runId = typeof task.payload.runId === 'string' ? task.payload.runId : '';
+          const r = runId ? await runEraseSweep(runId, { now: env.now, onProgress: () => extendLease(task.id, this.id) }) : null;
+          if (r) console.log(`[ADAPTIVE WORKER] erase sweep ${runId}: ${r.scanned} read, ${r.found} of ${r.contacts} contacts gone, ${r.queued} erases queued`);
+          break;
+        }
         default:
           await releaseTask(task.id, this.id, 10 * 60_000, env.now); // a kind this build doesn't know yet
           return;

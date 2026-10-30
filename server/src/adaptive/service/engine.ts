@@ -34,6 +34,7 @@ import { failingFeedsQuery } from '../stays/store';
 import { pollFeed } from '../stays/sync';
 import { checkStayFeed, getStayFeed, saveStayFeed } from './stays';
 import { healthLists } from './adminTools';
+import { eraseSweepStatus } from '../erase/sweep';
 
 async function countWhere(status: string): Promise<number> {
   const snap = await db.collection(COL.journeyTasks).where('status', '==', status).count().get();
@@ -41,7 +42,7 @@ async function countWhere(status: string): Promise<number> {
 }
 
 export async function getEngineStatus() {
-  const [statusSnap, settings, queued, leased, dead, oldest, feedsTotal, feedsFailing, lists] = await Promise.all([
+  const [statusSnap, settings, queued, leased, dead, oldest, feedsTotal, feedsFailing, lists, eraseSweep] = await Promise.all([
     db.collection(COL.config).doc(ENGINE_STATUS_DOC_ID).get(),
     readEngineSettings(),
     countWhere('queued'),
@@ -62,6 +63,8 @@ export async function getEngineStatus() {
     failingFeedsQuery().count().get().then((s) => s.data().count),
     // The admin "Launch & health" card (PR D): the newest dead tasks and the failing feeds.
     healthLists(),
+    // Erase step 3: the last "Erase leftover history" sweep and the erases on their way.
+    eraseSweepStatus(),
   ]);
   const apiFingerprint = keyFingerprint();
   const workers = Object.entries((statusSnap.get('workers') ?? {}) as Record<string, Record<string, unknown>>).map(([id, w]) => {
@@ -93,6 +96,7 @@ export async function getEngineStatus() {
     feeds: { total: feedsTotal, failing: feedsFailing },
     indexCheck: toJson(statusSnap.get('indexCheck') ?? null),
     ...lists,
+    eraseSweep,
   };
 }
 

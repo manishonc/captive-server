@@ -14,7 +14,7 @@
  * Behind the `Scheduler` interface, so Cloud Tasks can replace it later.
  */
 
-import { FieldValue, Timestamp, type Transaction } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp, type Transaction, type WriteBatch } from 'firebase-admin/firestore';
 import { db } from '../../firebase';
 import { COL } from '../store/collections';
 import { shardOf, taskIdFor } from '../core/runtime/ids';
@@ -38,7 +38,10 @@ export type TaskKind =
   | 'agent_run'
   // Scan journeys (PR S): a venue's daily scan, and one guest's occasion found by it
   | 'scan_venue'
-  | 'scan_trigger';
+  | 'scan_trigger'
+  // Erase step 3: a removed guest's history deleted, and the admin's sweep for leftovers
+  | 'erase_history'
+  | 'erase_sweep';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;
@@ -132,6 +135,17 @@ export const firestoreScheduler: Scheduler = {
       .catch(() => undefined);
   },
 };
+
+/**
+ * In a write batch, beside the writes it belongs to: created with them or not at all (erase step 3:
+ * the contact's delete and its history erase). Overwrites a task with the same id, so give it a
+ * dedupe key no earlier task can have.
+ */
+export function scheduleInBatch(batch: WriteBatch, task: TaskSpec): string {
+  const id = taskIdFor(task.dedupeKey);
+  batch.set(col().doc(id), taskDoc(task, id));
+  return id;
+}
 
 /** Claims up to `limit` due tasks for this worker. `engineNow` may be the sandbox clock. */
 export async function claimDue(workerId: string, engineNow: number, limit: number): Promise<ClaimedTask[]> {

@@ -31,6 +31,8 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
   stay_trigger → a linked guest's stay moment (arrival 17:00, day 2 10:00, …): the stay journey starts
   scan_venue   → a venue's daily scan, 03:00 venue time (PR S): Win-back / Birthday / Holidays / Slow times
   scan_trigger → one guest's occasion found by a scan: re-checked, then the scan journey starts
+  erase_history → a removed guest's history deleted, 20 min after Remove guest (erase step 3)
+  erase_sweep  → the admin's "Erase leftover history": queues the erase of every leftover it finds
 
 Twilio status / inbound, Brevo webhook, the /u unsubscribe page ── +1 guarded line each ──▶ event + signal task
 the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ─────────────────────▶ event + signal task
@@ -754,12 +756,40 @@ background colour, the sign-off, and a footer with the venue's address, why the 
 | CMS rating (PR E) | ≤ 2★: no more marketing at that venue; ≤ 3★: the owner gets an email (with the private feedback, which is not kept in the log) |
 | The owner's "Stop marketing to this guest" (PR D) | consent revoked by the owner (`revokedVia: owner`) on every channel at one venue or all their venues; a splash tick can't undo it and START doesn't re-grant it; the owner's Resume gives back only what the guest had said yes to. "All venues" also covers venues the guest visits later (`ownerStoppedAll`). A guest's own STOP over an owner's stop replaces it (Resume can't undo the guest's no); a START texted or a splash yes given while the owner's stop stands is kept (`ownerPrior: granted`) and comes back with the owner's Resume — at every venue, also one opened after "all venues" |
 | The owner's "Cancel journeys" (the Adaptive guest drawer, or the CMS guest list before Remove guest) | every running journey of the guest at all the owner's venues ends `cancelled` / `guest_cancelled` (rev-checked, its timer task cancelled, the venue slot freed) and the contact is held (`journeysCancelled`): `enrolForEvent` starts nothing — a visit end, a scan, a stay moment, a queued start — until the guest's next Wi-Fi login lifts it (a login from before the cancel doesn't). Consent is untouched and nothing is deleted |
-| The owner's "Remove guest" (the CMS guest list; erase step 2) | after the cancel above, the account forgets the person: their queued logins are cancelled, the account's key comes off their ContactPoints with a `forgottenAt[account]` stamp (`handleConnect` drops a login from before it), their touches are anonymised (time and channel kept for the weekly limit), their stays unlinked, their codes expired, then the Contact and its ContactVenues are deleted — the next login is a new guest (visit 1, consent asked again). The global blocks on the points (STOP, 21610, spam, bounces) stay; an email unsubscribe, the owner's stop and a low rating go with the contact. Journeys, sends, events, visits and the consent ledger stay by id until the full erase or the TTL. A spam complaint about an old message still blocks the address it went to |
+| The owner's "Remove guest" (the CMS guest list; erase step 2) | after the cancel above, the account forgets the person: their queued logins are cancelled, the account's key comes off their ContactPoints with a `forgottenAt[account]` stamp (`handleConnect` drops a login from before it), their touches are anonymised (time and channel kept for the weekly limit), their stays unlinked, their codes expired, then the Contact and its ContactVenues are deleted — the next login is a new guest (visit 1, consent asked again). The global blocks on the points (STOP, 21610, spam, bounces) stay; an email unsubscribe, the owner's stop and a low rating go with the contact. The same write queues the erase of their history (erase step 3, below), 20 minutes on; only the consent ledger stays. A spam complaint about an old message still blocks the address it went to until the erase deletes the message |
 | Splash "I don't want to stay in touch" on a later visit (the portal sends `consentAsked: true` when the guest saw the consent step) | the guest's yes at that venue is taken back on every channel (`source: splash`, `revokedVia: splash`; not sticky, so a later Accept gives it back); a STOP or unsubscribe stays as it is; a yes the owner's stop is holding is taken back too (`ownerPrior: none`), so Resume gives nothing back. A venue that hides the consent step sends `consentAsked: false`: nothing changes. The old guest record (`CaptivePortal_Users`) keeps its first answer, as before |
 
 Each hook runs after today's processing and never changes today's reply. Brevo events without an
 Adaptive sendKey cost nothing; Twilio statuses are only looked up while an account is not off or sending
 is not paused.
+
+## Erase a removed guest's history (erase step 3)
+
+Remove guest (above) deletes the person's Adaptive record and, in the same write, queues an
+`erase_history` task (`erase/history.ts`, id from `erase_history:{contactId}`, no guest data) due 20
+minutes later. The task:
+
+- does nothing to a contact that still exists, nor to another account's docs; a running journey or
+  a `dispatching` message (never expected after the forget) fails it — it shows as a dead task;
+- rolls each of the person's venues up and erases nothing until those numbers have counted all their
+  events (`countedBy` the rollup watermark) — until then it waits 3 minutes and tries again; so
+  Results, journey numbers and credits never change;
+- deletes the low-rating alert of each of their ratings (`al_` + hash of `rating:{eventId}`), their
+  bring-a-friend codes and their id on other guests' codes, clears `contactId`, `wifiGuestId`,
+  `instanceId` and the click details on their journey links (the links keep redirecting; the offer,
+  rating and info pages answer "Not found" without the message), then deletes their messages,
+  journeys, visits and events — in batches, a big history over several runs.
+
+Kept: the consent ledger (ids, channel, action, times — the proof of every yes and STOP), JourneyStats,
+the bandit's arms and the credit ledger (no guest data). Left to their TTL: done tasks (7 days, ids
+only) and the sign-up breaker's places (2 days). A report that arrives after the erase finds no message
+and is dropped (a Brevo spam report too — Brevo's own blocklist still stops that address).
+
+**Leftovers.** Launch & health → "Erase leftover history" (`POST /admin/erase-sweep`) queues one
+`erase_sweep` task: it reads every journey, visit and message by id (two fields each), and queues an
+erase, due now, for each contact they name that no longer exists — unless the forget's own erase is
+still on its way. It covers guests removed between erase step 2 and step 3, and any erase that died.
+Its state is `AdaptiveConfig/erase_sweep` (`GET /admin/engine` → `eraseSweep`).
 
 ## Alerts
 
@@ -1098,7 +1128,10 @@ launches sending". When the account goes live, such a venue **waits for one clic
    The other stay lookups (`Stays` by `feedId`, by `venueId` + `contactId`; `StayFeeds` by `status`;
    `JourneyInstances` by `context.stayId` + `status`) are equality-only and use the automatic single-field
    indexes — don't exempt those fields. The worker probes them all. So are PR D's lookups by `contactId`
-   (JourneyInstances, JourneySends, Stays, ContactVenues) and `VenuePlaybooks` by `venueId`.
+   (JourneyInstances, JourneySends, Stays, ContactVenues) and `VenuePlaybooks` by `venueId`, and erase
+   step 3's: `JourneyEvents` and `Visits` by `contactId`, `JourneySends` by `contactId` + `status`,
+   `ReferralCodes` by `contactId` and `friendContactIds` (array-contains). After deploying erase step 3
+   (server and worker, engine `2026-10-30.a`), run Launch & health → "Erase leftover history" once.
 
    TTL policies:
 

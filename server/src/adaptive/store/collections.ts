@@ -78,6 +78,8 @@ export const ENGINE_STATUS_DOC_ID = 'engine_status';
 export const DEV_CLOCK_DOC_ID = 'dev_clock';
 /** `AdaptiveConfig/whatsapp` (PR W1): the Meta connection (WABA id), sync state, limits, the tick's lease. */
 export const WHATSAPP_DOC_ID = 'whatsapp';
+/** `AdaptiveConfig/erase_sweep` (erase step 3): the admin's last "Erase leftover history" run. */
+export const ERASE_SWEEP_DOC_ID = 'erase_sweep';
 export const contactVenueId = (contactId: string, venueId: string) => `${contactId}_${venueId}`;
 export const guestInfoId = (venueId: string) => `venue_${venueId}`;
 /** One calendar feed per venue, by construction (D-C34): a second save updates the same doc. */

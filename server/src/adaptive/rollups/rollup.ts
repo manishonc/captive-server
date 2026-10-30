@@ -35,7 +35,7 @@ const MAX_PAGES = 20;
 export const rollupStateId = (venueId: string) => `${venueId}_rollup`;
 const statsCol = () => db.collection(COL.journeyStats);
 
-interface Watermark {
+export interface Watermark {
   at: Timestamp;
   eventId: string;
 }
@@ -56,6 +56,19 @@ export function venueEventsQuery(venueId: string, cutoff: Date, after: Watermark
 function readWatermark(snap: DocumentSnapshot): Watermark | null {
   const w = snap.get('watermark') as { at?: unknown; eventId?: unknown } | undefined;
   return w && w.at instanceof Timestamp && typeof w.eventId === 'string' ? { at: w.at, eventId: w.eventId } : null;
+}
+
+/** Erase step 3: how far the venue's numbers have counted its log (null: nothing yet). */
+export async function rollupWatermark(venueId: string): Promise<Watermark | null> {
+  return readWatermark(await statsCol().doc(rollupStateId(venueId)).get());
+}
+
+/** Whether the rollup has counted the event at `(recordedAt, id)` — it reads the log in that order. */
+export function countedBy(w: Watermark | null, recordedAt: Timestamp, eventId: string): boolean {
+  if (!w) return false;
+  if (recordedAt.seconds !== w.at.seconds) return recordedAt.seconds < w.at.seconds;
+  if (recordedAt.nanoseconds !== w.at.nanoseconds) return recordedAt.nanoseconds < w.at.nanoseconds;
+  return eventId <= w.eventId;
 }
 
 function sameWatermark(a: Watermark | null, b: Watermark | null): boolean {
