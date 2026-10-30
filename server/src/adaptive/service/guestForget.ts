@@ -13,9 +13,10 @@
  *     come off, and `forgottenAt[account]` is stamped — a login from before it is dropped
  *     (engine/route.ts), so a late retry can't bring them back. The global blocks (STOP, 21610,
  *     spam, bounces) stay: they are the number's, for every owner.
- *  4. Their entries in the cross-owner touch list are anonymised in place (time and channel stay,
- *     so other owners' weekly limit still counts them); their stays are unlinked; their
- *     bring-a-friend codes expire.
+ *  4. This account's entries in their weekly-limit list (the cross-owner touches) are deleted, so
+ *     the weekly limit and the spacing start fresh for its messages (Manish, 2026-10-30: "Clear on
+ *     Remove"; until then they were anonymised and kept counting for 7 days). Other owners'
+ *     entries stay. Their stays are unlinked; their bring-a-friend codes expire.
  *  5. Nothing running any more (checked again) → their per-venue rows and the contact are
  *     deleted, then the points are stripped once more (a send that finished meanwhile may have
  *     written to one).
@@ -68,7 +69,7 @@ async function forgetContact(tenantUserId: string, contactId: string, actor: Act
   await refreshClock();
   const at = now();
   for (const pointId of pointIds) await stripPoint(pointId, tenantUserId, contactId, at);
-  await anonymiseTouches(contact.networkId, contactId);
+  await dropTouches(contact.networkId, contactId);
   await unlinkContactStays(tenantUserId, contactId, actor.uid);
   await expireReferralCodes(contactId, at);
 
@@ -153,25 +154,22 @@ async function stripPoint(pointId: string, tenantUserId: string, contactId: stri
 }
 
 /**
- * Their touches from this account's messages, anonymised in place: what's left is a time and a
- * channel, so the weekly limit across owners still counts them. Never the person's pointIds.
+ * Their weekly-limit entries from this account's messages are deleted. So are entries already
+ * anonymised (no account, no message): an owner who forgot the person left them — a removal from
+ * before this rule (2026-10-30) or a deleted account — and this rule clears those. Other owners'
+ * entries stay. Never the person's pointIds.
  */
-async function anonymiseTouches(networkId: string | null | undefined, contactId: string): Promise<void> {
+async function dropTouches(networkId: string | null | undefined, contactId: string): Promise<void> {
   if (!networkId) return;
   const sends = await db.collection(COL.journeySends).where('contactId', '==', contactId).select().get();
   const keys = new Set(sends.docs.map((d) => d.id));
-  if (!keys.size) return;
+  const gone = (t: Partial<MarketingTouch> | null | undefined) => !t || (typeof t.sendKey === 'string' ? keys.has(t.sendKey) : !t.tenantUserId);
   const ref = db.collection(COL.networkPeople).doc(networkId);
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
-    const touches = snap.get('recentMarketingTouches') as MarketingTouch[] | undefined;
-    if (!snap.exists || !Array.isArray(touches) || !touches.some((t) => keys.has(t?.sendKey))) return;
-    tx.update(ref, {
-      recentMarketingTouches: touches.map((t) =>
-        keys.has(t?.sendKey) ? { at: t.at ?? null, channel: t.channel ?? null, tenantUserId: null, venueId: null, sendKey: null } : t,
-      ),
-      updatedAt: new Date(),
-    });
+    const touches = snap.get('recentMarketingTouches') as Array<Partial<MarketingTouch> | null> | undefined;
+    if (!snap.exists || !Array.isArray(touches) || !touches.some(gone)) return;
+    tx.update(ref, { recentMarketingTouches: touches.filter((t) => !gone(t)), updatedAt: new Date() });
   });
 }
 
