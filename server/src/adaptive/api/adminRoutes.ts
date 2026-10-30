@@ -5,6 +5,7 @@
  *
  *   launch              GET · POST check {change} · PUT {change, baseVersion?, confirm?, note?, pauseReason?}
  *   tasks/:id/retry     POST
+ *   erase-sweep         POST                       (erase step 3: queues "Erase leftover history"; 409 while one runs)
  *   guests/search       POST {email | phone}     (POST: addresses never land in URLs or logs)
  *   guests/:contactId   GET ?lang
  *   decisions/replay    POST {sendKey | eventId, lang?}
@@ -25,6 +26,7 @@ import { adminGuest, retryTask, searchGuests } from '../service/adminTools';
 import { replayDecision } from '../service/replay';
 import { journeyBanditNumbers } from '../service/banditAdmin';
 import { getAgentRun, getAgentsAdmin, listAgentRuns, putAgentSettings, testConnection } from '../service/agentsAdmin';
+import { startEraseSweep } from '../erase/sweep';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE ADMIN API');
@@ -47,6 +49,8 @@ router.put(
 );
 
 router.post('/admin/tasks/:taskId/retry', handle(async (req) => retryTask(idParam(req.params.taskId, 'taskId'), adminActorOf(req))));
+// Erase step 3: "Erase leftover history" — queues the sweep (its state is GET /admin/engine `eraseSweep`).
+router.post('/admin/erase-sweep', handle(async (req) => startEraseSweep(adminActorOf(req))));
 
 router.post(
   '/admin/guests/search',

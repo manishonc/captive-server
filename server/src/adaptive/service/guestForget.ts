@@ -19,10 +19,12 @@
  *  5. Nothing running any more (checked again) → their per-venue rows and the contact are
  *     deleted, then the points are stripped once more (a send that finished meanwhile may have
  *     written to one).
+ *  6. Erase step 3 (2026-10-30): the same batch queues their history's erase, 20 minutes on
+ *     (erase/history.ts) — journeys, messages, events, visits, rating alerts, links' ids. A
+ *     forgotten contact always gets its erase.
  *
- * Kept until the full erase (step 3) or the 25-month TTL: journeys, messages, events, visits and
- * the consent ledger, by id (no name or address, apart from names inside old message previews).
- * Reports don't change. Another owner's contact for the same person is never touched.
+ * Kept: the consent ledger (by id: no name or contact details). Reports don't change. Another
+ * owner's contact for the same person is never touched.
  */
 
 import { FieldPath, FieldValue } from 'firebase-admin/firestore';
@@ -36,6 +38,8 @@ import { contactPointId } from '../identity/key';
 import { normalizeE164, normalizeEmail } from '../../services/phone';
 import { TASK_DONE_TTL_MS, cancelAllOf, contactIdOfGuest, guestIdSchema } from './guestJourneys';
 import { unlinkContactStays } from './stays';
+import { scheduleInBatch } from '../queue/firestoreQueue';
+import { ERASE_DELAY_MS, eraseHistoryTask } from '../erase/history';
 
 const BUSY = 'Adaptive is handling a login or a message for this guest right now. Try again in a minute.';
 
@@ -74,6 +78,8 @@ async function forgetContact(tenantUserId: string, contactId: string, actor: Act
   const batch = db.batch();
   for (const doc of venues.docs) batch.delete(doc.ref);
   batch.delete(contactRef);
+  // Their history goes too once late delivery reports are in and counted (erase step 3).
+  scheduleInBatch(batch, eraseHistoryTask(tenantUserId, contactId, at + ERASE_DELAY_MS));
   await batch.commit();
   for (const pointId of pointIds) await stripPoint(pointId, tenantUserId, contactId, at);
   return { contactId, forgotten: true, cancelled: stopped.cancelled };
