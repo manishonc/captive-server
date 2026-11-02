@@ -6,6 +6,8 @@
  *
  *  - The contact and its venue rows are deleted, the account's key comes off their points (with a
  *    removal stamp), their runs end first; the next login is a new guest (visit 1, Welcome again).
+ *  - The account's weekly-limit entries (and anonymous ones an earlier removal left) go, another
+ *    owner's stay: back the same day, the guest gets the Welcome again (2026-10-30).
  *  - A STOP on their number stays (it is the number's, for every owner); another owner's contact
  *    and link are untouched.
  *  - A login still queued at the removal is cancelled with its details; a late retry is dropped.
@@ -104,6 +106,36 @@ async function main() {
       assert(fresh !== old, 'a new contact');
       assertEqual((await docsWhere(COL.contactVenues, 'contactId', fresh))[0]?.visitCount, 1, 'visit 1');
       assert((await docsWhere(COL.journeyInstances, 'contactId', fresh)).some((i) => i.status === 'active' && i.journeyKey === 'welcome_second_visit'), 'Welcome starts again');
+    });
+
+    await test("the account's weekly-limit entries and anonymous ones go, another owner's stay: back the same day, the Welcome goes", async () => {
+      await start();
+      const ida = await connect({ venue: RS, firstName: 'Ida', email: 'ida.rg@test.local', phone: '791118009', phoneCountryCode: '+41', phoneVerified: true, consent: true });
+      await runDue();
+      const contact = await contactIdFor(RS.tenant, ida);
+      const npRef = db.collection(COL.networkPeople).doc((await db.collection(COL.contacts).doc(contact).get()).get('networkId') as string);
+      // Another owner's message two days ago, and an entry an earlier removal left anonymous.
+      const other = { at: new Date(now() - 2 * DAY_MS), channel: 'sms', tenantUserId: XX.tenant, venueId: XX.venueId, sendKey: 'js_elsewhere_1' };
+      const anonymous = { at: new Date(now() - DAY_MS), channel: 'email', tenantUserId: null, venueId: null, sendKey: null };
+      await npRef.set({ recentMarketingTouches: [other, anonymous] }, { merge: true });
+      await advance(15 * MINUTE_MS);
+      await runDue();
+      assertEqual((await docsWhere(COL.journeySends, 'contactId', contact)).filter((s) => s.status === 'sent').length, 1, 'the Welcome went (2 of 3 used)');
+      assertEqual(((await npRef.get()).get('recentMarketingTouches') as unknown[]).length, 3, 'three weekly entries');
+
+      assertEqual((await api.call('POST', forget(RS.tenant, ida), { actor: OWNER_ACTOR })).status, 200, 'forget');
+      const left = (await npRef.get()).get('recentMarketingTouches') as Array<{ sendKey: string | null }>;
+      assertEqual(left.map((t) => t.sendKey), ['js_elsewhere_1'], "only the other owner's entry is left");
+
+      // Back 16 minutes later: with the old anonymised entries she'd be at 3 of 3 and inside the 4 h gap.
+      await advance(MINUTE_MS);
+      const back = await connect({ venue: RS, firstName: 'Ida', email: 'ida.rg@test.local', phone: '791118009', phoneCountryCode: '+41', phoneVerified: true, consent: true });
+      await runDue();
+      await advance(15 * MINUTE_MS);
+      await runDue();
+      const fresh = await contactIdFor(RS.tenant, back);
+      assert(fresh !== contact, 'a new guest');
+      assertEqual((await docsWhere(COL.journeySends, 'contactId', fresh)).filter((s) => s.status === 'sent').length, 1, 'the Welcome goes again');
     });
 
     await test("a STOP on their number stays; another owner's contact and link are untouched", async () => {
