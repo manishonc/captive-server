@@ -91,6 +91,10 @@ async function main() {
       assertEqual([rec.get('status'), rec.get('weekStart'), rec.get('venues')], ['sent', localDay(monday - 7 * DAY_MS), 1], 'the record');
       assert(!String(rec.get('to')).includes(`${D.tenant}@`), 'the record keeps a masked address');
 
+      // The owner's card now names the following Monday.
+      const card = await api.get(`/tenants/${D.tenant}/weekly-email`);
+      assertEqual([card.body.last.status, card.body.next.sendDate], ['sent', localDay(monday + 7 * DAY_MS)], 'sent; next is a week later');
+
       // Again (a retried task, a second worker): nothing more.
       const again = await runWeeklyEmail({ tenantUserId: D.tenant, sendDate }, { now: now(), settings });
       assertEqual(again, { status: 'done_before', was: 'sent' }, 'once per Monday');

@@ -90,6 +90,8 @@ const W = {
     infoFree: (n: string) => `incl. ${n} free info`,
     credits: 'Credits used',
     revenue: 'Est. revenue',
+    creditsWord: 'credits',
+    revenueInline: 'est. revenue',
     noRevenue: 'no average spend saved',
     cost: (m: string) => `credits cost ${m}`,
     thisWeek: 'this week',
@@ -140,6 +142,8 @@ const W = {
     infoFree: (n: string) => `inkl. ${n} kostenlose Info`,
     credits: 'Verbrauchte Credits',
     revenue: 'Gesch. Umsatz',
+    creditsWord: 'Credits',
+    revenueInline: 'gesch. Umsatz',
     noRevenue: 'kein Durchschnittsbetrag gespeichert',
     cost: (m: string) => `Credits kosten ${m}`,
     thisWeek: 'diese Woche',
@@ -274,9 +278,9 @@ function kpiValue(key: string, goal: GoalKind, f: JourneyFunnel | undefined, ven
 /** The journey's credits, what they cost, and (a visit goal) the estimated revenue next to them — the funnel's own numbers. */
 function moneyText(f: JourneyFunnel, goal: GoalKind, w: Words): string {
   const cost = f.total.creditsValue;
-  const parts = [`${fmtNum(f.total.credits)} credits${cost ? ` (${w.cost(fmtMoney(cost.amountMinor, cost.currency))})` : ''}`];
+  const parts = [`${fmtNum(f.total.credits)} ${w.creditsWord}${cost ? ` (${w.cost(fmtMoney(cost.amountMinor, cost.currency))})` : ''}`];
   if (goal === 'visit') {
-    parts.push(f.total.revenue ? `≈ ${fmtMoney(f.total.revenue.amountMinor, f.total.revenue.currency)} ${w.revenue.toLowerCase()}` : w.noRevenue);
+    parts.push(f.total.revenue ? `≈ ${fmtMoney(f.total.revenue.amountMinor, f.total.revenue.currency)} ${w.revenueInline}` : w.noRevenue);
     if (f.total.converted > 0 && f.total.credits > 0) parts.push(w.perComeback(fmtNum(f.total.credits / f.total.converted)));
   }
   return parts.join(' · ');

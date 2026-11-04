@@ -202,6 +202,7 @@ test('German', () => {
   assertEqual(e.subject, 'Ihre Woche bei Indian Gourmet: 7 wiedergekommen, ≈ CHF 315', 'subject');
   assert(e.text.includes('Überblick') && e.text.includes('Was passiert ist, in Zahlen') && e.text.includes('Als Nächstes'), 'sections');
   assert(e.text.includes('Zurückgewinnen — diese Woche: wiedergekommen: 7'), 'journey name and KPI in German');
+  assert(e.text.includes('174 Credits (Credits kosten CHF 1.74) · ≈ CHF 315 gesch. Umsatz · 25 Credits pro wiedergekommenem Gast'), 'German nouns capitalised');
   assert(e.text.includes('Am meisten los: Freitag 19:00–20:00'), 'weekday in German');
   assert(e.text.includes('Erfassungsrate: 64%'), 'capture rate');
   assert(e.text.includes('Verbleibende Credits: 2\'088 — etwa 12 Wochen'), 'credits left');

@@ -36,7 +36,7 @@ import { getResults } from './results';
 import { getCreditConfig, getWalletSnapshot } from '../../services/credits';
 import { maskedEmail } from '../core/owner/mask';
 import { hashId } from '../core/checksum';
-import { DAY_MS } from '../core/runtime/time';
+import { DAY_MS, HOUR_MS } from '../core/runtime/time';
 import { firestoreScheduler } from '../queue/firestoreQueue';
 import { registerAdapters, type AdapterRegistry } from '../send/adapters';
 import {
@@ -172,8 +172,12 @@ export async function getWeeklyEmail(tenantUserId: string) {
   const [settings, engine, email, { docs, tz }] = await Promise.all([readSettings(tenantUserId), readEngineSettings(), ownerEmail(tenantUserId), accountVenues(tenantUserId)]);
   const live = modeFor(engine, tenantUserId) === 'live';
   const anyOn = docs.some((a) => a.status === 'on');
-  const next = weeklySchedule(now(), tz);
+  let next = weeklySchedule(now(), tz);
   const lastSnap = await col().where('tenantUserId', '==', tenantUserId).where('kind', '==', 'week').get();
+  // That Monday's email already ran (this morning): the next one is a week later.
+  if (lastSnap.docs.some((d) => d.get('sendDate') === next.sendDate && d.get('status') !== 'retry')) {
+    next = weeklySchedule(next.dueAt + 12 * HOUR_MS + 60_000, tz);
+  }
   const last = lastSnap.docs
     .map((d) => d.data())
     .sort((a, b) => String(b.sendDate ?? '').localeCompare(String(a.sendDate ?? '')))[0];
