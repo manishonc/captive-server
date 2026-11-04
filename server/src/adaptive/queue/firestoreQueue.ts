@@ -41,7 +41,9 @@ export type TaskKind =
   | 'scan_trigger'
   // Erase step 3: a removed guest's history deleted, and the admin's sweep for leftovers
   | 'erase_history'
-  | 'erase_sweep';
+  | 'erase_sweep'
+  // The weekly numbers email to an account's owner (Monday 08:00 in the account's zone)
+  | 'weekly_email';
 
 export const TASK_SCHEMA_VERSION = 1;
 export const LEASE_MS = 2 * 60_000;

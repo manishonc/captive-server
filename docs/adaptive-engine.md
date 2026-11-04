@@ -33,6 +33,7 @@ adaptive-worker (own container) ◀── leases due tasks every 5 s ───�
   scan_trigger → one guest's occasion found by a scan: re-checked, then the scan journey starts
   erase_history → a removed guest's history deleted, 20 min after Remove guest (erase step 3)
   erase_sweep  → the admin's "Erase leftover history": queues the erase of every leftover it finds
+  weekly_email → the owner's weekly numbers email, Monday 08:00 in the account's zone (armed hourly)
 
 Twilio status / inbound, Brevo webhook, the /u unsubscribe page ── +1 guarded line each ──▶ event + signal task
 the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ─────────────────────▶ event + signal task
@@ -841,6 +842,45 @@ an hour → the rest of that hour's new guests start no journeys (they are still
 and hour has that many places, each taken once by the first new guest's task to claim it, so tasks
 running at the same time can't let more through (#97).
 
+## The weekly numbers email to the owner
+
+Spec §12 "P0 interim: a template-generated weekly numbers email (no LLM)"; decisions D6–D10 of
+2026-11-04; engine `2026-11-04.c`. Code: `service/weeklyEmail.ts` (who, when, sending),
+`core/owner/weeklyEmail.ts` (the template, pure, EN/DE).
+
+- **Who:** the account owner's login email (`Users/{tenant}.email`, the owner alerts' address).
+- **When:** Monday 08:00 in the account's time zone (its first Adaptive venue that is on, by venue id;
+  else Zurich), for the Monday-to-Sunday week before (venue-local dates, like the results). The
+  worker's hourly watchdog (while any account isn't off) arms `weekly_email:{tenant}:{Monday}` for every
+  live account with a venue that is on — the next Monday 08:00 at or after now − 12 h, so a worker
+  started on a Monday morning still sends that day's and one started mid-week waits for next Monday.
+- **Skipped** (recorded, not sent): switched off by the owner (`off`), the account not live
+  (`not_live` — a test run or off), no venue (`no_venues`), a week with no visits and no messages at any
+  venue (`quiet_week`), no owner email (`no_email`). The guest kill switch (`sendingPaused`) doesn't stop
+  it: it isn't a guest message.
+- **What:** one email per account, a block per venue in §12's order without the AI parts — Snapshot
+  (guests reached = journeys started, messages per channel, credits and what they cost, the estimated
+  revenue next to them), each journey (its main number this week and last week: came back / ratings and
+  average stars / friends per 100 messages for Bring a friend / direct bookings; credits, their cost and
+  the estimated revenue; credits per guest who came back), what happened in numbers (visits new and
+  returning vs last week, capture rate, busiest day and hour, came back vs last week, friends), next
+  (credits left and about how many weeks at this week's pace; paused, Start sending, waiting for credits,
+  low balance). Every number comes from `GET /results?detail=1` for the two weeks. The footer says where
+  to switch it off; a link opens the Adaptive tab (`CMS_DASHBOARD_URL`, default `https://portal.heidifi.ai`,
+  the same env and default as `services/brevo.ts`).
+- **Sending:** Adaptive's email adapter (Brevo with `BREVO_SENDER_*` in production, the sandbox outbox
+  locally), a service email: no unsubscribe header, `X-Mailin-custom` = `wk_…` (no journey send, so Brevo's
+  webhooks for it are ignored). **Once per Monday:** `CaptivePortal_AdaptiveOwnerEmails/week_{tenant}_{Monday}`
+  is created before anything else; a second run finds it and sends nothing. A provider "try later" sets it
+  to `retry` and fails the task (the queue's backoff tries again, up to 8 times); an error before the send
+  does the same; an unclear answer (`unknown`) is never resent. The record keeps the masked address, the
+  subject and a few totals (no guest data) and expires after 400 days.
+- **Settings:** `settings_{tenant}` in the same collection: `enabled` (missing = on) and `lang` (`en` /
+  `de`, missing = `en`), changed through `PUT /tenants/:t/weekly-email` (the cms: adaptive.configure).
+- Locally: `POST /internal/adaptive/dev/weekly-email {"tenantUserId","sendDate"?,"force"?}` runs a Monday's
+  email now (default: the Monday after the last full week; `force` drops that Monday's record first), or
+  move the engine clock to Monday 08:00 and let the worker send it.
+
 ## Daily numbers — `CaptivePortal_JourneyStats`
 
 One doc per venue, journey and day: `{venueId}_{journeyKey}_{yyyymmdd}`, the day being when the event
@@ -1304,6 +1344,7 @@ values and the button's variable — a test's placeholder, a journey's `s/<code>
 | `GET /internal/adaptive/dev/guest-log?email=…` | Shows events, sends and the "why" sentences |
 | `POST /internal/adaptive/dev/provider-event` `{ "sendKey", "event": "delivered\|opened\|click\|rating\|stop\|reply…" }` | Fakes a webhook / CMS signal for one send, through the real hook functions |
 | `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` | Rolls the daily numbers up now (no 2-min lag) and returns the JourneyStats docs |
+| `POST /internal/adaptive/dev/weekly-email` `{ "tenantUserId", "sendDate"?, "force"? }` | Runs a Monday's weekly numbers email now (to the sandbox outbox); `force` sends it again |
 | `PUT /internal/adaptive/dev/calendar/:name` `{ "venueId"?, "stays": [{ "checkIn": "today", "checkOut": "5n" }] }` or `{ "ics" }` | Writes the sandbox calendar a `sandbox:calendar/<name>` feed reads (Airbnb-shaped; `today`, `+Nd`, `YYYY-MM-DD`; checkout also `Nn` nights) |
 | `GET /internal/adaptive/dev/calendar/:name` | That calendar as `text/calendar` |
 | `POST /internal/adaptive/dev/stay-feed` `{ "venueId", "url" }` | Saves the venue's calendar link (the same service as the owner's `PUT …/stay-feed`) |

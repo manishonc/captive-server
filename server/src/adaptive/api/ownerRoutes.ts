@@ -18,6 +18,7 @@
  *   guests/by-guest/:guestId/journeys   GET ?lang · POST cancel {lang?}   (the CMS guest list's Cancel journeys)
  *   guests/:contactId/journeys          POST cancel {lang?}   (the Adaptive guest drawer's Cancel journeys; all venues)
  *   guests/by-guest/:guestId/forget     POST   (the CMS Remove guest, before it deletes the row: the account forgets the person)
+ *   weekly-email   GET · PUT {enabled?, lang?} · GET preview?lang   (the owner's weekly numbers email)
  *
  * No catch-all here: a path nobody matches falls through to router.ts's JSON 404.
  */
@@ -33,6 +34,7 @@ import { findGuest, getGuest, listGuests, listMessages, setGuestMarketing } from
 import { startSending } from '../service/startSending';
 import { cancelContactJourneys, cancelGuestJourneys, getGuestJourneys } from '../service/guestJourneys';
 import { forgetGuest } from '../service/guestForget';
+import { getWeeklyEmail, previewWeeklyEmail, saveWeeklyEmail } from '../service/weeklyEmail';
 
 const router = Router();
 const handle = makeHandle('ADAPTIVE OWNER API');
@@ -109,6 +111,12 @@ router.post(
 );
 // Remove guest (erase step 2): the account forgets the person; the CMS deletes its row after.
 router.post(`${T}/guests/by-guest/:guestId/forget`, handle(async (req) => forgetGuest(tenantOf(req), idParam(req.params.guestId, 'guestId'), ownerActorOf(req))));
+
+// ── The weekly numbers email ─────────────────────────────────────────────────
+
+router.get(`${T}/weekly-email`, handle(async (req) => getWeeklyEmail(tenantOf(req))));
+router.put(`${T}/weekly-email`, handle(async (req) => saveWeeklyEmail(tenantOf(req), req.body, ownerActorOf(req))));
+router.get(`${T}/weekly-email/preview`, handle(async (req) => previewWeeklyEmail(tenantOf(req), req.query as Record<string, unknown>)));
 
 // ── Start sending ────────────────────────────────────────────────────────────
 

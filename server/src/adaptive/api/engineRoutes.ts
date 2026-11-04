@@ -6,6 +6,7 @@
  *   POST /dev/clock           sandbox only — move the fake clock ({ advance: '48h' } | { at: ISO } | { reset: true })
  *   POST /dev/launch          sandbox only — set launch modes / the pause (and the bandit, PR F1; the AI switch, F2a; WhatsApp Auto, W2b; WhatsApp sending, W3)
  *   POST /dev/learn           sandbox only — the bandit learner now {venueId?, pool?} (PR F1)
+ *   POST /dev/weekly-email    sandbox only — run a Monday's weekly numbers email now {tenantUserId, sendDate?, force?}
  *   GET  /dev/guest-log       sandbox only — ?email= | ?phone= — events, sends, "why" sentences
  *   POST /dev/rollup          sandbox only — { venueId? } — the daily numbers now (no 2-min lag)
  *   POST /dev/provider-event  sandbox only — { sendKey, event: delivered|failed|opened|bounce|spam|
@@ -35,6 +36,7 @@ import { zodIssues } from '../core/issues';
 import * as engine from '../service/engine';
 import { z } from 'zod';
 import { ingestClick, ingestRating } from '../ingest/signals';
+import { devWeeklyEmail } from '../service/weeklyEmail';
 
 const router = Router();
 
@@ -61,6 +63,7 @@ router.post('/dev/launch', handle(async (req) => engine.devLaunch(req.body ?? {}
 router.post('/dev/provider-event', handle(async (req) => engine.devProviderEvent(req.body ?? {})));
 router.post('/dev/rollup', handle(async (req) => engine.devRollup(req.body ?? {})));
 router.post('/dev/learn', handle(async (req) => engine.devLearn(req.body ?? {})));
+router.post('/dev/weekly-email', handle(async (req) => devWeeklyEmail(req.body ?? {})));
 router.post('/dev/model-answer', handle(async (req) => engine.devModelAnswer(req.body ?? {})));
 router.get('/dev/model-calls', handle(async (req) => engine.devModelCalls(req.query as Record<string, unknown>)));
 router.post('/dev/agent-run', handle(async (req) => engine.devAgentRun(req.body ?? {})));
