@@ -30,7 +30,7 @@ import { modeFor, readEngineSettings } from '../store/engineSettings';
 import { getCreditConfig, getWalletSnapshot } from '../../services/credits';
 import { spendableForChannel } from '../../services/creditBuckets';
 import { accountCreditWaitQuery, venueEventsOfTypesQuery, venueSetupsQuery } from './../store/ownerQueries';
-import { cardNumbers, dayKeyOf, resultsRange, RETURN_VISIT_GOALS, sumStats, waitingByVenue, type CreditBudget, type NumMap } from '../core/owner/results';
+import { addDaysIso, cardNumbers, dayKeyOf, MAX_RANGE_DAYS, resultsRange, RETURN_VISIT_GOALS, sumStats, waitingByVenue, type CreditBudget, type NumMap } from '../core/owner/results';
 import { SHARED_KEY } from '../../services/creditBuckets';
 import { captureNumbers, goalKindOf, heatmapNumbers, journeyFunnel, type FunnelMoney } from '../core/owner/dashboard';
 
@@ -155,7 +155,7 @@ async function creditWait(tenantUserId: string, venueId: string, marketingOn: bo
   };
 }
 
-export async function getResults(tenantUserId: string, query: { venueId?: unknown; from?: unknown; to?: unknown; journeys?: unknown; detail?: unknown }) {
+export async function getResults(tenantUserId: string, query: { venueId?: unknown; from?: unknown; to?: unknown; days?: unknown; journeys?: unknown; detail?: unknown }) {
   let venueDocs: AdaptiveVenueDoc[];
   if (typeof query.venueId === 'string' && query.venueId) {
     // Our id characters only: a `/` would reach Firestore as a path (a 500, not an answer).
@@ -172,6 +172,11 @@ export async function getResults(tenantUserId: string, query: { venueId?: unknow
   // `detail` (the owner dashboard): capture rate, the visits heatmap and each journey's funnel.
   const withDetail = query.detail === '1' || query.detail === 'true' || query.detail === true;
   const withJourneys = withDetail || query.journeys === '1' || query.journeys === 'true' || query.journeys === true;
+  let days: number | null = null;
+  if (query.days !== undefined && query.days !== '') {
+    days = Number(query.days);
+    if (!Number.isInteger(days) || days < 1 || days > MAX_RANGE_DAYS) throw new ApiError('bad_request', `days is a whole number from 1 to ${MAX_RANGE_DAYS}`);
+  }
   await refreshClock();
   const t = now();
   const venues = await getVenues(venueDocs.map((a) => a.venueId));
@@ -215,7 +220,11 @@ export async function getResults(tenantUserId: string, query: { venueId?: unknow
   for (const av of venueDocs) {
     const venue = venues.get(av.venueId);
     const tz = [av.timezone, venue?.timezone].find((z) => isValidTimeZone(z)) ?? 'Europe/Zurich';
-    const r = resultsRange(query.from, query.to, localDateKey(new Date(t), tz));
+    // `days` (the dashboard's 7 / 30 / 90 buttons): the last N venue-local days ending `to` (default
+    // today on the engine clock); `from` wins when both are given.
+    const today = localDateKey(new Date(t), tz);
+    const from = query.from || (days !== null ? addDaysIso(typeof query.to === 'string' && query.to ? query.to : today, -(days - 1)) : undefined);
+    const r = resultsRange(from, query.to, today);
     if ('error' in r) throw new ApiError('bad_request', r.error);
     ranges.push({ from: r.from, to: r.to });
     const journeys = await venueJourneys(av.venueId);

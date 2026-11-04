@@ -129,6 +129,11 @@ async function main() {
       const pv = plain.body.venues[0];
       assertEqual(pv.capture.first.rate, 0.5, 'capture on the card call');
       assert(pv.heatmap === undefined && pv.journeys === undefined, 'no heatmap or journeys without detail');
+      // `days` (the dashboard's 7 / 30 / 90 buttons): the last N days ending `to` (default today).
+      const week = await api.get(`/tenants/${D.tenant}/results?venueId=${D.venueId}&to=${to}&days=7`);
+      assertEqual(week.body.range, { from: localDateKey(new Date(t0 - 4 * DAY_MS), TZ), to }, '7 days ending `to`');
+      assertEqual(week.body.venues[0].capture.first.visits, 2, 'same visits in the week');
+      for (const bad of ['0', '93', '2.5', 'x']) assertEqual((await api.get(`/tenants/${D.tenant}/results?venueId=${D.venueId}&days=${bad}`)).status, 400, `days=${bad} → 400`);
       // `journeys=1` alone keeps its old shape (no funnel).
       const old = await api.get(`/tenants/${D.tenant}/results?venueId=${D.venueId}&from=${from}&to=${to}&journeys=1`);
       assert(old.body.venues[0].journeys.every((x: any) => x.funnel === undefined && x.goal === undefined), 'journeys=1 unchanged');
