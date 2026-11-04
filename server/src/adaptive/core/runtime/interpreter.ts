@@ -285,7 +285,9 @@ export function step(stateIn: InstanceState, input: RuntimeInput, ctxIn: Interpr
       // The window is judged by when the event happened, not when it was handled.
       if (def.goal && !state.goal && goalMatches(def.goal.event, event) && within(state.startedAt, def.goal.within, Math.min(now, event.occurredAt))) {
         state.goal = { reachedAt: now, eventId: event.id };
-        effects.push({ type: 'emit', eventType: 'journey.converted', data: { goalEvent: event.type, eventId: event.id } });
+        // `lastTouch` (the owner dashboard): the goal is credited to the journey's last message (null: none yet).
+        const last = state.lastTouch ? { channel: state.lastTouch.channel, slot: state.lastTouch.slot, purpose: state.lastTouch.purpose } : null;
+        effects.push({ type: 'emit', eventType: 'journey.converted', data: { goalEvent: event.type, eventId: event.id, lastTouch: last } });
         result = def.goal.onReach ? moveTo(def.goal.onReach) : { exit: def.goal.exit, reason: 'goal' };
         break;
       }

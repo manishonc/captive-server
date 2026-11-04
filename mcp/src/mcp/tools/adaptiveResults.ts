@@ -59,14 +59,14 @@ export function registerAdaptiveResultTools(server: McpServer): void {
   addTool<ResultsInput>(
     server,
     'get_adaptive_results',
-    "How Adaptive Campaigns is doing at this account's venues: guests who started a journey, guests who came back, messages sent (per channel; free info messages included), credits used, an estimated revenue (guests who came back × the venue's saved average spend per visit — an estimate, not measured takings), visits, stays synced from the booking calendar (new in the period, and upcoming), and whether sending is waiting for credits. Test-run numbers (nothing sent or charged) come in a separate testRun block and are never added in. One venue or all; venue-local dates YYYY-MM-DD, default the last 30 days, at most 92; byJourney adds each journey's numbers. Numbers come from the daily rollups, so they can be up to ~15 minutes behind. Read-only.",
+    "How Adaptive Campaigns is doing at this account's venues: guests who started a journey, guests who came back, messages sent (per channel; free info messages included), credits used, an estimated revenue (guests who came back × the venue's saved average spend per visit — an estimate, not measured takings), visits, stays synced from the booking calendar (new in the period, and upcoming), and whether sending is waiting for credits. Test-run numbers (nothing sent or charged) come in a separate testRun block and are never added in. Also the capture rate (share of Wi-Fi visits where the guest can get offers afterwards, new and returning guests apart). One venue or all; venue-local dates YYYY-MM-DD, default the last 30 days, at most 92; byJourney adds each journey's numbers; detail adds the busiest days and hours and each journey's funnel (sent → delivered → opened → clicked → goal reached, per channel and send time, credits with the estimated revenue next to them). Numbers come from the daily rollups, so they can be up to ~15 minutes behind. Read-only.",
     resultsInputShape,
     async (args, extra) => {
       const tenantUserId = tenantFrom(extra);
       if (!tenantUserId) return errorResult(NO_TENANT);
       const res = await call(() => callServerInternalGet(resultsPath(tenantUserId, args)));
       if (failed(res)) return errorResult(errorText(res.status, res.data));
-      return jsonResult(resultsView(res.data, { byJourney: args.byJourney, venueId: args.venueId }));
+      return jsonResult(resultsView(res.data, { byJourney: args.byJourney, venueId: args.venueId, detail: args.detail }));
     },
   );
 

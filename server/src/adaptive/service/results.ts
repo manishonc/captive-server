@@ -9,6 +9,8 @@
  *  - Revenue at read time: came back × the venue's average spend (D-D2).
  *  - "Waiting for credits": the wallet can't pay one message while a marketing playbook runs,
  *    and how many sends started waiting for credits in the last 72 h.
+ *  - The owner dashboard (2026-11-04, core/owner/dashboard.ts): every venue carries `capture`;
+ *    `detail=1` adds the visits `heatmap` and, per journey, its `goal`, `funnel` and `testRunFunnel`.
  */
 
 import { FieldPath } from 'firebase-admin/firestore';
@@ -30,6 +32,7 @@ import { spendableForChannel } from '../../services/creditBuckets';
 import { accountCreditWaitQuery, venueEventsOfTypesQuery, venueSetupsQuery } from './../store/ownerQueries';
 import { cardNumbers, dayKeyOf, resultsRange, RETURN_VISIT_GOALS, sumStats, waitingByVenue, type CreditBudget, type NumMap } from '../core/owner/results';
 import { SHARED_KEY } from '../../services/creditBuckets';
+import { captureNumbers, goalKindOf, heatmapNumbers, journeyFunnel, type FunnelMoney } from '../core/owner/dashboard';
 
 const VENUE_KEY = '_venue';
 const MAX_VENUES = 50;
@@ -52,6 +55,9 @@ interface JourneyInfo {
   journeyKey: string;
   name: string;
   returnVisit: boolean;
+  /** The owner dashboard: the journey's goal event, and whether a rating ends it (a review ask). */
+  goalEvent?: string | null;
+  endsOnRating?: boolean;
 }
 
 /** The journeys this venue has set up (any playbook, any state), with whether their goal is a return visit. */
@@ -68,6 +74,8 @@ async function venueJourneys(venueId: string): Promise<JourneyInfo[]> {
         journeyKey,
         name: pickLang(found?.record.header.name ?? { en: journeyKey }, 'en'),
         returnVisit: goal !== null && RETURN_VISIT_GOALS.includes(goal),
+        goalEvent: goal,
+        endsOnRating: (found?.definition.exitOn ?? []).some((x) => x.event === 'rating.submitted'),
       });
     }
   }
@@ -147,7 +155,7 @@ async function creditWait(tenantUserId: string, venueId: string, marketingOn: bo
   };
 }
 
-export async function getResults(tenantUserId: string, query: { venueId?: unknown; from?: unknown; to?: unknown; journeys?: unknown }) {
+export async function getResults(tenantUserId: string, query: { venueId?: unknown; from?: unknown; to?: unknown; journeys?: unknown; detail?: unknown }) {
   let venueDocs: AdaptiveVenueDoc[];
   if (typeof query.venueId === 'string' && query.venueId) {
     // Our id characters only: a `/` would reach Firestore as a path (a 500, not an answer).
@@ -161,7 +169,9 @@ export async function getResults(tenantUserId: string, query: { venueId?: unknow
   } else {
     venueDocs = (await listAdaptiveVenues(tenantUserId)).slice(0, MAX_VENUES);
   }
-  const withJourneys = query.journeys === '1' || query.journeys === 'true' || query.journeys === true;
+  // `detail` (the owner dashboard): capture rate, the visits heatmap and each journey's funnel.
+  const withDetail = query.detail === '1' || query.detail === 'true' || query.detail === true;
+  const withJourneys = withDetail || query.journeys === '1' || query.journeys === 'true' || query.journeys === true;
   await refreshClock();
   const t = now();
   const venues = await getVenues(venueDocs.map((a) => a.venueId));
@@ -187,6 +197,18 @@ export async function getResults(tenantUserId: string, query: { venueId?: unknow
     wallet = null;
   }
   const waits = await accountWaits(tenantUserId, wallet);
+  // The credit price per currency (cached), for the dashboard's "credits ≈ CHF x".
+  let creditsPerUnit: Record<string, number> = {};
+  let defaultCurrency = 'CHF';
+  if (withDetail) {
+    try {
+      const rate = await getCreditConfig();
+      defaultCurrency = rate.defaultCurrency || 'CHF';
+      creditsPerUnit = Object.fromEntries(Object.entries(rate.currencies ?? {}).map(([c, x]) => [c, Number(x?.creditsPerUnit) || 0]));
+    } catch {
+      creditsPerUnit = {};
+    }
+  }
 
   const ranges: Array<{ from: string; to: string }> = [];
   const out = [];
@@ -217,11 +239,18 @@ export async function getResults(tenantUserId: string, query: { venueId?: unknow
       card: cardNumbers({ venue: venueSum.live, returnConversions: conv('live'), averageSpend: av.avgSpendPerVisit ?? null, upcomingStays: upcoming }),
       testRun: cardNumbers({ venue: venueSum.testRun, returnConversions: conv('testRun'), averageSpend: av.avgSpendPerVisit ?? null, upcomingStays: null }),
       waitingForCredits: await creditWait(tenantUserId, av.venueId, av.status === 'on' && Boolean(av.activePlaybookKey), t, wallet, waits),
+      // The owner dashboard (2026-11-04): visits real in a test run too, so always the live numbers.
+      capture: captureNumbers(venueSum.live),
+      ...(withDetail ? { heatmap: heatmapNumbers(venueSum.live, tz) } : {}),
       ...(withJourneys
         ? {
             journeys: journeys.map((j) => {
               const s = perJourney.get(j.journeyKey)!;
-              return { journeyKey: j.journeyKey, name: j.name, returnVisit: j.returnVisit, live: s.live as NumMap, testRun: s.testRun as NumMap };
+              const base = { journeyKey: j.journeyKey, name: j.name, returnVisit: j.returnVisit, live: s.live as NumMap, testRun: s.testRun as NumMap };
+              if (!withDetail) return base;
+              const goal = goalKindOf(j.goalEvent, j.endsOnRating);
+              const money: FunnelMoney = { averageSpend: av.avgSpendPerVisit ?? null, creditsPerUnit, defaultCurrency };
+              return { ...base, goal, funnel: journeyFunnel(s.live, goal, money), testRunFunnel: journeyFunnel(s.testRun, goal, money) };
             }),
           }
         : {}),

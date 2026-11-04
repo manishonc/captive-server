@@ -70,7 +70,9 @@ export function addDeep(into: NumMap, from: unknown): NumMap {
   return into;
 }
 
-const COUNT_FIELDS = ['entered', 'converted', 'ended', 'exited', 'sends', 'bySlot', 'byVariant', 'credits', 'utility', 'skipped', 'visits', 'stays'];
+// `referrals` (PR A7) was missing here, so live friends never reached the card; `heat`, `capture`,
+// `funnel` and `ratings` are the owner dashboard's (rollups/journeyStats.ts moreCounts).
+const COUNT_FIELDS = ['entered', 'converted', 'ended', 'exited', 'sends', 'bySlot', 'byVariant', 'credits', 'utility', 'skipped', 'visits', 'stays', 'referrals', 'heat', 'capture', 'funnel', 'ratings'];
 
 /** Sums the counter fields of several daily docs: live numbers, and the test-run numbers apart. */
 export function sumStats(docs: Array<Record<string, unknown> | undefined>): { live: NumMap; testRun: NumMap } {

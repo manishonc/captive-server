@@ -861,6 +861,10 @@ a return visit, estimated revenue = that × `AdaptiveVenues.avgSpendPerVisit`, t
 | `dryRun.{…}` | everything of test-run guests, same shape — a test run never shows in `sends` or `credits` |
 | `visits.{total, first, revisits, captures}` (`_venue` only) | visits, first visits, revisits, Wi-Fi sign-ins |
 | `stays.{created, changed, cancelled, linked, unlinked, overlapFlagged, momentsSkipped}` (`_venue` only) | Airbnb bookings synced, moved, cancelled, linked to a guest, unlinked by the owner, overlapping, and stay moments skipped (too late or switched off) — counted whatever the mode, never under `dryRun` |
+| `heat.{w1..w7}.{h00..h23}` (`_venue` only) | the owner dashboard (2026-11-04): visits started per weekday (ISO, Monday = `w1`) and local hour in the venue's zone |
+| `capture.{first, returning}.{visits, yes}` (`_venue` only) | the dashboard's capture rate: visits whose `visit.started` says whether the guest can get offers from the venue after the login (`reachable`), and of those the ones that can |
+| `funnel.slot.{slot}.{delivered, opened, credits, converted}`, `funnel.channel.{channel}.converted` | the dashboard's funnel next to `bySlot` (sent, clicked): per send time, and the goals reached per the journey's last message (`journey.converted.lastTouch`; `none` = before any message); `dryRun.funnel` in a test run |
+| `ratings.{count, stars, low}` | ratings from a journey's rating link (`low` = 2 stars or fewer) |
 | `rollupWatermark`, `updatedAt`, `schemaVersion` | how far the numbers go |
 
 - **How:** after the worker runs a task for a venue, it arms `rollup:{venueId}:{15-min bucket}`, due 2 min
@@ -871,6 +875,14 @@ a return visit, estimated revenue = that × `AdaptiveVenues.avgSpendPerVisit`, t
   is dated when it reaches us, so a delivery report Brevo retries for two days counts on the day it arrived.
 - `revenueEstimateMinor` is not stored: the results route works it out (converted × the venue's
   average spend), so a changed average needs no recount.
+- **The owner dashboard** (spec §13; 2026-11-04; engine `2026-11-04.b`): `heat`, `capture`, `funnel` and
+  `ratings` are counted by `moreCounts` next to `countsFor` (same docs, new fields, old counters unchanged) from
+  the day it is deployed — no backfill. Two events carry one more field for it: `visit.started.data.reachable`
+  (after this login the guest has a marketing yes for this venue on at least one channel) and
+  `journey.converted.data.lastTouch` (`{ channel, slot, purpose }` of the journey's last message, `null`
+  before any). Visits and conversions from before have neither: they show in the totals, not in the capture
+  rate or the split. `GET /results?detail=1` turns the sums into the dashboard (`core/owner/dashboard.ts`).
+  `referrals` is now summed into the live numbers too (it was only in the test run's).
 - Locally, `POST /internal/adaptive/dev/rollup` `{ "venueId"? }` rolls up at once (no 2-min lag) and
   returns the docs. Use it there: with the fake clock ahead, the automatic rollup runs as soon as it's
   armed and leaves the last 2 real minutes for the venue's next one.
