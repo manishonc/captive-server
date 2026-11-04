@@ -101,6 +101,40 @@ the CMS (PR E): POST /internal/adaptive/ingest/click | /ingest/rating ───�
 - Records written before PR F0 have no `spacing` input: Replay treats that as "no gap set", and reports them
   as "the engine changed since" (ENGINE_RUNTIME_VERSION 2026-09-29.a).
 
+## The guest's time zone (from the splash)
+
+Manager spec §2 (`guests.timezone`: "captured at connect"), §4.2 and §14; decisions D1–D5 of 2026-11-04.
+Engine `2026-11-04.a`.
+
+- **Captured:** the splash (portal `form-logic.js`) sends `timezone` = `Intl.DateTimeFormat().resolvedOptions().timeZone`
+  on `/create-user` and `/unifi/authorize`. The route checks it (`core/runtime/deviceTz.ts`
+  `parseDeviceTimeZone`): only an IANA `Area/Location` name the runtime knows; offsets, UTC / GMT / `Etc/*`
+  (privacy browsers report UTC) and anything unknown are dropped. The name the phone sent is kept
+  (`Asia/Kolkata`, not the runtime's `Asia/Calcutta`), only its letter case fixed. It travels in the
+  `event_route` task payload (`guest.timezone`, removed with the task), never in the event log.
+- **Stored:** `identity/resolve.ts` saves it on the Adaptive contact: `profile.timezone`, `timezoneAt`,
+  `timezoneVia: 'device'`, `timezoneVenueId`. The newest connect's zone replaces the saved one (a late retry
+  of an older connect doesn't); a connect without one keeps it. The Wi-Fi guest doc (`CaptivePortal_Users`)
+  doesn't get it.
+- **Pinned per journey:** `enrolForEvent` copies it into the instance (`meta.context.deviceTz`, null when none)
+  next to `venueTz` and `phoneTz`. A running journey keeps the zone it started with ("we keep the tz captured at
+  connect", §14); journeys started before this have no `deviceTz` and behave as before.
+- **Quiet hours** (gate rule 8, and the spacing rule's hop into quiet hours) hold in the venue zone, the
+  phone-country zone and the device zone — each one only adds. A Swiss-number guest whose phone is on London
+  time, held at 22:00 London, goes at 09:00–09:20 London (10:00 Zurich), not 09:00 Zurich. The admin "Why?"
+  facts add the phone's time when its zone differs: "15:30 Europe/Zurich (guest's phone: 14:30 Europe/London) is
+  outside 21:00–09:00", "23:00 Europe/Zurich is inside 21:00–09:00 → 10:05 (guest's phone: 22:00 Europe/London →
+  09:05)"; without a device zone they read as before. The replay snapshot stores `quiet.deviceTz` (an older one
+  reads as none).
+- **Send times:** a send step's slot (morning 09–11, afternoon 14–17, evening 18–20) or fixed time (`local_time`,
+  the review ask's 10:00) is picked in the device zone, else the venue zone (`sendZone`); the bandit's "sent in
+  its slot" check uses the same zone. The phone-country zone is not used for send times. Everything else stays in
+  the venue zone: `wait_until` steps (stay moments: check-in / check-out are venue times), scan start times,
+  the daily ceilings, offer expiry dates, the owner's timeline.
+- Phones take their zone from the network, so at the venue the device zone is nearly always the venue's own
+  zone. It counts when the venue's zone is missing or wrong, or the guest set the phone's zone by hand.
+- Deploy: **server** (route), **worker** (engine) and **portal** (the splash). Old portals send nothing: as before.
+
 ## SMS parts and seeded wording (PR F0)
 
 - `core/runtime/smsParts.ts` counts parts the way the carrier bills: GSM-7 160 / 153 septets (an extension

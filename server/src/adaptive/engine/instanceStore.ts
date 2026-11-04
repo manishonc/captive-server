@@ -38,6 +38,12 @@ export interface InstanceMeta {
     lang: Lang;
     venueTz: string;
     phoneTz: string | null;
+    /**
+     * The zone the guest's phone reported at connect (Contacts.profile.timezone), pinned when
+     * the journey starts: quiet hours hold in it too and send times are picked in it.
+     * Absent on journeys started before it was captured (they use the venue's zone).
+     */
+    deviceTz?: string | null;
     isFirstVisit: boolean;
     stayId: string | null;
     /** The guest doc of the connect that started the journey (the unsubscribe link names it). */

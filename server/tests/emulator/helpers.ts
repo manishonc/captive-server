@@ -180,6 +180,8 @@ export interface ConnectFixture {
   birthdayMonth?: number | null;
   /** PR A7: a code typed in "Code from a friend". */
   friendCode?: string | null;
+  /** The phone's time zone as the splash sends it (the route checks it; the worker checks it again). */
+  timezone?: string | null;
 }
 
 /** What /create-user does, minus the parts Adaptive doesn't read: save a guest doc, then call the real hook. */
@@ -224,6 +226,7 @@ export async function connect(c: ConnectFixture): Promise<string> {
     phoneVerified: Boolean(c.phoneVerified),
     birthdayMonth: c.birthdayMonth ?? null,
     friendCode: c.friendCode ?? null,
+    timezone: c.timezone ?? null,
   });
   return ref.id;
 }

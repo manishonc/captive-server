@@ -55,6 +55,12 @@ export interface ResolveInput {
    * profile that has none, so it never overrides a later answer.
    */
   birthdayMonth?: { month: number; fresh: boolean } | null;
+  /**
+   * The IANA zone the guest's phone reported on this connect's splash, already checked
+   * (core/runtime/deviceTz.ts). The newest connect's zone replaces the saved one; a connect
+   * without one keeps it. Saved as `profile.timezone` (+ when, where, `timezoneVia: 'device'`).
+   */
+  deviceTimezone?: string | null;
 }
 
 export interface ResolveResult {
@@ -285,8 +291,13 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
           lastClickChannel: null,
         },
         replyNoticeSentAt: null,
-        ...(input.birthdayMonth
-          ? { profile: { birthdayMonth: input.birthdayMonth.month, birthdayMonthAt: now, birthdayMonthVia: 'splash' } }
+        ...(input.birthdayMonth || input.deviceTimezone
+          ? {
+              profile: {
+                ...(input.birthdayMonth ? { birthdayMonth: input.birthdayMonth.month, birthdayMonthAt: now, birthdayMonthVia: 'splash' } : {}),
+                ...(input.deviceTimezone ? { timezone: input.deviceTimezone, timezoneAt: now, timezoneVia: 'device', timezoneVenueId: input.venueId } : {}),
+              },
+            }
           : {}),
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -324,6 +335,16 @@ export async function resolveContact(input: ResolveInput): Promise<ResolveResult
           [new FieldPath('profile', 'birthdayMonth'), bm.month],
           [new FieldPath('profile', 'birthdayMonthAt'), now],
           [new FieldPath('profile', 'birthdayMonthVia'), 'splash'],
+        );
+      }
+      // The phone's zone: the newest connect's wins (a late retry of an older connect doesn't).
+      const savedTzAt = tsMs(contact!.profile?.timezoneAt);
+      if (input.deviceTimezone && (savedTzAt === null || input.occurredAt >= savedTzAt)) {
+        pairs.push(
+          [new FieldPath('profile', 'timezone'), input.deviceTimezone],
+          [new FieldPath('profile', 'timezoneAt'), now],
+          [new FieldPath('profile', 'timezoneVia'), 'device'],
+          [new FieldPath('profile', 'timezoneVenueId'), input.venueId],
         );
       }
       if (addGuest) set('guestIds', FieldValue.arrayUnion(input.guestId));
