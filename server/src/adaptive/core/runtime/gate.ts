@@ -92,6 +92,11 @@ export interface GateInput {
   quiet: {
     venueTz: string;
     phoneTz: string | null;
+    /**
+     * The zone the guest's phone reported when the journey started (spec §2, the splash).
+     * Quiet hours hold in it too. Absent on journeys started before it was captured.
+     */
+    deviceTz?: string | null;
     window: { start: string; end: string };
     utilityWindow: { start: string; end: string };
     jitterMinutes: [number, number];
@@ -218,9 +223,29 @@ function ruleWeekly(i: GateInput): RuleCheck {
   return allow('weekly_limit', `${count} of ${limit} in the last 7 days`);
 }
 
-/** The venue's zone, plus the guest's phone zone when it differs (quiet hours hold in both). */
+/**
+ * The venue's zone, plus the guest's phone zone when it differs (quiet hours hold in both),
+ * plus the zone the guest's device reported at connect when it is another one again.
+ */
 function quietZones(i: GateInput): string[] {
-  return [i.quiet.venueTz, ...(i.quiet.phoneTz && i.quiet.phoneTz !== i.quiet.venueTz ? [i.quiet.phoneTz] : [])];
+  const zones = [i.quiet.venueTz, ...(i.quiet.phoneTz && i.quiet.phoneTz !== i.quiet.venueTz ? [i.quiet.phoneTz] : [])];
+  const device = i.quiet.deviceTz;
+  if (device && !zones.includes(device)) zones.push(device);
+  return zones;
+}
+
+/** For the allow fact: the device zone's own time, when it is not the venue's zone. */
+function deviceZoneNote(i: GateInput, now: Date): string {
+  const device = i.quiet.deviceTz;
+  if (!device || device === i.quiet.venueTz) return '';
+  return ` (guest's phone: ${hhmm(now, device)} ${device})`;
+}
+
+/** For the hold fact: the device zone's own times, when the fact names another zone. */
+function deviceHoldNote(i: GateInput, now: Date, until: number, named: string): string {
+  const device = i.quiet.deviceTz;
+  if (!device || device === named) return '';
+  return ` (guest's phone: ${hhmm(now, device)} ${device} → ${hhmm(new Date(until), device)})`;
 }
 
 /** From `start` (inside quiet hours somewhere), the moment every zone is out of them (no jitter). */
@@ -243,13 +268,13 @@ function ruleQuiet(i: GateInput): RuleCheck {
   const now = new Date(i.now);
   const zones = quietZones(i);
   const quietIn = zones.filter((tz) => isInWindow(now, tz, window));
-  if (!quietIn.length) return allow('quiet_hours', `${hhmm(now, i.quiet.venueTz)} ${i.quiet.venueTz} is outside ${window.start}–${window.end}`);
+  if (!quietIn.length) return allow('quiet_hours', `${hhmm(now, i.quiet.venueTz)} ${i.quiet.venueTz}${deviceZoneNote(i, now)} is outside ${window.start}–${window.end}`);
 
   // Wait until every zone is out of quiet hours, plus the morning jitter.
   let until = quietWindowEnd(zones, window, i.now);
   until = afterQuietHours(new Date(until), i.quiet.jitterMinutes, i.jitterKey);
   const tz = quietIn[0];
-  const fact = `${hhmm(now, tz)} ${tz} is inside ${window.start}–${window.end} → ${hhmm(new Date(until), tz)}`;
+  const fact = `${hhmm(now, tz)} ${tz} is inside ${window.start}–${window.end} → ${hhmm(new Date(until), tz)}${deviceHoldNote(i, now, until, tz)}`;
   if (i.expireAfterMs !== null && until > i.enteredAt + i.expireAfterMs) {
     return { rule: 'quiet_hours', verdict: 'skip', fact: `${fact}, too late for this step`, reason: 'quiet_hours_expired' };
   }

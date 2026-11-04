@@ -36,6 +36,8 @@ export interface CreateUserRequestBody {
   birthdayMonth?: unknown;
   /** PR A7: "Code from a friend" (Bring a friend), as typed — checked server-side. */
   friendCode?: unknown;
+  /** The phone's IANA time zone (`Intl…resolvedOptions().timeZone`), for Adaptive — checked server-side (parseDeviceTimeZone). */
+  timezone?: unknown;
 }
 
 export interface MarketingSmsMessage {
@@ -322,4 +324,6 @@ export interface UnifiAuthorizeRequestBody {
   birthdayMonth?: unknown;
   /** PR A7: "Code from a friend" (Bring a friend), as typed — checked server-side. */
   friendCode?: unknown;
+  /** The phone's IANA time zone (`Intl…resolvedOptions().timeZone`), for Adaptive — checked server-side (parseDeviceTimeZone). */
+  timezone?: unknown;
 }

@@ -32,6 +32,7 @@ import { fromDoc } from './instanceStore';
 import { dayKey, raiseAlert } from './alerts';
 import { handleStayEvent, handleStayRelinked, handleStayUnlinked, linkStayOnConnect } from '../stays/link';
 import { attributeReferral } from '../referrals/store';
+import { parseDeviceTimeZone } from '../core/runtime/deviceTz';
 
 export interface RouteEnv {
   now: number;
@@ -52,6 +53,8 @@ interface GuestPayload {
   birthdayMonth?: number | null;
   /** PR A7: the code a friend typed on the splash ("Code from a friend"), as typed. */
   friendCode?: string | null;
+  /** The IANA zone the guest's phone reported on the splash (checked again here). */
+  timezone?: string | null;
 }
 
 /** A whole month 1–12, else null. */
@@ -257,6 +260,7 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
     birthdayMonth: freshMonth !== null
       ? { month: freshMonth, fresh: true }
       : savedMonth !== null ? { month: savedMonth, fresh: false } : null,
+    deviceTimezone: parseDeviceTimeZone(guest.timezone),
     legacy: {
       smsStop: stops.sms || g.smsOptOut === true,
       whatsappStop: stops.whatsapp || g.whatsappOptOut === true,

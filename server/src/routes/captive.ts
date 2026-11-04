@@ -27,6 +27,7 @@ import {
 import { checkVerificationGate, verificationFields } from '../services/verificationGate';
 import { runAdaptiveHook } from '../adaptive/ingest/hook';
 import { adaptiveOnConnect } from '../adaptive/ingest/connect';
+import { parseDeviceTimeZone } from '../adaptive/core/runtime/deviceTz';
 import { resolveVerification, VERIFICATION_PAGE_DEFAULTS } from '../services/verificationConfig';
 import { normalizeMac } from '../services/verificationToken';
 import { scopeKeyFor } from '../services/guestOtp';
@@ -189,6 +190,8 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
   const guestLanguage = normalizeLanguage(req.body.language);
   const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
   const friendCode = typeof req.body.friendCode === 'string' && req.body.friendCode.trim() ? req.body.friendCode.trim().slice(0, 40) : null;
+  // The phone's time zone for Adaptive's quiet hours and send times (null when unusable).
+  const deviceTimezone = parseDeviceTimeZone(req.body.timezone);
   // PR A7: a friend's code shows its offer only to someone new here (the worker decides whether it
   // counts, once it knows the guest); a failed check just shows nothing.
   const friendOffer =
@@ -304,6 +307,7 @@ router.post('/create-user', async (req: Request<{}, {}, CreateUserRequestBody>, 
       language: guestLanguage,
       birthdayMonth,
       friendCode,
+      timezone: deviceTimezone,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,
@@ -1465,6 +1469,8 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
   const birthdayMonth = parseBirthdayMonth(req.body.birthdayMonth);
   // PR A7: the friend's code goes to the worker; the offer was shown by /create-user.
   const friendCode = typeof req.body.friendCode === 'string' && req.body.friendCode.trim() ? req.body.friendCode.trim().slice(0, 40) : null;
+  // The phone's time zone for Adaptive's quiet hours and send times (null when unusable).
+  const deviceTimezone = parseDeviceTimeZone(req.body.timezone);
   let wifiGuestId: string;
 
   if (!existingWifiGuestId) {
@@ -1562,6 +1568,7 @@ router.post('/unifi/authorize', async (req: Request<{}, {}, UnifiAuthorizeReques
       language: guestLanguage,
       birthdayMonth,
       friendCode,
+      timezone: deviceTimezone,
       firstName: firstName || null,
       lastName: lastName || null,
       email: email || null,

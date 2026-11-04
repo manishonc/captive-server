@@ -122,7 +122,20 @@ export interface ContactDoc {
    */
   journeysCancelled?: { at: StoredTime; by: string } | null;
   /** PR S: what the guest told us about themselves (the birthday month, 1–12, from a guest page). */
-  profile?: { birthdayMonth?: number | null; birthdayMonthAt?: StoredTime; birthdayMonthVia?: string | null } | null;
+  profile?: {
+    birthdayMonth?: number | null;
+    birthdayMonthAt?: StoredTime;
+    birthdayMonthVia?: string | null;
+    /**
+     * The IANA zone the guest's phone reported on the splash (spec §2 `guests.timezone`), from
+     * the newest connect that sent one (`timezoneAt`, at `timezoneVenueId`; `timezoneVia`
+     * 'device'). Quiet hours and send times use it (engine/enrol.ts pins it per journey).
+     */
+    timezone?: string | null;
+    timezoneAt?: StoredTime;
+    timezoneVia?: string | null;
+    timezoneVenueId?: string | null;
+  } | null;
   replyNoticeSentAt: StoredTime;
   createdAt: StoredTime;
   updatedAt: StoredTime;

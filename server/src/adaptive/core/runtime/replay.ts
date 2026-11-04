@@ -117,6 +117,8 @@ function storedGate(i: GateInput): ReplayGate {
     quiet: {
       venueTz: i.quiet.venueTz,
       phoneTz: i.quiet.phoneTz,
+      // The guest's device zone (a snapshot from before it read as none).
+      deviceTz: i.quiet.deviceTz ?? null,
       window: { start: i.quiet.window.start, end: i.quiet.window.end },
       utilityWindow: { start: i.quiet.utilityWindow.start, end: i.quiet.utilityWindow.end },
       jitterMinutes: [i.quiet.jitterMinutes[0], i.quiet.jitterMinutes[1]],

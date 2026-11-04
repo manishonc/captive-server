@@ -24,6 +24,7 @@ import { entryKeyFor, triggerMatches } from '../core/runtime/triggers';
 import { evaluateCondition, factsFrom } from '../core/runtime/conditions';
 import { freshState, type EngineEvent, type RunMode } from '../core/runtime/types';
 import { durationMs } from '../core/runtime/time';
+import { contactDeviceTz } from '../core/runtime/deviceTz';
 import { phoneCountry } from '../core/runtime/phoneCountry';
 import type { Lang } from '../core/constants';
 import { consentFor } from '../identity/resolve';
@@ -190,6 +191,7 @@ async function enrolOne(args: {
         lang,
         venueTz: ctx.tz,
         phoneTz: phoneCountry(who.contact.phoneE164)?.tz ?? null,
+        deviceTz: contactDeviceTz(who.contact),
         isFirstVisit: Boolean(args.visit?.isFirstVisit),
         stayId: args.stayId ?? null,
         guestId: typeof event.data.guestId === 'string' ? event.data.guestId : null,

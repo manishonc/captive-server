@@ -53,6 +53,11 @@ export interface ConnectHookInput {
   birthdayMonth?: number | null;
   /** PR A7: a code a friend typed on the splash (counted by the worker, referrals/store.ts). */
   friendCode?: string | null;
+  /**
+   * The IANA zone the guest's phone reported on the splash, checked by the route
+   * (core/runtime/deviceTz.ts). Travels in the task payload only, like the contact details.
+   */
+  timezone?: string | null;
   /** From the verification gate of this request, when it ran. */
   phoneE164?: string | null;
   emailVerified?: boolean;
@@ -142,6 +147,7 @@ export async function adaptiveOnConnect(input: ConnectHookInput): Promise<void> 
         phoneVerified: Boolean(input.phoneVerified),
         birthdayMonth: input.birthdayMonth ?? null,
         friendCode: input.friendCode ?? null,
+        timezone: input.timezone ?? null,
       },
     },
     tenantUserId: venue.tenantUserId,

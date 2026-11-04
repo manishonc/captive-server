@@ -19,6 +19,17 @@ function friendCodeValue() {
   return v ? v.slice(0, 40) : null;
 }
 
+// The phone's time zone ("Europe/Zurich"), so Adaptive keeps quiet hours and send times in
+// the guest's own time. Empty when the browser can't say; the server checks the value.
+function deviceTimeZone() {
+  try {
+    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof tz === 'string' ? tz.slice(0, 64) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 // The friend's offer from /create-user, as the card says it: "10% off today", or "Today: …" with
 // the offer's own words (a free item; an amount, whose value is in minor units with its currency
 // in the words).
@@ -749,6 +760,7 @@ async function completeSubmission(verificationToken) {
         splashResponses,
         birthdayMonth,
         friendCode,
+        timezone: deviceTimeZone(),
         verificationToken,
         // Persisted on the guest record and reused for every later email/SMS/
         // WhatsApp we send them — see services/guestLanguage.ts.
@@ -778,6 +790,7 @@ async function completeSubmission(verificationToken) {
           splashResponses,
           birthdayMonth,
           friendCode,
+          timezone: deviceTimeZone(),
           verificationToken,
           language: ACTIVE_LANG,
         }),

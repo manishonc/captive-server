@@ -26,6 +26,7 @@ import type { Channel, Lang } from '../core/constants';
 import { canonicalField, getNodeContract, parseMergeExpressions } from '../core/registry';
 import { sendKeyFor } from '../core/runtime/ids';
 import { checkChannel, pickChannel, pickTime, pickVariant, type ChannelCheck, type ChannelFacts, type ChannelRule } from '../core/runtime/pickers';
+import { sendZone } from '../core/runtime/deviceTz';
 import { checkSystem, runGate, type GateInput, type GateResult } from '../core/runtime/gate';
 import { buildDecision, type DecisionRecord } from '../core/runtime/decision';
 import { SYSTEM_PRECHECK_CHANNEL, buildReplaySnapshot, noChannelFor, systemGate, type ReplayArgs, type ReplaySnapshot } from '../core/runtime/replay';
@@ -166,6 +167,8 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const mode = inst.meta.mode;
   const lang = inst.meta.context.lang;
   const tz = inst.meta.context.venueTz;
+  // Send times (slots, fixed times) in the guest's device zone when the journey has one, else the venue's.
+  const slotTz = sendZone(inst.meta.context);
   // PR F1: the bandit picks the wording and the slot of this account's marketing sends (off = the rotation).
   const banditOn = cfg.purpose === 'marketing' && banditModeFor(a.settings, inst.meta.tenantUserId) === 'on';
   const segment = segmentOf(inst.meta.context);
@@ -229,7 +232,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
           slotPart = sp.part;
         }
       }
-      const pick = pickTime(timing, now, tz, rules.slots, sendKey);
+      const pick = pickTime(timing, now, slotTz, rules.slots, sendKey);
       slot = pick.slot;
       slotRule = slotPart ? `bandit:${slotPart.lvl}` : pick.rule;
       if (pick.at > now + MINUTE_MS) {
@@ -600,6 +603,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     quiet: {
       venueTz: tz,
       phoneTz: inst.meta.context.phoneTz,
+      deviceTz: inst.meta.context.deviceTz ?? null,
       window: rules.quietHours,
       utilityWindow: rules.utilityQuietHours,
       jitterMinutes: rules.deferJitterMinutes,
@@ -679,6 +683,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
       unsubscribeUrl,
       common,
       tz,
+      slotTz,
       bandit: banditBlock,
       picks,
       slotWindow: slotPart?.pick ? rules.slots[slotPart.pick as keyof typeof rules.slots] : undefined,
@@ -842,6 +847,8 @@ interface LiveArgs {
   unsubscribeUrl: string;
   common: Record<string, unknown>;
   tz: string;
+  /** The zone the slot was picked in (the guest's device zone, else the venue's). */
+  slotTz?: string;
   /** PR F1: the bandit's record (null when it's off or had nothing to pick), the picks a wait keeps, the picked slot's window. */
   bandit: BanditBlock | null;
   picks: { slotPick?: BanditBlock['slot']; variantPick?: { vid: string; method: string; part: BanditBlock['var'] } };
@@ -969,7 +976,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
     decision: d.decision,
     replay: d.replay,
     // PR F1: `in` = the send went inside the picked slot (only such sends train the slot).
-    ...(d.bandit ? { bandit: d.bandit.slot ? { ...d.bandit, slot: { ...d.bandit.slot, in: sentInSlot(a.now, d.tz, d.slotWindow) } } : d.bandit } : {}),
+    ...(d.bandit ? { bandit: d.bandit.slot ? { ...d.bandit, slot: { ...d.bandit.slot, in: sentInSlot(a.now, d.slotTz ?? d.tz, d.slotWindow) } } : d.bandit } : {}),
     dispatchLease: dispatchLease(a.workerId),
     createdAt: new Date(a.now),
     sentAt: null,
