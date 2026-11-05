@@ -21,6 +21,9 @@
  *
  * Counters are nested objects of numbers, so a reason like
  * `missing_value:guestinfo.wifiName` stays one map key (never a dotted path).
+ *
+ * The owner dashboard (2026-11-04) adds `heat`, `capture`, `funnel` and `ratings` next to these
+ * (`moreCounts` below); they count from the day the change was deployed.
  */
 
 import { localParts } from '../core/runtime/time';
@@ -164,6 +167,80 @@ export function countsFor(e: RollupEvent): { both: Counts | null; venueOnly: Cou
   }
 }
 
+/**
+ * The owner dashboard's numbers (spec §13; 2026-11-04), counted next to `countsFor` (which stays
+ * as it is) into NEW top-level fields, so every existing counter keeps its meaning:
+ *
+ *   visit.started               → heat.{w1..w7}.{h00..h23} (ISO weekday, Mon = w1; the venue's
+ *                                 local hour) and, when the event says whether the guest can get
+ *                                 offers from this venue after the login (`reachable`, since this
+ *                                 change), capture.{first|returning}.{visits, yes}   (`_venue` only)
+ *   message.sent (marketing)    → funnel.slot.{slot}.credits (dry runs under dryRun)
+ *   credits.refunded            → funnel.slot.{slot}.credits − the amount (when it names a slot)
+ *   message.delivered / opened  → funnel.slot.{slot}.delivered / opened (when it names a slot)
+ *   journey.converted           → funnel.channel.{ch}.converted + funnel.slot.{slot}.converted, from
+ *                                 the journey's last message before the goal (`lastTouch`, since
+ *                                 this change; `none` = the goal came before any message)
+ *   rating.submitted            → ratings.{count, stars, low (≤ 2 stars)}
+ *
+ * Sent and clicked per slot stay in `bySlot`; the dashboard reads both maps.
+ */
+export function moreCounts(e: RollupEvent, tz: string | null): { both: Counts | null; venueOnly: Counts | null } {
+  const test = e.mode === 'test' || e.type === 'send.dry_run';
+  const wrap = (c: Counts): { both: Counts; venueOnly: null } => ({ both: test ? { dryRun: c } : c, venueOnly: null });
+  switch (e.type) {
+    case 'visit.started': {
+      const out: Counts = {};
+      if (tz) {
+        const p = localParts(new Date(e.occurredAt), tz);
+        out.heat = { [`w${p.weekday === 0 ? 7 : p.weekday}`]: { [`h${String(p.hour).padStart(2, '0')}`]: 1 } };
+      }
+      if (typeof e.data.reachable === 'boolean') {
+        const group = e.data.isFirstVisit === true ? 'first' : 'returning';
+        out.capture = { [group]: { visits: 1, ...(e.data.reachable ? { yes: 1 } : {}) } };
+      }
+      return { both: null, venueOnly: Object.keys(out).length ? out : null };
+    }
+    case 'message.sent': {
+      if (e.data.purpose === 'service') return { both: null, venueOnly: null };
+      const credits = num(e.data.credits);
+      if (!credits) return { both: null, venueOnly: null };
+      return wrap({ funnel: { slot: { [statKey(e.slot ?? e.data.slot, 'now')]: { credits } } } });
+    }
+    case 'send.dry_run': {
+      const decision = (e.data.decision ?? {}) as { purpose?: string; credits?: { price?: number } | null; slot?: { picked?: string } };
+      const credits = num(decision.credits?.price);
+      if (decision.purpose === 'service' || !credits) return { both: null, venueOnly: null };
+      return { both: { dryRun: { funnel: { slot: { [statKey(e.slot ?? decision.slot?.picked, 'now')]: { credits } } } } }, venueOnly: null };
+    }
+    case 'credits.refunded': {
+      const credits = num(e.data.credits);
+      if (!e.slot || !credits) return { both: null, venueOnly: null };
+      return wrap({ funnel: { slot: { [statKey(e.slot)]: { credits: -credits } } } });
+    }
+    case 'message.delivered':
+    case 'message.opened': {
+      if (!e.slot) return { both: null, venueOnly: null };
+      return wrap({ funnel: { slot: { [statKey(e.slot)]: { [e.type === 'message.delivered' ? 'delivered' : 'opened']: 1 } } } });
+    }
+    case 'journey.converted': {
+      // Conversions from before this change don't say which message came last: not split.
+      if (!('lastTouch' in e.data)) return { both: null, venueOnly: null };
+      const last = (e.data.lastTouch ?? null) as { channel?: unknown; slot?: unknown } | null;
+      const channel = last ? statKey(last.channel) : 'none';
+      const slot = last ? statKey(last.slot, 'now') : 'none';
+      return wrap({ funnel: { channel: { [channel]: { converted: 1 } }, slot: { [slot]: { converted: 1 } } } });
+    }
+    case 'rating.submitted': {
+      const stars = Number(e.data.stars);
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) return { both: null, venueOnly: null };
+      return wrap({ ratings: { count: 1, stars, ...(stars <= 2 ? { low: 1 } : {}) } });
+    }
+    default:
+      return { both: null, venueOnly: null };
+  }
+}
+
 /** `yyyymmdd` of an instant in a time zone. */
 export function dayId(ms: number, tz: string): string {
   const p = localParts(new Date(ms), tz);
@@ -196,13 +273,17 @@ export function aggregate(venueId: string, tz: string, events: RollupEvent[]): S
   };
   for (const e of events) {
     const c = countsFor(e);
-    if (!c.both && !c.venueOnly) continue;
+    // The owner dashboard's numbers (moreCounts): same docs, new fields.
+    const m = moreCounts(e, tz);
+    if (!c.both && !c.venueOnly && !m.both && !m.venueOnly) continue;
     const day = dayId(e.occurredAt, tz);
-    if (c.both) {
-      add(VENUE_KEY, day, c.both);
-      if (e.journeyKey && e.journeyKey !== VENUE_KEY) add(e.journeyKey, day, c.both);
+    for (const x of [c, m]) {
+      if (x.both) {
+        add(VENUE_KEY, day, x.both);
+        if (e.journeyKey && e.journeyKey !== VENUE_KEY) add(e.journeyKey, day, x.both);
+      }
+      if (x.venueOnly) add(VENUE_KEY, day, x.venueOnly);
     }
-    if (c.venueOnly) add(VENUE_KEY, day, c.venueOnly);
   }
   return [...out.values()].filter((d) => Object.keys(d.counts).length > 0);
 }

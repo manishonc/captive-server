@@ -10,7 +10,7 @@
  *   guest-info     GET · PUT {locales, baseVersion}          (the on/off switch stays PR 1's POST)
  *   audience       GET · PUT {sms, email}
  *   test-send      POST {journeyKey, nodeId?, channel, lang?, recipientId}
- *   results        GET ?venueId&from&to&journeys
+ *   results        GET ?venueId&from&to&journeys&detail   (detail: the owner dashboard)
  *   guests         GET ?cursor&limit&lang · GET /:contactId?lang · POST /:contactId/marketing {action, scope}
  *   messages       GET ?kind&days&cursor&limit&lang
  *   start-sending  POST

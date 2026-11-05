@@ -26,6 +26,10 @@ export const resultsInputShape = {
   from: z.string().regex(DAY, 'Dates look like 2026-09-25').optional().describe("First day, YYYY-MM-DD in the venue's local time. Default: 30 days before `to`."),
   to: z.string().regex(DAY, 'Dates look like 2026-09-25').optional().describe('Last day, YYYY-MM-DD (default today). At most 92 days in all.'),
   byJourney: z.boolean().optional().describe("Also give each journey's own numbers."),
+  detail: z
+    .boolean()
+    .optional()
+    .describe("The owner dashboard: also the busiest days and hours (visits, venue time) and each journey's funnel — sent, delivered, opened, clicked, goal reached — per channel and send time, with credits and the estimated revenue next to them. Implies byJourney."),
 };
 
 export const messagesInputShape = {
@@ -75,6 +79,7 @@ export function resultsPath(tenantUserId: string, a: ResultsInput): string {
   if (a.from) q.set('from', a.from);
   if (a.to) q.set('to', a.to);
   if (a.byJourney) q.set('journeys', '1');
+  if (a.detail) q.set('detail', '1');
   const qs = q.toString();
   return `${tenantBase(tenantUserId)}/results${qs ? `?${qs}` : ''}`;
 }
@@ -283,7 +288,100 @@ function journeyView(raw: unknown) {
   };
 }
 
-function venueResultView(raw: unknown, byJourney: boolean) {
+// ── The owner dashboard (2026-11-04): capture rate, busiest times, journey funnels ──
+
+/** A server share (0–1) as a percent with one decimal; null stays null. */
+function percent(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1000) / 10 : null;
+}
+
+function moneyText(v: unknown): string | null {
+  const m = rec(v);
+  const currency = str(m.currency, 8);
+  return currency && typeof m.amountMinor === 'number' && Number.isFinite(m.amountMinor) ? formatMoney(m.amountMinor, currency) : null;
+}
+
+export const CAPTURE_BASIS =
+  "Capture rate: the share of Wi-Fi visits where the guest can get offers from this venue afterwards (they said yes). New = a guest's first visit. Counted from the day this number was added, so older visits are in `visits` but not in the rate.";
+
+function captureGroup(v: unknown) {
+  const g = rec(v);
+  return { visits: num(g.visits), canGetOffers: num(g.yes), percent: percent(g.rate) };
+}
+
+export function captureView(raw: unknown) {
+  const c = rec(raw);
+  if (!Object.keys(c).length) return null;
+  return { all: captureGroup(c.all), newGuests: captureGroup(c.first), returningGuests: captureGroup(c.returning) };
+}
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const hourText = (h: number) => `${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`;
+
+/** The heatmap, small: per weekday, per hour, the top 5 hours of the week. */
+export function busiestTimesView(raw: unknown) {
+  const h = rec(raw);
+  const cells = list(h.cells).map((r) => list(r).map(num));
+  if (cells.length !== 7) return null;
+  const top: Array<{ day: string; hour: string; visits: number }> = [];
+  cells.forEach((r, d) => r.forEach((x, hr) => x > 0 && top.push({ day: WEEKDAY_NAMES[d], hour: hourText(hr), visits: x })));
+  top.sort((a, b) => b.visits - a.visits);
+  const day = rec(h.busiestDay);
+  const hour = rec(h.busiestHour);
+  return {
+    timezone: str(h.timezone, 64),
+    visits: num(h.total),
+    busiestDay: typeof day.weekday === 'number' ? { day: WEEKDAY_NAMES[day.weekday - 1] ?? null, visits: num(day.visits) } : null,
+    busiestHour: typeof hour.hour === 'number' ? { hour: hourText(hour.hour), visits: num(hour.visits) } : null,
+    top: top.slice(0, 5),
+    byWeekday: Object.fromEntries(WEEKDAY_NAMES.map((n, i) => [n, cells.reduce((s, r, d) => (d === i ? s + r.reduce((a, b) => a + b, 0) : s), 0)])),
+    byHour: Array.from({ length: 24 }, (_, hr) => cells.reduce((s, r) => s + (r[hr] ?? 0), 0)),
+  };
+}
+
+function funnelRowView(raw: unknown, keyName: 'channel' | 'sendTime') {
+  const r = rec(raw);
+  return {
+    [keyName]: str(r.key, 40),
+    sent: num(r.sent),
+    delivered: num(r.delivered),
+    // SMS has no open signal: null, never 0.
+    opened: typeof r.opened === 'number' ? r.opened : null,
+    clicked: num(r.clicked),
+    reachedGoal: num(r.converted),
+    credits: num(r.credits),
+    creditsValue: moneyText(r.creditsValue),
+    estimatedRevenue: moneyText(r.revenue),
+  };
+}
+
+export function funnelView(raw: unknown) {
+  const f = rec(raw);
+  if (!Object.keys(f).length) return null;
+  const ratings = rec(f.ratings);
+  // The journey's own line (its key is `all`): the numbers without a channel name.
+  const { channel: _all, ...total } = funnelRowView(f.total, 'channel');
+  return {
+    goal: str(f.goal, 20),
+    started: num(f.started),
+    ...total,
+    freeInfoMessages: num(f.serviceSent),
+    byChannel: list(f.byChannel).slice(0, 6).map((r) => funnelRowView(r, 'channel')),
+    bySendTime: list(f.bySlot).slice(0, 8).map((r) => funnelRowView(r, 'sendTime')),
+    reachedGoalBeforeAnyMessage: num(f.convertedBeforeMessage),
+    reachedGoalBeforeTheSplitWasCounted: num(f.convertedNotSplit),
+    ...(num(ratings.count) > 0 ? { ratings: { count: num(ratings.count), averageStars: typeof ratings.averageStars === 'number' ? ratings.averageStars : null, twoStarsOrLess: num(ratings.low) } } : {}),
+  };
+}
+
+export const FUNNEL_NOTES = [
+  'A journey funnel counts every message of the journey as sent, the free info ones too (freeInfoMessages).',
+  'Opened is email and WhatsApp only (null for SMS, which has no open signal).',
+  "A goal reached is credited to the journey's last message before it (its channel and send time); goals from before that split was counted show only in the journey's total.",
+  'estimatedRevenue is only for journeys whose goal is a visit: goals reached × the saved average spend per visit — an estimate, not measured takings. creditsValue is what the credits cost.',
+];
+
+function venueResultView(raw: unknown, byJourney: boolean, detail = false) {
   const v = rec(raw);
   const c = card(v.card);
   const stays = c.stays;
@@ -314,15 +412,23 @@ function venueResultView(raw: unknown, byJourney: boolean) {
       startedWaitingLast72h: wait.startedWaitingLast72hTruncated === true ? `${num(wait.startedWaitingLast72h)}+` : num(wait.startedWaitingLast72h),
     },
     testRun: testRunView(v.testRun),
-    ...(byJourney ? { journeys: list(v.journeys).slice(0, MAX_JOURNEYS).map(journeyView) } : {}),
+    captureRate: captureView(v.capture),
+    ...(detail ? { busiestTimes: busiestTimesView(v.heatmap) } : {}),
+    ...(byJourney || detail
+      ? {
+          journeys: list(v.journeys)
+            .slice(0, MAX_JOURNEYS)
+            .map((j) => (detail ? { ...journeyView(j), funnel: funnelView(rec(j).funnel) } : journeyView(j))),
+        }
+      : {}),
   };
 }
 
 /** The server's `{ range, venues }` → the tool's answer. */
-export function resultsView(data: unknown, opts: { byJourney?: boolean; venueId?: string } = {}) {
+export function resultsView(data: unknown, opts: { byJourney?: boolean; venueId?: string; detail?: boolean } = {}) {
   const d = rec(data);
   const range = rec(d.range);
-  const venues = list(d.venues).map((v) => venueResultView(v, Boolean(opts.byJourney)));
+  const venues = list(d.venues).map((v) => venueResultView(v, Boolean(opts.byJourney), Boolean(opts.detail)));
   return {
     // One shared period, or null when the venues' local dates differ (each venue then has its own).
     period: str(range.from, 10) && str(range.to, 10) ? { from: str(range.from, 10), to: str(range.to, 10) } : null,
@@ -330,6 +436,8 @@ export function resultsView(data: unknown, opts: { byJourney?: boolean; venueId?
     notes: [
       'guestsStarted counts journey starts: a guest in two journeys counts twice.',
       'messages include the free info messages (freeInfoMessages); credits are marketing only.',
+      CAPTURE_BASIS,
+      ...(opts.detail ? FUNNEL_NOTES : []),
     ],
     count: venues.length,
     venues,

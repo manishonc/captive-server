@@ -189,6 +189,77 @@ test('results: per journey only when asked; bySlot never passes', () => {
   assert(!JSON.stringify(j).includes('bySlot'), 'bySlot must not pass');
 });
 
+// ── The owner dashboard (2026-11-04) ─────────────────────────────────────────
+
+function dashboardFixture(): Raw {
+  const cells = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+  cells[4][19] = 5;
+  cells[5][19] = 3;
+  cells[0][12] = 2;
+  return resultsFixture({
+    capture: {
+      visits: { total: 12, first: 8, returning: 4 },
+      logins: 15,
+      all: { visits: 9, yes: 6, rate: 0.6667 },
+      first: { visits: 6, yes: 4, rate: 0.6667 },
+      returning: { visits: 3, yes: 2, rate: 0.6667 },
+    },
+    heatmap: { timezone: 'Europe/Zurich', cells, total: 10, max: 5, busiest: { weekday: 5, hour: 19, visits: 5 }, busiestDay: { weekday: 5, visits: 5 }, busiestHour: { hour: 19, visits: 8 } },
+    journeys: [
+      {
+        journeyKey: 'welcome_back',
+        name: 'Welcome → come back',
+        returnVisit: true,
+        live: { entered: 30, converted: 9, sends: { sms: { sent: 20 } }, credits: { sms: 300 } },
+        testRun: {},
+        goal: 'visit',
+        funnel: {
+          goal: 'visit',
+          started: 30,
+          total: { key: 'all', sent: 20, delivered: 19, opened: 0, clicked: 6, converted: 9, credits: 300, creditsValue: { amountMinor: 300, currency: 'CHF' }, revenue: { amountMinor: 40500, currency: 'CHF' } },
+          byChannel: [{ key: 'sms', sent: 20, delivered: 19, opened: null, clicked: 6, converted: 8, credits: 300, creditsValue: { amountMinor: 300, currency: 'CHF' }, revenue: { amountMinor: 36000, currency: 'CHF' } }],
+          bySlot: [{ key: 'evening', sent: 20, delivered: 19, opened: 0, clicked: 6, converted: 8, credits: 300, creditsValue: { amountMinor: 300, currency: 'CHF' }, revenue: { amountMinor: 36000, currency: 'CHF' } }],
+          convertedBeforeMessage: 0,
+          convertedNotSplit: 1,
+          serviceSent: 2,
+          ratings: { count: 0, averageStars: null, low: 0 },
+        },
+      },
+    ],
+  });
+}
+
+test('results: the capture rate on every venue, as percents with its basis', () => {
+  const out = resultsView(dashboardFixture());
+  const v = out.venues[0] as Raw;
+  eq(v.captureRate, { all: { visits: 9, canGetOffers: 6, percent: 66.7 }, newGuests: { visits: 6, canGetOffers: 4, percent: 66.7 }, returningGuests: { visits: 3, canGetOffers: 2, percent: 66.7 } }, 'capture');
+  assert(out.notes.some((n: string) => n.startsWith('Capture rate')), 'the basis is in the notes');
+  eq((resultsView(resultsFixture()).venues[0] as Raw).captureRate, null, 'an older server without capture → null');
+  assert(!('busiestTimes' in v) && !('journeys' in v), 'no detail unless asked');
+});
+
+test('results: detail = busiest times (small) + each journey funnel; SMS opens stay null', () => {
+  const out = resultsView(dashboardFixture(), { detail: true });
+  const v = out.venues[0] as Raw;
+  eq(v.busiestTimes.busiestDay, { day: 'Friday', visits: 5 }, 'busiest day');
+  eq(v.busiestTimes.busiestHour, { hour: '19:00–20:00', visits: 8 }, 'busiest hour');
+  eq(v.busiestTimes.top[0], { day: 'Friday', hour: '19:00–20:00', visits: 5 }, 'top hour of the week');
+  eq(v.busiestTimes.byWeekday.Monday, 2, 'per weekday');
+  eq(v.busiestTimes.byHour.length, 24, '24 hours');
+  assert(!JSON.stringify(v.busiestTimes).includes('cells'), 'no raw grid');
+  const f = v.journeys[0].funnel;
+  eq([f.sent, f.delivered, f.clicked, f.reachedGoal, f.credits, f.creditsValue, f.estimatedRevenue], [20, 19, 6, 9, 300, 'CHF 3.00', 'CHF 405.00'], 'journey line');
+  assert(!('channel' in f), 'the journey line has no channel');
+  eq(f.byChannel[0].opened, null, 'SMS opens null');
+  eq(f.byChannel[0].channel, 'sms', 'channel row');
+  eq(f.bySendTime[0].sendTime, 'evening', 'send time row');
+  eq([f.freeInfoMessages, f.reachedGoalBeforeTheSplitWasCounted], [2, 1], 'notes on the split');
+  assert(!('ratings' in f), 'no ratings block without ratings');
+  assert(out.notes.some((n: string) => n.startsWith('Opened is email and WhatsApp only')), 'funnel notes');
+  assert(!JSON.stringify(v.journeys[0]).includes('bySlot'), 'bySlot (the raw map) never passes');
+  eq(resultsPath('t1', { detail: true }), '/internal/adaptive/tenants/t1/results?detail=1', 'detail path');
+});
+
 test('results: stays synced as two numbers, null when there is no calendar', () => {
   const none = resultsView(resultsFixture()).venues[0] as Raw;
   eq(none.staysSynced, null, 'no calendar');

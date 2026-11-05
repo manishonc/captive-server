@@ -18,7 +18,7 @@ import { eventIdFor } from '../core/runtime/ids';
 import { HOUR_MS, durationMs } from '../core/runtime/time';
 import { normalizeE164, normalizeEmail } from '../../services/phone';
 import { LANGS, type Lang } from '../core/constants';
-import { resolveContact } from '../identity/resolve';
+import { resolveContact, venueScope } from '../identity/resolve';
 import { recordConnect, revisitGapHours } from '../identity/visits';
 import { contactPointId, identityReady } from '../identity/key';
 import { firestoreScheduler } from '../queue/firestoreQueue';
@@ -305,7 +305,9 @@ async function handleConnect(event: EngineEvent, guest: GuestPayload, env: Route
       occurredAt: event.occurredAt,
       venueId,
       contactId: resolved.contactId,
-      data: { visitId: visit.visitId, visitNumber: visit.visitNumber, isFirstVisit: visit.isFirstVisit, isRevisit: visit.isRevisit, guestId },
+      // `reachable` (the owner dashboard's capture rate): after this login the guest can get offers
+      // from this venue — a yes on file for it on at least one channel.
+      data: { visitId: visit.visitId, visitNumber: visit.visitNumber, isFirstVisit: visit.isFirstVisit, isRevisit: visit.isRevisit, guestId, reachable: Object.values(contact.marketingConsent?.[venueScope(venueId)] ?? {}).some((c) => c?.state === 'granted') },
     };
     await appendEvent(
       { type: started.type, occurredAt: started.occurredAt, tenantUserId: ctx.tenantUserId, venueId, contactId: resolved.contactId, guestId, data: started.data },
