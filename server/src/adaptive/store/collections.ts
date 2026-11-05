@@ -53,6 +53,9 @@ export const COL = {
   whatsappLog: 'CaptivePortal_WhatsAppLog',
   /** Local sandbox only: the fake Meta's templates (and its queued faults, doc `__faults`). */
   sandboxWhatsAppTemplates: 'CaptivePortal_AdaptiveSandboxWhatsAppTemplates',
+  // The weekly numbers email to the owner (2026-11-04): the account's switch and language
+  // (`settings_{tenant}`) and one record per Monday it ran for (`week_{tenant}_{date}`)
+  ownerEmails: 'CaptivePortal_AdaptiveOwnerEmails',
   // Existing collections the engine only reads
   settings: 'CaptivePortal_Settings',
   creditWallets: 'CaptivePortal_CreditWallets',
@@ -82,5 +85,8 @@ export const WHATSAPP_DOC_ID = 'whatsapp';
 export const ERASE_SWEEP_DOC_ID = 'erase_sweep';
 export const contactVenueId = (contactId: string, venueId: string) => `${contactId}_${venueId}`;
 export const guestInfoId = (venueId: string) => `venue_${venueId}`;
+/** The weekly numbers email: the account's settings, and the record of one Monday's email. */
+export const ownerEmailSettingsId = (tenantUserId: string) => `settings_${tenantUserId}`;
+export const ownerEmailWeekId = (tenantUserId: string, sendDate: string) => `week_${tenantUserId}_${sendDate}`;
 /** One calendar feed per venue, by construction (D-C34): a second save updates the same doc. */
 export const stayFeedId = (venueId: string) => `venue_${venueId}`;

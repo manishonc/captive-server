@@ -70,6 +70,7 @@ import { handleScanTrigger, type ScanTriggerPayload } from '../scans/trigger';
 import { closeAbandonedRuns, sweepPendingApplies } from '../brain/run';
 import { ERASE_WAIT_MS, eraseHistory } from '../erase/history';
 import { runEraseSweep } from '../erase/sweep';
+import { runWeeklyEmail, weeklyEmailWatchdog, type WeeklyEmailPayload } from '../service/weeklyEmail';
 
 const POLL_MS = 5_000;
 const IDLE_POLL_MS = 60_000;
@@ -100,6 +101,8 @@ export class AdaptiveWorker {
   private lastReclaimAt = 0;
   private lastStayWatchdogAt = 0;
   private lastScanWatchdogAt = 0;
+  /** The weekly numbers email: each live account's next Monday task, armed hourly. */
+  private lastWeeklyEmailWatchdogAt = 0;
   private lastPoolArmAt = 0;
   private lastAbandonedRunsAt = 0;
   private settings: EngineSettings = SAFE_SETTINGS;
@@ -196,6 +199,15 @@ export class AdaptiveWorker {
       this.lastScanWatchdogAt = Date.now();
       if (anyAccountOn(this.settings)) {
         await scanWatchdog({ now: now(), settings: this.settings }).catch((err) => console.warn('[ADAPTIVE WORKER] scan watchdog failed:', err?.message || err));
+      }
+    }
+
+    // The weekly numbers email (2026-11-04): every live account with a venue that is on has its
+    // next Monday's task armed. Nothing to arm while every account is off.
+    if (Date.now() - this.lastWeeklyEmailWatchdogAt > STAY_WATCHDOG_MS) {
+      this.lastWeeklyEmailWatchdogAt = Date.now();
+      if (anyAccountOn(this.settings)) {
+        await weeklyEmailWatchdog({ now: now(), settings: this.settings }).catch((err) => console.warn('[ADAPTIVE WORKER] weekly email watchdog failed:', err?.message || err));
       }
     }
 
@@ -375,6 +387,14 @@ export class AdaptiveWorker {
           const runId = typeof task.payload.runId === 'string' ? task.payload.runId : '';
           const r = runId ? await runEraseSweep(runId, { now: env.now, onProgress: () => extendLease(task.id, this.id) }) : null;
           if (r) console.log(`[ADAPTIVE WORKER] erase sweep ${runId}: ${r.scanned} read, ${r.found} of ${r.contacts} contacts gone, ${r.queued} erases queued`);
+          break;
+        }
+        case 'weekly_email': {
+          // The owner's weekly numbers email: sent at most once per Monday; a provider "try later"
+          // fails the task so the queue tries again with its backoff.
+          const r = await runWeeklyEmail(task.payload as unknown as WeeklyEmailPayload, env);
+          if (r.status === 'retry') throw new Error(`weekly email: try later (${r.reason})`);
+          console.log(`[ADAPTIVE WORKER] weekly email ${task.tenantUserId}: ${r.status}${'reason' in r && r.reason ? ` (${r.reason})` : ''}`);
           break;
         }
         default:
