@@ -61,3 +61,37 @@ export async function callServerInternalGet(path: string): Promise<ServerCallRes
   }
   return { status: response.status, data };
 }
+
+/**
+ * Any method with a JSON body (PUT/POST): the admin WhatsApp and launch routes. Same secret and
+ * answer shape as the two above; a timeout answers 504 instead of hanging the tool call.
+ */
+export async function callServerInternalJson(
+  method: 'POST' | 'PUT',
+  path: string,
+  body: Record<string, unknown>,
+  timeoutMs = 60_000,
+): Promise<ServerCallResult> {
+  if (!config.serverInternalSecret) {
+    return { status: 503, data: { ok: false, error: 'INTERNAL_API_SECRET is not configured on the MCP service' } };
+  }
+  let response: Response;
+  try {
+    response = await fetch(`${config.serverApiUrl}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'x-internal-secret': config.serverInternalSecret },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const timedOut = (err as Error)?.name === 'TimeoutError';
+    return { status: timedOut ? 504 : 502, data: { ok: false, error: timedOut ? 'The server took too long to answer' : 'Could not reach the server' } };
+  }
+  let data: Record<string, unknown> = {};
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    /* non-JSON error body */
+  }
+  return { status: response.status, data };
+}

@@ -15,6 +15,7 @@ import { registerAudienceTools } from './tools/audience';
 import { registerUsageTools } from './tools/usage';
 import { registerPlaybookTools } from './tools/playbooks';
 import { registerAdaptiveResultTools } from './tools/adaptiveResults';
+import { registerWhatsAppAdminTools } from './tools/whatsappAdmin';
 
 /**
  * Build a fresh McpServer with all tools registered.
@@ -66,8 +67,18 @@ import { registerAdaptiveResultTools } from './tools/adaptiveResults';
  *                  Campaign copy is translated per message via `translations`;
  *                  `segment.language` targets one language when the content
  *                  genuinely differs rather than just being translated.
+ *
+ * HeidiFi admin tools — ONLY on a SUPER_ADMIN's connection (`opts.admin`; see ../admin.ts), never
+ * listed for an owner or the cms in-app AI. They proxy captive-server's
+ * `/internal/adaptive/admin/whatsapp…` and `/admin/launch` (the admin portal's Campaign Manager →
+ * Adaptive → WhatsApp tab and Launch & health), acting as that admin:
+ *   whatsapp:      get_whatsapp_connection, list_whatsapp_templates, get_whatsapp_template,
+ *                  get_whatsapp_coverage, check_whatsapp_draft, edit_whatsapp_draft,
+ *                  suggest_whatsapp_template (billed AI run), send_whatsapp_template_to_meta
+ *                  (confirm), sync_whatsapp_now, list_whatsapp_test_options, send_whatsapp_test,
+ *                  get_whatsapp_sending, set_whatsapp_sending (ON needs "WHATSAPP ON")
  */
-export function buildMcpServer(): McpServer {
+export function buildMcpServer(opts: { admin?: boolean } = {}): McpServer {
   const server = new McpServer({
     name: 'heidifi-captive-portal',
     version: '1.0.0',
@@ -90,6 +101,7 @@ export function buildMcpServer(): McpServer {
   registerUsageTools(server);
   registerPlaybookTools(server);
   registerAdaptiveResultTools(server);
+  if (opts.admin) registerWhatsAppAdminTools(server);
 
   return server;
 }

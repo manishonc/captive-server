@@ -217,6 +217,7 @@ MCP campaign write tools proxy lifecycle actions back to `server/`.
 | `INTERNAL_API_SECRET` | mcp | Same secret as `server/`'s — the MCP service calls `server/`'s `/internal/campaigns/*`. |
 | `CMS_BASE_URL` | mcp | Base URL of the CMS (e.g. `https://portal.heidifi.ai`). The splash tools call its `/api/captive-portal/internal/*` API. Unset ⇒ those tools return 503. |
 | `CMS_INTERNAL_SECRET` | mcp + CMS | Guards the CMS's inbound `internal/splash-*` routes. Must match on both sides. **Generate a value distinct from `MCP_INTERNAL_SECRET`** — the two guard opposite directions, so sharing one means compromising either service grants writes through both. |
+| `MCP_DEV_ADMIN_UID` | mcp (local only) | With `MCP_DEV_STATIC_TOKEN`: the dev token also acts as this SUPER_ADMIN (a `Users` doc, re-checked per request), so the WhatsApp admin tools show. **Never set in production** (like the dev token itself). |
 
 Preview links are built by the CMS from its own `NEXT_PUBLIC_CAPTIVE_PORTAL_HOST`, so
 the portal host is not configured on the MCP service.

@@ -418,6 +418,36 @@ kinds `auto.run`, `auto.left`, `auto.cap_reached`, `auto.stopped` (once a day pe
 `CaptivePortal_AdaptiveConfig/whatsapp`; sandbox: `CaptivePortal_AdaptiveSandboxWhatsAppTemplates`.
 Reads are by id, the whole small registry, or newest first by one field: no composite index.
 
+### MCP tools for this tab (HeidiFi admin only)
+
+The HeidiFi MCP (`mcp/src/mcp/tools/whatsappAdmin.ts`) gives Claude the WhatsApp tab and the Launch & health
+WhatsApp switch. **Who gets them:** only a connection a SUPER_ADMIN approved on the cms consent screen (the
+cms records `approvedBy`; the MCP's `/oauth/authorize/resume` reads `Users/{approvedBy}.accountType` and puts
+`adminUid` on the code, the access token and every refreshed token). The bearer middleware checks the role
+again on every request: once the person isn't a SUPER_ADMIN, the tools are no longer listed or callable.
+Owners and the cms in-app AI (`/internal/mint-token`) never get them. The tools act as
+`{ uid: <adminUid>, kind: 'super_admin' }`, so the routes above apply unchanged (checks, rate limits, the
+activity log with the admin's email). Send test uses the account picked on the consent screen, or `tenantUserId`.
+
+| Tool | Route | Changes |
+|---|---|---|
+| `get_whatsapp_connection {refresh?}` | `GET whatsapp` (+ `POST connection/check` with refresh) | read |
+| `list_whatsapp_templates {lang?, journeyKey?, poolKey?, status?, kind?, includeDismissed?, search?}` | `GET whatsapp` | read |
+| `get_whatsapp_template {templateId \| name+lang}` | `GET whatsapp/templates/:id` | read |
+| `get_whatsapp_coverage {journeyKey?}` | `GET whatsapp` (`messages[].cells`, "N of 44 in use") | read |
+| `check_whatsapp_draft {template, body?, footer?, button?, category?}` | `POST whatsapp/templates/check` | read (nothing saved) |
+| `edit_whatsapp_draft {template, body?, footer?, button?, category?, baseVersion?}` | `PUT whatsapp/templates/:id` | a draft |
+| `suggest_whatsapp_template {journeyKey, poolKey, lang, kind, templateId?}` | `POST whatsapp/suggest` | **billed AI run** |
+| `send_whatsapp_template_to_meta {template, confirm: true, baseVersion?}` | `POST whatsapp/templates/:id/submit` | **Meta** — only after Manish's OK |
+| `sync_whatsapp_now` | `POST whatsapp/sync` | our copy (reads Meta) |
+| `list_whatsapp_test_options {tenantUserId?, journeyKey?, lang?}` | Firestore venues + saved test phones (masked), `GET journey-templates/:key/messages` | read |
+| `send_whatsapp_test {venueId, journeyKey, recipientId, nodeId?, offerSlot?, lang?, tenantUserId?}` | `POST /tenants/:t/venues/:v/test-send` (`channel: whatsapp`) | **a real message** |
+| `get_whatsapp_sending` | `GET admin/launch` (`whatsappSending`) | read |
+| `set_whatsapp_sending {mode, confirmPhrase?, note?}` | `PUT admin/launch` `{change: {whatsappSending: {mode}}}` | **all accounts**; ON needs "WHATSAPP ON" from Manish |
+
+Not covered (still clicks in the portal): new drafts by hand, dismiss/restore, link an imported template, pause
+use, set the account by hand, Turn on notices, WhatsApp Auto.
+
 ### PR S changes
 
 - `GET /tenants/:t/venues/:v/setups/:playbookKey` also answers `latestPlaybook` when a newer version of the
