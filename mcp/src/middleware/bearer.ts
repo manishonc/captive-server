@@ -4,6 +4,7 @@ import { config, protectedResourceMetadataUrl } from '../config';
 import { sha256Hex } from '../crypto';
 import { getAccessTokenByHash, touchAccessToken } from '../store/oauth';
 import { getPlanFlags } from '../planFlags';
+import { stillSuperAdmin } from '../admin';
 
 /** Express request augmented with the MCP SDK's `auth` field (set by this middleware). */
 export interface AuthedRequest extends Request {
@@ -64,6 +65,8 @@ function constantTimeMatch(a: string, b: string): boolean {
  *    MCP_DEV_TENANT_ID (local development / Phase A smoke-testing only).
  * 2. Production: look up the opaque token by SHA-256 hash in CaptivePortal_McpAccessTokens,
  *    enforce expiry + revocation, and bind the tenantUserId for the tool layer.
+ *    A SUPER_ADMIN's token also binds `adminUid` (still a SUPER_ADMIN: see ../admin.ts), which
+ *    turns on the WhatsApp admin tools; MCP_DEV_ADMIN_UID does the same for the dev token.
  */
 export async function requireBearer(req: AuthedRequest, res: Response, next: NextFunction): Promise<void> {
   const header = req.header('authorization') || '';
@@ -78,7 +81,7 @@ export async function requireBearer(req: AuthedRequest, res: Response, next: Nex
       token,
       clientId: 'dev-static',
       scopes: ['access_points:read'],
-      extra: { tenantUserId: config.devTenantId, dev: true },
+      extra: { tenantUserId: config.devTenantId, dev: true, adminUid: await stillSuperAdmin(config.devAdminUid) },
     };
     return next();
   }
@@ -93,13 +96,15 @@ export async function requireBearer(req: AuthedRequest, res: Response, next: Nex
   if (!(await mcpAllowed(at.tenantUserId))) return planForbidden(res);
 
   await touchAccessToken(tokenHash); // best-effort last-used ping
+  // A SUPER_ADMIN's connection: re-checked on every request (no admin tools once the role is gone).
+  const adminUid = await stillSuperAdmin(at.adminUid);
   req.auth = {
     token,
     clientId: at.clientId,
     scopes: at.scope ? at.scope.split(/\s+/) : [],
     resource: undefined,
     expiresAt: at.expiresAt / 1000,
-    extra: { tenantUserId: at.tenantUserId },
+    extra: { tenantUserId: at.tenantUserId, adminUid },
   };
   return next();
 }

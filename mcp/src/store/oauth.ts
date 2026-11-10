@@ -34,6 +34,8 @@ export interface AuthRequest {
   resource: string;
   status: 'pending' | 'approved' | 'consumed' | 'denied';
   tenantUserId?: string;
+  /** The person who approved on the cms consent screen (the cms writes it with the approval). */
+  approvedBy?: string;
   createdAt: number;
   expiresAt: number;
   consumedAt?: number;
@@ -108,6 +110,8 @@ export interface AuthCode {
   codeChallengeMethod: string;
   scope: string;
   resource: string;
+  /** Set when a SUPER_ADMIN approved: the WhatsApp admin tools act as this person. */
+  adminUid?: string | null;
   createdAt: number;
   expiresAt: number;
   consumed: boolean;
@@ -116,6 +120,7 @@ export interface AuthCode {
 export async function createAuthCode(input: {
   clientId: string;
   tenantUserId: string;
+  adminUid?: string | null;
   redirectUri: string;
   codeChallenge: string;
   codeChallengeMethod: string;
@@ -135,6 +140,7 @@ export async function createAuthCode(input: {
     codeChallengeMethod: input.codeChallengeMethod,
     scope: input.scope,
     resource: input.resource,
+    adminUid: input.adminUid ?? null,
     createdAt: t,
     expiresAt: t + input.ttlSeconds * 1000,
     consumed: false,
@@ -170,10 +176,13 @@ export interface AccessToken {
   refreshTokenHash: string;
   revoked: boolean;
   lastUsedAt?: number;
+  /** A SUPER_ADMIN's connection (see AuthCode.adminUid); missing on owner and in-app AI tokens. */
+  adminUid?: string | null;
 }
 
 export async function createAccessToken(input: {
   tenantUserId: string;
+  adminUid?: string | null;
   clientId: string;
   scope: string;
   resource: string;
@@ -192,6 +201,7 @@ export async function createAccessToken(input: {
     expiresAt: t + input.ttlSeconds * 1000,
     refreshTokenHash: '',
     revoked: false,
+    adminUid: input.adminUid ?? null,
   };
   await db.collection(COL.accessTokens).doc(tokenHash).set(doc);
   return { raw, doc };
@@ -234,10 +244,13 @@ export interface RefreshToken {
   replacedBy?: string;
   revoked: boolean;
   revokedFromReuse?: boolean;
+  /** Carried to every rotated access token (see AuthCode.adminUid). */
+  adminUid?: string | null;
 }
 
 export async function createRefreshToken(input: {
   tenantUserId: string;
+  adminUid?: string | null;
   clientId: string;
   scope: string;
   resource: string;
@@ -257,6 +270,7 @@ export async function createRefreshToken(input: {
     expiresAt: t + input.ttlDays * 86_400_000,
     consumed: false,
     revoked: false,
+    adminUid: input.adminUid ?? null,
   };
   await db.collection(COL.refreshTokens).doc(tokenHash).set(doc);
   return { raw, doc };

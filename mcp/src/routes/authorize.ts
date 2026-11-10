@@ -8,6 +8,7 @@ import {
 } from '../store/oauth';
 import { SCOPES } from '../config';
 import { getPlanFlags } from '../planFlags';
+import { superAdminUid } from '../admin';
 
 /**
  * Authorization endpoint (OAuth 2.1 Authorization Code + PKCE).
@@ -96,9 +97,14 @@ authorizeRouter.get('/oauth/authorize/resume', async (req, res) => {
     return errorPage(res, 403, 'MCP access is not included in this plan.');
   }
 
+  // A SUPER_ADMIN who approved (and picked an account) also gets the WhatsApp admin tools on
+  // this connection. Read from Users here, never taken from the request: fails closed (no admin).
+  const adminUid = await superAdminUid(ar.approvedBy).catch(() => null);
+
   const rawCode = await createAuthCode({
     clientId: ar.clientId,
     tenantUserId: ar.tenantUserId as string,
+    adminUid,
     redirectUri: ar.redirectUri,
     codeChallenge: ar.codeChallenge,
     codeChallengeMethod: ar.codeChallengeMethod,

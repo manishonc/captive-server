@@ -33,6 +33,9 @@ export const config = {
   // Dev-only static-token bypass (Phase A; must be unset in production).
   devStaticToken: process.env.MCP_DEV_STATIC_TOKEN || '',
   devTenantId: process.env.MCP_DEV_TENANT_ID || '',
+  // Dev only: the static token also acts as this SUPER_ADMIN for the WhatsApp admin tools
+  // (must be a Users doc with accountType SUPER_ADMIN; checked like a real token).
+  devAdminUid: process.env.MCP_DEV_ADMIN_UID || '',
 
   // Shared secret guarding /internal/* (CMS server-to-server token minting).
   internalSecret: process.env.MCP_INTERNAL_SECRET || '',

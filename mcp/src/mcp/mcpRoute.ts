@@ -15,7 +15,8 @@ export const mcpRouter = Router();
  */
 mcpRouter.post('/', requireBearer, async (req: AuthedRequest, res: Response) => {
   try {
-    const server = buildMcpServer();
+    // The WhatsApp admin tools exist only on a SUPER_ADMIN's connection (bearer re-checks the role).
+    const server = buildMcpServer({ admin: Boolean(req.auth?.extra?.adminUid) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);

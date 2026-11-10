@@ -53,6 +53,7 @@ tokenRouter.post('/oauth/token', rateLimit({ windowMs: 60_000, max: 30, keyPrefi
     // Issue the access token, then a refresh token linked to it, then backfill the link.
     const access = await createAccessToken({
       tenantUserId: codeDoc.tenantUserId,
+      adminUid: codeDoc.adminUid ?? null,
       clientId: client_id,
       scope: codeDoc.scope,
       resource: codeDoc.resource,
@@ -60,6 +61,7 @@ tokenRouter.post('/oauth/token', rateLimit({ windowMs: 60_000, max: 30, keyPrefi
     });
     const refresh = await createRefreshToken({
       tenantUserId: codeDoc.tenantUserId,
+      adminUid: codeDoc.adminUid ?? null,
       clientId: client_id,
       scope: codeDoc.scope,
       resource: codeDoc.resource,
@@ -110,6 +112,7 @@ tokenRouter.post('/oauth/token', rateLimit({ windowMs: 60_000, max: 30, keyPrefi
 
     const access = await createAccessToken({
       tenantUserId: rt.tenantUserId,
+      adminUid: rt.adminUid ?? null,
       clientId: client_id,
       scope: newScope,
       resource: rt.resource,
@@ -117,6 +120,7 @@ tokenRouter.post('/oauth/token', rateLimit({ windowMs: 60_000, max: 30, keyPrefi
     });
     const refresh = await createRefreshToken({
       tenantUserId: rt.tenantUserId,
+      adminUid: rt.adminUid ?? null,
       clientId: client_id,
       scope: newScope,
       resource: rt.resource,
