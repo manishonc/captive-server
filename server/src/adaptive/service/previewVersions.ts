@@ -46,6 +46,11 @@ export interface PreviewVersionsInput {
   offers: Offer[];
   /** The venue's look: with it, each email version also carries the email as guests see it (`html`). */
   design?: { brand: DesignBrand; poweredBy: boolean };
+  /**
+   * PR image header: the venue's WhatsApp picture — null: it has none (its guests get the plain
+   * templates); undefined: no venue (every template counts, an image one shows its sample).
+   */
+  venueImage?: string | null;
 }
 
 /**
@@ -139,9 +144,10 @@ export async function previewVersionsFor(input: PreviewVersionsInput): Promise<A
     let whatsapp: PreviewVersion | null = null;
     if (waPoolKeys.has(poolKey) && waReadable) {
       try {
-        const pick = waCtx ? pickWaTemplate(waCtx, { journeyKey: input.journeyKey, poolKey }, lang) : null;
+        const image = input.venueImage === undefined ? undefined : Boolean(input.venueImage);
+        const pick = waCtx ? pickWaTemplate(waCtx, { journeyKey: input.journeyKey, poolKey }, lang, { image }) : null;
         if (pick?.template.source) {
-          whatsapp = whatsappVersion(pick.status, pick.lang, pick.template.name, pick.template.source, valuesFor(pick.lang, step.offerSlot));
+          whatsapp = whatsappVersion(pick.status, pick.lang, pick.template.name, pick.template.source, valuesFor(pick.lang, step.offerSlot), input.venueImage ?? null);
         } else if (sms) {
           const row = poolRows.find((p) => p.poolKey === poolKey);
           const pool = definition.pools[poolKey];

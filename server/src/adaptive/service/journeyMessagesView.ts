@@ -19,7 +19,7 @@ import { blocksTemplateText } from '../core/emailBlocks';
 import { describeJourneySteps } from '../core/describeJourney';
 import { buildWordingIndex } from '../core/wording';
 import { whatsappExample, whatsappMissing, whatsappVersion, type PreviewVersion } from '../core/owner/previewVersions';
-import type { WaRequestable, WaSource } from '../core/whatsapp/template';
+import { headerOf, type WaRequestable, type WaSource } from '../core/whatsapp/template';
 import { smsFinalText } from '../send/compose';
 import { designEmail, type DesignBrand } from '../send/design';
 import { variantContent, variantEligible } from '../engine/renderSend';
@@ -103,6 +103,8 @@ export interface WaTemplateView {
   lang: Lang | null;
   template: string;
   text: string;
+  /** PR image header: the template's picture (its sample for Meta; null: none picked yet), or absent. */
+  header?: { type: 'image'; url: string | null } | null;
   footer: string | null;
   button: string | null;
   unknown: string[];
@@ -235,7 +237,18 @@ export function buildJourneyMessages(input: JourneyMessagesInput): MessageView[]
     if (wa) {
       const templates = wa.templates.map((t): WaTemplateView => {
         const rendered = renderText(t.source.body, valuesFor(t.lang ?? 'en'));
-        return { id: t.id, name: t.name, lang: t.lang, template: t.source.body, text: rendered.text, footer: t.source.footer, button: t.source.button?.text ?? null, unknown: rendered.unknown };
+        const header = headerOf(t.source);
+        return {
+          id: t.id,
+          name: t.name,
+          lang: t.lang,
+          template: t.source.body,
+          text: rendered.text,
+          ...(header ? { header: { type: 'image' as const, url: header.sample } } : {}),
+          footer: t.source.footer,
+          button: t.source.button?.text ?? null,
+          unknown: rendered.unknown,
+        };
       });
       // What a guest of this language gets: the template the engine would pick, else the example the
       // owner preview makes from the SMS text (the first wording these values allow), else nothing.

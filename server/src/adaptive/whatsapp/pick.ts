@@ -14,6 +14,7 @@
 
 import type { Lang } from '../core/constants';
 import type { PoolRow } from '../core/whatsapp/pools';
+import { headerOf } from '../core/whatsapp/template';
 import { checkContext, loadPools, templateView } from './context';
 import { listTemplates, readOps, type StoredTemplate, type WaOps } from './store';
 
@@ -59,16 +60,31 @@ export interface WaPick {
 
 const WAITING = new Set(['in_review', 'submitting']);
 
+/**
+ * PR image header: which templates a venue may get — with a WhatsApp picture, its image templates
+ * where the language has a usable one (else the plain ones); without, only the plain ones (an image
+ * template needs a picture at every send). `image` undefined: every template (the WhatsApp tab's counts).
+ */
+function forPicture<T extends { d: StoredTemplate }>(views: T[], image: boolean | undefined, usableOf: (x: T) => boolean): T[] {
+  if (image === undefined) return views;
+  const withImage = views.filter((x) => headerOf(x.d.compiled));
+  const plain = views.filter((x) => !headerOf(x.d.compiled));
+  if (!image) return plain;
+  return withImage.some(usableOf) ? withImage : plain;
+}
+
 export function pickWaTemplate(
   ctx: WaPickContext,
   use: { journeyKey: string; poolKey: string },
   lang: Lang,
-  opts: { approvedOnly?: boolean } = {},
+  opts: { approvedOnly?: boolean; image?: boolean } = {},
 ): WaPick | null {
   const mine = ourTemplatesOf(ctx, use);
   if (!mine.length) return null;
-  const views = viewsOf(ctx, mine);
+  const all = viewsOf(ctx, mine);
   const langs: Lang[] = lang === 'en' ? ['en'] : [lang, 'en'];
+  // Per language: the picture rule picks among that language's templates.
+  const views = langs.flatMap((l) => forPicture(all.filter((x) => x.d.lang === l), opts.image, (x) => x.view.usable));
   for (const l of langs) {
     const ok = views.find((x) => x.d.lang === l && x.view.usable);
     if (ok) return { status: 'approved', lang: l, template: ok.d };
@@ -105,10 +121,16 @@ function viewsOf(ctx: WaPickContext, docs: StoredTemplate[]) {
  * else (none there) in English; by name, so the wordings W1, W2… keep their order. Empty: WhatsApp
  * can't carry this message for this guest.
  */
-export function usableWaTemplates(ctx: WaPickContext, use: { journeyKey: string; poolKey: string }, lang: Lang): { lang: Lang; templates: StoredTemplate[] } | null {
+export function usableWaTemplates(
+  ctx: WaPickContext,
+  use: { journeyKey: string; poolKey: string },
+  lang: Lang,
+  opts: { image?: boolean } = {},
+): { lang: Lang; templates: StoredTemplate[] } | null {
   const views = viewsOf(ctx, ourTemplatesOf(ctx, use));
   for (const l of (lang === 'en' ? ['en'] : [lang, 'en']) as Lang[]) {
-    const ok = views.filter((x) => x.d.lang === l && x.view.usable).map((x) => x.d);
+    // A venue without a picture never gets an image template (`image` false); with one, its image templates first.
+    const ok = forPicture(views.filter((x) => x.d.lang === l && x.view.usable), opts.image ?? false, () => true).map((x) => x.d);
     if (ok.length) return { lang: l, templates: ok };
   }
   return null;

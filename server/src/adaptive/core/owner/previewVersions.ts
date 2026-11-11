@@ -10,7 +10,7 @@
 import type { Channel, Lang } from '../constants';
 import { renderText, type RenderValues } from '../render';
 import type { ChannelContent } from '../schemas';
-import { prefillFromSms, type WaRequestable, type WaSource } from '../whatsapp/template';
+import { headerOf, prefillFromSms, type WaRequestable, type WaSource } from '../whatsapp/template';
 import { blocksTemplateText } from '../emailBlocks';
 
 /**
@@ -29,6 +29,11 @@ export interface PreviewVersion {
   subject?: string;
   preheader?: string;
   text: string;
+  /**
+   * WhatsApp (PR image header): the picture at the top — the venue's WhatsApp picture, else the
+   * template's sample (`url` null: none picked yet). Absent: a template without a picture.
+   */
+  header?: { type: 'image'; url: string | null } | null;
   /** WhatsApp: Meta's grey footer line and the link button's label. */
   footer?: string | null;
   button?: { text: string } | null;
@@ -72,13 +77,23 @@ export function emailSmsVersion(channel: 'sms' | 'email', content: unknown, lang
 }
 
 /** A WhatsApp template (or the example) with the example values: its text, footer and button. */
-export function whatsappVersion(status: 'approved' | 'in_review' | 'example', lang: Lang, name: string | null, source: Pick<WaSource, 'body' | 'footer' | 'button'>, values: RenderValues): PreviewVersion {
+export function whatsappVersion(
+  status: 'approved' | 'in_review' | 'example',
+  lang: Lang,
+  name: string | null,
+  source: Pick<WaSource, 'header' | 'body' | 'footer' | 'button'>,
+  values: RenderValues,
+  /** The venue's WhatsApp picture (what guests see at the top of an image template). */
+  venueImage: string | null = null,
+): PreviewVersion {
   const body = renderText(source.body, values);
+  const header = headerOf(source);
   return {
     channel: 'whatsapp',
     lang,
     status,
     name,
+    ...(header ? { header: { type: 'image' as const, url: venueImage ?? header.sample } } : {}),
     text: body.text,
     footer: source.footer ?? null,
     button: source.button ? { text: source.button.text } : null,

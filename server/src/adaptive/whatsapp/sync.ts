@@ -27,7 +27,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { contentKey, parseMetaTemplate, parseOurName, type MetaTemplateFacts } from '../core/whatsapp/template';
+import { compiledContentParts, contentKey, headerOf, metaHeaderKind, parseMetaTemplate, parseOurName, type MetaTemplateFacts } from '../core/whatsapp/template';
 import { alertsForChange, digestText, rejectionWords, type DigestItem } from '../core/whatsapp/status';
 import { whatsappTemplateIdFor } from '../core/runtime/ids';
 import { localParts } from '../core/runtime/time';
@@ -410,7 +410,7 @@ export async function repairStuckSubmits(
       // Meta has our new text or is reviewing it.
       const editArrived =
         d.submit?.kind !== 'edit' ||
-        Boolean(f && (WITH_META.has(String(f.status ?? '').toUpperCase()) || (d.compiled && contentKey({ bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, buttons: d.compiled.button ? [{ text: d.compiled.button.text, url: d.compiled.button.url }] : [] }) === contentKey(f))));
+        Boolean(f && (WITH_META.has(String(f.status ?? '').toUpperCase()) || (d.compiled && contentKey(compiledContentParts(d.compiled)) === contentKey({ ...f, header: headerOf(d.compiled) ? metaHeaderKind(f) : null }))));
       if (f && editArrived) {
         const res = await changeTemplate(d.id, (cur) => (cur && cur.stage === 'submitting' && cur.submit?.startedAtMs === startedAtMs ? decideFromMeta(cur, f, pools, new Date(), 'repair', { wabaId, listStartedMs: readAt }) : null));
         if (res.changed) out.repaired += 1;

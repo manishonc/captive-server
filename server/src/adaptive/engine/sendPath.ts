@@ -71,6 +71,9 @@ import { platformLiveSendsSince, venueLiveSendsSince, venueServiceSendsSince } f
 import { instanceRef, type LoadedInstance } from './instanceStore';
 import type { EventInput } from './events';
 import { eventDoc, eventRef } from './events';
+import { usableVenueImage, WA_MEDIA_ERROR_CODES } from '../core/whatsapp/image';
+import { headerOf } from '../core/whatsapp/template';
+import { markWhatsAppImageBroken } from '../store/venueWhatsAppImage';
 
 type SendConfig = {
   purpose: 'marketing' | 'service';
@@ -270,12 +273,14 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
   const unsubscribeReady = Boolean(process.env.UNSUBSCRIBE_SIGNING_SECRET && process.env.SERVER_PUBLIC_URL);
 
   // PR W3: WhatsApp's wordings are the message's approved templates (guest's language, else English).
+  // PR image header: a venue with a WhatsApp picture gets the image templates (plain ones where none).
+  const waImage = usableVenueImage(a.ctx?.adaptive?.whatsappImage);
   const waOn = whatsappSendingOn(a.settings);
   const waPool = Boolean(a.definition.pools?.[cfg.pool]?.channels.includes('whatsapp'));
   const waPick =
     waOn && waPool
       ? await cachedWaPickContext()
-          .then((ctx) => usableWaTemplates(ctx, { journeyKey: inst.meta.journeyKey, poolKey: cfg.pool }, lang))
+          .then((ctx) => usableWaTemplates(ctx, { journeyKey: inst.meta.journeyKey, poolKey: cfg.pool }, lang, { image: Boolean(waImage) }))
           .catch((err) => {
             // The registry couldn't be read: WhatsApp has no wording this time, the ladder moves on.
             console.warn('[ADAPTIVE] WhatsApp templates not read:', (err as Error)?.message ?? err);
@@ -519,7 +524,7 @@ export async function runSend(a: SendArgs): Promise<SendOutcome> {
     ...(banditOn ? { variantPick: { vid: variant.id, method: vpick.method, part: varPart } } : {}),
   };
   const vc: { content: any; locale: Lang; fallback: boolean } = waVariant
-    ? { content: waContentOf(waVariant.template), locale: waPick!.lang, fallback: waPick!.lang !== lang }
+    ? { content: waContentOf(waVariant.template, waImage), locale: waPick!.lang, fallback: waPick!.lang !== lang }
     : variantContent(variant as (typeof variants)[number], channel, lang)!;
   // Links: same-length stand-ins for pricing and the gate (real ones are minted only
   // once the gate says yes), readable ones for the stored preview.
@@ -909,6 +914,7 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
       language: c.language,
       bodyParams: whatsappParams(c, finalValues),
       button: buttonField ? { index: c.buttonIndex, param: `s/${code}` } : null,
+      headerImage: c.headerImage ?? null,
       previewText: final.text,
       sendKey,
     };
@@ -1028,6 +1034,10 @@ async function dispatchLive(d: LiveArgs): Promise<SendOutcome> {
 
   // ── Phase 2 + 3: the provider, then the record ──
   const result = await callProvider(adapter, message);
+  // PR image header: Meta couldn't load the venue's picture — its next messages go without one.
+  if (message.kind === 'whatsapp' && message.headerImage && result.kind === 'rejected' && WA_MEDIA_ERROR_CODES.has(result.code)) {
+    void markWhatsAppImageBroken(inst.meta.venueId, message.headerImage.link, result.message ?? 'WhatsApp couldn’t load the picture');
+  }
   const recorded = await recordResult(live, result, attempts);
   if (recorded.kind === 'sent') {
     // PR F1: the learner closes this send once its 7 days are over, even if the venue goes quiet.
@@ -1199,8 +1209,8 @@ function waVariantId(t: Pick<StoredTemplate, 'name' | 'language'>): string {
   return `wa:${t.name}:${t.language}`;
 }
 
-/** PR W3: what the engine renders and sends for one approved template. */
-function waContentOf(t: StoredTemplate): WaTemplateContent {
+/** PR W3: what the engine renders and sends for one approved template (+ the venue's picture for an image template). */
+function waContentOf(t: StoredTemplate, image: { url: string } | null): WaTemplateContent {
   const index = t.meta?.buttons?.findIndex((b) => b.type === 'URL') ?? -1;
   return {
     kind: 'wa_template',
@@ -1210,6 +1220,7 @@ function waContentOf(t: StoredTemplate): WaTemplateContent {
     source: { body: t.source!.body, footer: t.source!.footer ?? null },
     compiled: { params: t.compiled!.params, button: t.compiled!.button },
     buttonIndex: index >= 0 ? index : 0,
+    headerImage: headerOf(t.compiled) && image ? { link: image.url } : null,
   };
 }
 

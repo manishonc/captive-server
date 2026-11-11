@@ -130,8 +130,20 @@ export const waUseSchema = z.discriminatedUnion('kind', [
  * Our editable text. Lengths are checked by T-codes (so an over-long draft can be saved and shows
  * a check), the schema only stops absurd input.
  */
+/**
+ * An optional picture at the top (PR image header). The template only says "a picture goes here";
+ * which picture is chosen at each send (the venue's WhatsApp picture). `sample` is the picture Meta's
+ * reviewers see (a HeidiFi media-library link, uploaded to Meta at Send to Meta); null until picked.
+ */
+export const waHeaderSchema = z
+  .object({ type: z.literal('image'), sample: z.string().trim().max(1000).nullable().default(null) })
+  .strict();
+export type WaHeader = z.infer<typeof waHeaderSchema>;
+
 export const waSourceSchema = z
   .object({
+    // Optional (not defaulted): sources saved before image headers have none, and stay as they were.
+    header: waHeaderSchema.nullable().optional(),
     body: z.string().trim().min(1).max(2000),
     footer: z.string().trim().max(200).nullable().default(null),
     button: z
@@ -142,6 +154,11 @@ export const waSourceSchema = z
   })
   .strict();
 export type WaSource = z.infer<typeof waSourceSchema>;
+
+/** A stored source or compile from before image headers has no `header`: none. */
+export function headerOf(x: { header?: WaHeader | null } | null | undefined): WaHeader | null {
+  return x?.header?.type === 'image' ? { type: 'image', sample: x.header.sample ?? null } : null;
+}
 
 export interface WaParam {
   /** The positional number Meta sees (`{{n}}`), in order of first use. */
@@ -161,6 +178,8 @@ export interface MetaComponent {
 }
 
 export interface WaCompiled {
+  /** The picture at the top (its sample for Meta's review); absent on templates compiled before image headers. */
+  header?: WaHeader | null;
   bodyText: string;
   footerText: string | null;
   button: { text: string; field: WaButtonField; url: string; example: string } | null;
@@ -264,13 +283,21 @@ export function compileTemplate(source: WaSource, ctx: CompileContext): WaCompil
     ? { text: source.button.text, field: source.button.field, url: buttonUrlFor(ctx.visitorBaseUrl), example: WA_BUTTON_EXAMPLE }
     : null;
 
+  const header = headerOf(source);
   const components: MetaComponent[] = [];
+  // Meta wants the sample's upload handle (`example.header_handle`): submit adds it (withHeaderHandle).
+  if (header) components.push({ type: 'HEADER', format: 'IMAGE' });
   const body: MetaComponent = { type: 'BODY', text: bodyText };
   if (params.length) body.example = { body_text: [params.map((p) => p.example)] };
   components.push(body);
   if (footerText) components.push({ type: 'FOOTER', text: footerText });
   if (button) components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: button.text, url: button.url, example: [button.example] }] });
-  return { bodyText, footerText, button, params, components };
+  return { header, bodyText, footerText, button, params, components };
+}
+
+/** The components with the sample picture's upload handle in the image header (what a create or edit sends). */
+export function withHeaderHandle(components: MetaComponent[], handle: string): MetaComponent[] {
+  return components.map((c) => (c.type === 'HEADER' && c.format === 'IMAGE' ? { ...c, example: { header_handle: [handle] } } : c));
 }
 
 /**
@@ -382,9 +409,27 @@ export function normText(s: string | null | undefined): string {
     .trim();
 }
 
-/** The visible parts of a template, normalised — equal means Meta holds what we compiled. */
-export function contentKey(parts: { bodyText: string | null; footerText: string | null; buttons: Array<{ text: string | null; url: string | null }> }): string {
-  return JSON.stringify([normText(parts.bodyText), normText(parts.footerText), parts.buttons.map((b) => [normText(b.text), normText(b.url)])]);
+/**
+ * The visible parts of a template, normalised — equal means Meta holds what we compiled. `header`:
+ * the kind of header (`IMAGE`; a text header as `TEXT:<text>`), left out when there is none — so a
+ * template without one keeps the key it always had.
+ */
+export function contentKey(parts: { header?: string | null; bodyText: string | null; footerText: string | null; buttons: Array<{ text: string | null; url: string | null }> }): string {
+  const key: unknown[] = [normText(parts.bodyText), normText(parts.footerText), parts.buttons.map((b) => [normText(b.text), normText(b.url)])];
+  if (parts.header) key.push(parts.header);
+  return JSON.stringify(key);
+}
+
+/** The header of Meta's template in contentKey's words: `IMAGE`, `TEXT:<text>`, another media kind, or null. */
+export function metaHeaderKind(f: { headerText: string | null; otherComponents: string[] }): string | null {
+  const media = f.otherComponents.find((c) => c.startsWith('HEADER:'));
+  if (media) return media.slice(7) || 'MEDIA';
+  return f.headerText ? `TEXT:${normText(f.headerText)}` : null;
+}
+
+/** Our compiled parts in contentKey's shape. */
+export function compiledContentParts(c: Pick<WaCompiled, 'header' | 'bodyText' | 'footerText' | 'button'>) {
+  return { header: headerOf(c) ? 'IMAGE' : null, bodyText: c.bodyText, footerText: c.footerText, buttons: c.button ? [{ text: c.button.text, url: c.button.url }] : [] };
 }
 
 /** Body variables `{{n}}` / `{{name}}` in a Meta body. */

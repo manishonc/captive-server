@@ -582,7 +582,7 @@ await test('review round 2: one webhook body — a repeated notice counts once, 
   assertEqual(await noteTemplateHints([...repeats, ...Array.from({ length: 15 }, (_, i) => item(`made_in_manager_${i}`))]), 10, 'capped at 10');
 });
 
-await test('review round 2: a header (or media) Meta holds — linking refused; on a linked template it is unusable (T24)', async () => {
+await test('review round 2: a header (or media) Meta holds — linking refused (PR image header: an image header is linked, ours to fill); on a linked template a new text header makes it unusable (T24)', async () => {
   await fresh();
   await connectAndSync();
   await db.collection(COL.sandboxWhatsAppTemplates).doc('sbx_header_1').set({
@@ -599,16 +599,33 @@ await test('review round 2: a header (or media) Meta holds — linking refused; 
     quality: 'GREEN',
     createdAt: new Date(),
   });
-  await post('/admin/whatsapp/sync');
-  const promo = (await get('/admin/whatsapp')).body.templates.find((t: any) => t.name === 'promo_with_header');
-  const refused = await put(`/admin/whatsapp/templates/${promo.id}/link`, {
-    use: { journeyKey: 'welcome_second_visit', poolKey: 'welcome_offer' },
-    map: [{ n: 1, field: 'contact.firstName', fallback: 'there' }, { n: 2, field: 'venue.name' }],
-    buttonField: null,
-    baseVersion: promo.version,
+  await db.collection(COL.sandboxWhatsAppTemplates).doc('sbx_header_2').set({
+    name: 'promo_with_video',
+    language: 'en',
+    status: 'APPROVED',
+    category: 'MARKETING',
+    componentsJson: JSON.stringify([
+      { type: 'HEADER', format: 'VIDEO', example: { header_handle: ['h'] } },
+      { type: 'BODY', text: 'Hi {{1}}, a new season starts at {{2}} this week, with a table waiting for you now.', example: { body_text: [['Anna', 'Café Bellevue']] } },
+      { type: 'FOOTER', text: 'Reply STOP to opt out.' },
+    ]),
+    wabaId: SANDBOX_WABA_ID,
+    quality: 'GREEN',
+    createdAt: new Date(),
   });
+  await post('/admin/whatsapp/sync');
+  const tpls = (await get('/admin/whatsapp')).body.templates;
+  const map = [{ n: 1, field: 'contact.firstName', fallback: 'there' }, { n: 2, field: 'venue.name' }];
+  const video = tpls.find((t: any) => t.name === 'promo_with_video');
+  const refused = await put(`/admin/whatsapp/templates/${video.id}/link`, { use: { journeyKey: 'welcome_second_visit', poolKey: 'welcome_offer' }, map, buttonField: null, baseVersion: video.version });
   assertEqual(refused.status, 400, refused.text);
-  assert(/parts this tab doesn’t handle \(a header with image\)/.test(refused.text), refused.text);
+  assert(/parts this tab doesn’t handle \(a header with video\)/.test(refused.text), refused.text);
+  // PR image header: an image header is ours to fill (the venue's picture at each send) — linked, the header kept.
+  const promo = tpls.find((t: any) => t.name === 'promo_with_header');
+  const image = await put(`/admin/whatsapp/templates/${promo.id}/link`, { use: { journeyKey: 'welcome_second_visit', poolKey: 'welcome_offer' }, map, buttonField: null, baseVersion: promo.version });
+  assertEqual(image.status, 200, image.text);
+  assertEqual([image.body.template.source.header, image.body.template.unhandled], [{ type: 'image', sample: null }, []], 'the image header is ours now');
+  assert(!image.body.template.checks.issues.some((i: any) => i.code === 'T23' || i.code === 'T24'), JSON.stringify(image.body.template.checks.issues));
 
   // A template linked before, given a header at Meta since: it isn't used.
   const visit = (await get('/admin/whatsapp')).body.templates.find((t: any) => t.name === 'restaurant_feedback_request');

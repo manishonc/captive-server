@@ -9,9 +9,9 @@
  * and refusals are exactly the portal's. Nothing is decided here. Platform-wide: the templates and
  * the sending switch are not per account (Send test is: the picked account, or `tenantUserId`).
  *
- * What changes prod: edit_whatsapp_draft (a draft), suggest_whatsapp_template (billed AI run),
+ * What changes prod: edit_whatsapp_draft and create_whatsapp_draft (a draft), suggest_whatsapp_template (billed AI run),
  * send_whatsapp_template_to_meta (confirm), sync_whatsapp_now, send_whatsapp_test (a real
- * message), set_whatsapp_sending (ON needs "WHATSAPP ON"). Everything else only reads.
+ * message), set_venue_whatsapp_image (a venue's next messages), set_whatsapp_sending (ON needs "WHATSAPP ON"). Everything else only reads.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -25,6 +25,7 @@ import {
   checksView,
   connectionView,
   coverageView,
+  createDraftShape,
   draftChangeShape,
   errorText,
   hasTextChange,
@@ -35,12 +36,14 @@ import {
   recipientsView,
   sendingView,
   setSendingShape,
+  setVenueImageShape,
   stepsView,
   suggestInputShape,
   templateDetail,
   templateRefShape,
   testOptionsShape,
   testSendShape,
+  venueImageShape,
   type DraftChange,
   type Lang,
   type TemplateRef,
@@ -180,7 +183,7 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
   adminTool<TemplateRef & DraftChange>(
     server,
     'check_whatsapp_draft',
-    `${HEIDIFI_ADMIN} Read-only (nothing is saved). Runs the editor's checks on a template's text with the changes you give (body, footer, button, category) — the same checks Send to Meta needs to pass — and shows the body Meta would see. Use it to try wording before edit_whatsapp_draft. German uses "du".`,
+    `${HEIDIFI_ADMIN} Read-only (nothing is saved). Runs the editor's checks on a template's text with the changes you give (header, body, footer, button, category) — the same checks Send to Meta needs to pass — and shows the body Meta would see. Use it to try wording before edit_whatsapp_draft. German uses "du".`,
     { ...templateRefShape, ...draftChangeShape },
     async (args, actor) => {
       const t = await loadTemplate(args);
@@ -192,6 +195,7 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
       return jsonResult({
         name: r.data.name,
         checks: checksView(r.data.checks),
+        header: r.data.compiled?.header ?? null,
         metaBody: r.data.compiled?.bodyText ?? null,
         metaFooter: r.data.compiled?.footerText ?? null,
         button: r.data.compiled?.button ?? null,
@@ -203,14 +207,14 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
   adminTool<TemplateRef & DraftChange & { baseVersion?: number }>(
     server,
     'edit_whatsapp_draft',
-    `${HEIDIFI_ADMIN} CHANGES PROD (a draft only — nothing goes to Meta or to guests). Saves new text for a draft template (or one Meta rejected or paused) and returns it with the checks run again. Give templateId or name + lang, and any of body (named fields, e.g. {{contact.firstName}}), footer, button, category; what you leave out stays. An approved template can't be edited (write a new one). Show Manish the new text before saving when he hasn't written it himself.`,
+    `${HEIDIFI_ADMIN} CHANGES PROD (a draft only — nothing goes to Meta or to guests). Saves new text for a draft template (or one Meta rejected or paused) and returns it with the checks run again. Give templateId or name + lang, and any of header (a picture at the top: {type: "image", sample}), body (named fields, e.g. {{contact.firstName}}), footer, button, category; what you leave out stays. An approved template can't be edited (write a new one: create_whatsapp_draft). Show Manish the new text before saving when he hasn't written it himself.`,
     {
       ...templateRefShape,
       ...draftChangeShape,
       baseVersion: z.number().int().min(0).optional().describe('The version you read (get_whatsapp_template); refused if someone changed it since. Default: the version read now.'),
     },
     async (args, actor) => {
-      if (!hasTextChange(args) && !args.category) return errorResult('Nothing to change: give body, footer, button or category');
+      if (!hasTextChange(args) && !args.category) return errorResult('Nothing to change: give header, body, footer, button or category');
       const t = await loadTemplate(args);
       if ('error' in t) return errorResult(t.error);
       const cur: Rec = t.data.template ?? {};
@@ -222,6 +226,20 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
       if (args.category) change.category = args.category;
       const r = await write('PUT', `${ADMIN}/whatsapp/templates/${cur.id}`, { change, baseVersion: args.baseVersion ?? cur.version }, actor);
       return 'error' in r ? errorResult(r.error) : jsonResult({ saved: true, template: templateDetail(r.data) });
+    },
+  );
+
+  adminTool<z.infer<z.ZodObject<typeof createDraftShape>>>(
+    server,
+    'create_whatsapp_draft',
+    `${HEIDIFI_ADMIN} CHANGES PROD (a new draft only — nothing goes to Meta or to guests). Writes a new template for one message and language: the next name hf_<pool>_<n> (or, with name, a new language of that template). Use it for an image version of a message (header {type: "image", sample}): the approved plain template stays for venues without a WhatsApp picture. Returns the draft with its checks. Show Manish the text before saving when he hasn't written it himself; sending it to Meta is send_whatsapp_template_to_meta (his OK).`,
+    createDraftShape,
+    async (args, actor) => {
+      const source = mergeSource(null, { header: args.header, body: args.body, footer: args.footer ?? null, button: args.button ?? null });
+      const body: Rec = { use: { journeyKey: args.journeyKey, poolKey: args.poolKey }, lang: args.lang, category: args.category, source };
+      if (args.name) body.name = args.name;
+      const r = await write('POST', `${ADMIN}/whatsapp/templates`, body, actor);
+      return 'error' in r ? errorResult(r.error) : jsonResult({ created: true, template: templateDetail(r.data) });
     },
   );
 
@@ -307,7 +325,7 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
   adminTool<z.infer<z.ZodObject<typeof testSendShape>>>(
     server,
     'send_whatsapp_test',
-    `${HEIDIFI_ADMIN} SENDS A REAL WHATSAPP MESSAGE from HeidiFi's number (Meta may bill it like any template message). The Adaptive preview's WhatsApp "Send test": one journey step's approved template, filled with the venue's real values and sample guest Anna, to one SAVED test phone number of the account (list_whatsapp_test_options). Call it when Manish asks for a test. No send record, no credits; at most 10 WhatsApp tests a day per account; refused while the account's Adaptive launch mode is off or the message has no approved template. A test also makes Meta send a message notice (one of the WhatsApp sending checks).`,
+    `${HEIDIFI_ADMIN} SENDS A REAL WHATSAPP MESSAGE from HeidiFi's number (Meta may bill it like any template message). The Adaptive preview's WhatsApp "Send test": one journey step's approved template, filled with the venue's real values and sample guest Anna, to one SAVED test phone number of the account (list_whatsapp_test_options). Call it when Manish asks for a test. No send record, no credits; at most 10 WhatsApp tests a day per account; refused while the account's Adaptive launch mode is off or the message has no approved template. A test also makes Meta send a message notice (one of the WhatsApp sending checks). With a venue WhatsApp picture (get_venue_whatsapp_image) it tests the message's image template where one is approved, the picture at the top (the preview says which picture).`,
     testSendShape,
     async (args, actor, extra) => {
       const account = await accountFor(args.tenantUserId, extra);
@@ -320,6 +338,40 @@ export function registerWhatsAppAdminTools(server: McpServer): void {
       if ('error' in r) return errorResult(r.error);
       const { ok: _ok, ...rest } = r.data;
       return jsonResult({ tenantUserId: account.id, ...rest });
+    },
+  );
+
+  // ── The venue's WhatsApp picture (PR image header) ─────────────────────────
+
+  const imagePath = (tenant: string, venueId: string) => `/internal/adaptive/tenants/${encodeURIComponent(tenant)}/venues/${encodeURIComponent(venueId)}/whatsapp-image`;
+
+  adminTool<z.infer<z.ZodObject<typeof venueImageShape>>>(
+    server,
+    'get_venue_whatsapp_image',
+    `${HEIDIFI_ADMIN} Read-only. A venue's WhatsApp picture: the picture at the top of its guests' WhatsApp messages when the message has an image template. Shows the link, its size, and whether it works (broken: Meta couldn't load it at a send — the venue's guests get the templates without a picture until it is set again). No picture: its guests get the plain templates.`,
+    venueImageShape,
+    async (args, _actor, extra) => {
+      const account = await accountFor(args.tenantUserId, extra);
+      if ('error' in account) return errorResult(account.error);
+      const r = await get(imagePath(account.id, args.venueId));
+      if ('error' in r) return errorResult(r.error);
+      const { ok: _ok, ...rest } = r.data;
+      return jsonResult({ tenantUserId: account.id, venueId: args.venueId, ...rest });
+    },
+  );
+
+  adminTool<z.infer<z.ZodObject<typeof setVenueImageShape>>>(
+    server,
+    'set_venue_whatsapp_image',
+    `${HEIDIFI_ADMIN} CHANGES PROD (the venue's next WhatsApp messages). Sets — or with url null removes — a venue's WhatsApp picture: from then on its guests get the image templates of a message (where one is approved) with this picture at the top; without one they get the plain templates. The picture must be in the account's media library (list_venue_logos: an https *.b-cdn.net link), JPEG or PNG, at most 5 MB and 4096 px; it is read and checked once, now. Only when Manish (or the owner) asked for this picture.`,
+    setVenueImageShape,
+    async (args, actor, extra) => {
+      const account = await accountFor(args.tenantUserId, extra);
+      if ('error' in account) return errorResult(account.error);
+      const r = await write('PUT', imagePath(account.id, args.venueId), { url: args.url }, actor);
+      if ('error' in r) return errorResult(r.error);
+      const { ok: _ok, ...rest } = r.data;
+      return jsonResult({ saved: true, tenantUserId: account.id, venueId: args.venueId, ...rest });
     },
   );
 

@@ -31,6 +31,7 @@ import {
   WA_BUTTON_FIELDS,
   WA_REQUESTABLE,
   compileTemplate,
+  headerOf,
   metaLanguageFor,
   normText,
   parseOurName,
@@ -300,13 +301,17 @@ export async function checkWhatsAppDraft(body: unknown) {
     },
     checkContext(pools, docs, ops, use),
   );
-  return { checks: report, compiled: { bodyText: compiled.bodyText, footerText: compiled.footerText, button: compiled.button, params: compiled.params }, name };
+  return { checks: report, compiled: { header: compiled.header ?? null, bodyText: compiled.bodyText, footerText: compiled.footerText, button: compiled.button, params: compiled.params }, name };
 }
 
 function sameSource(a: WaSource | null, b: WaSource): boolean {
   if (!a) return false;
   const btn = (x: WaSource['button']) => (x ? `${x.field}|${x.text}` : '');
-  return a.body === b.body && (a.footer ?? null) === (b.footer ?? null) && btn(a.button) === btn(b.button);
+  const head = (x: WaSource) => {
+    const h = headerOf(x);
+    return h ? `image|${h.sample ?? ''}` : '';
+  };
+  return a.body === b.body && (a.footer ?? null) === (b.footer ?? null) && btn(a.button) === btn(b.button) && head(a) === head(b);
 }
 
 export async function createWhatsAppDraft(body: unknown, actor: Actor) {
@@ -468,9 +473,13 @@ export async function linkWhatsAppTemplate(id: string, body: unknown, actor: Act
     const urlButton = cur.meta.buttons.find((b) => b.type === 'URL');
     // A link button with a variable needs our link, or every send fails at Meta (132000).
     if (urlButton && /\{\{\s*1\s*\}\}/.test(urlButton.url ?? '') && !input.buttonField) throw new ApiError('bad_request', 'Its button has a link to fill in: say which page it opens');
-    const unhandled = unhandledParts(cur.meta, Boolean(input.buttonField && urlButton));
+    // An image header is ours to fill once linked (the venue's picture at each send).
+    const metaImage = cur.meta.otherComponents.includes('HEADER:IMAGE');
+    const unhandled = unhandledParts(cur.meta, Boolean(input.buttonField && urlButton), true);
     if (unhandled.length) throw new ApiError('bad_request', `This template has parts this tab doesn’t handle (${unhandled.join(', ')}): it can’t be linked (write it again here without them)`);
     const source: WaSource = {
+      // Meta keeps the sample it reviewed; an edit (rejected / paused) asks for one again.
+      ...(metaImage ? { header: { type: 'image' as const, sample: null } } : {}),
       body,
       footer: cur.meta.footerText,
       button: input.buttonField && urlButton ? { text: urlButton.text ?? '', field: input.buttonField } : null,
@@ -650,7 +659,7 @@ export async function devWhatsAppReview(body: unknown) {
 }
 
 const faultSchema = z
-  .object({ items: z.array(z.object({ op: z.enum(['debug', 'phones', 'list', 'get', 'find', 'create', 'edit', 'subscriptions', 'any']), fault: z.enum(SANDBOX_FAULTS) }).strict()).min(1).max(20) })
+  .object({ items: z.array(z.object({ op: z.enum(['debug', 'phones', 'list', 'get', 'find', 'create', 'edit', 'subscriptions', 'upload', 'any']), fault: z.enum(SANDBOX_FAULTS) }).strict()).min(1).max(20) })
   .strict();
 
 export async function devWhatsAppFault(body: unknown) {

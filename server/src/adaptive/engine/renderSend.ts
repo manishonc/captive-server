@@ -202,6 +202,8 @@ export interface WaTemplateContent {
   compiled: Pick<WaCompiled, 'params' | 'button'>;
   /** Meta's index of the link button we fill (our templates have one button). */
   buttonIndex: number;
+  /** PR image header: the picture at the top (the venue's WhatsApp picture), when the template has an image header. */
+  headerImage?: { link: string } | null;
 }
 
 /**

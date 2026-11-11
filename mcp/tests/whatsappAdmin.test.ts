@@ -18,6 +18,7 @@ import {
   listInputSchema,
   listView,
   maskPhone,
+  hasTextChange,
   mergeSource,
   pickTemplate,
   recipientsView,
@@ -194,6 +195,16 @@ test('mergeSource: keeps what is not changed; null removes footer or button', ()
   eq(mergeSource(null, { body: 'Fresh' }), { body: 'Fresh', footer: null, button: null }, 'no text yet');
 });
 
+test('mergeSource + header (PR image header): kept, set, removed with null; a sample defaults to null', () => {
+  const pic = { type: 'image', sample: 'https://x.b-cdn.net/a.jpg' };
+  const cur = { header: pic, body: 'Old', footer: 'Reply STOP', button: null };
+  eq(mergeSource(cur, { body: 'New' }), { header: pic, body: 'New', footer: 'Reply STOP', button: null }, 'kept when left out');
+  eq(mergeSource(cur, { header: null }), { body: 'Old', footer: 'Reply STOP', button: null }, 'null removes it (no header key)');
+  eq(mergeSource({ body: 'Old', footer: null, button: null }, { header: { type: 'image' } }), { header: { type: 'image', sample: null }, body: 'Old', footer: null, button: null }, 'added without a sample');
+  eq(mergeSource({ body: 'Old', footer: null, button: null }, { body: 'x' }), { body: 'x', footer: null, button: null }, 'a plain template stays plain');
+  assert(hasTextChange({ header: null }) && hasTextChange({ header: { type: 'image' } }), 'a header change is a text change');
+});
+
 test('sending: the switch, the three checks, readiness and the ON phrase', () => {
   const l = {
     version: 41,
@@ -264,6 +275,9 @@ test('the tool descriptions say what costs money and what needs Manish’s word'
   assert(/explicit OK in the chat/.test(desc('send_whatsapp_template_to_meta')) && /z\.literal\(true\)/.test(desc('send_whatsapp_template_to_meta')), 'send to Meta needs confirm');
   assert(/explicit word in the chat/.test(desc('set_whatsapp_sending')), 'ON needs Manish');
   assert(/SENDS A REAL WHATSAPP MESSAGE/.test(desc('send_whatsapp_test')), 'test send says real');
+  assert(/CHANGES PROD/.test(desc('set_venue_whatsapp_image')) && /media library/.test(desc('set_venue_whatsapp_image')), 'the venue picture says prod and media library');
+  assert(/Read-only/.test(desc('get_venue_whatsapp_image')), 'reading the picture is read-only');
+  assert(/CHANGES PROD \(a new draft only/.test(desc('create_whatsapp_draft')) && /send_whatsapp_template_to_meta \(his OK\)/.test(desc('create_whatsapp_draft')), 'a new draft never goes to Meta by itself');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

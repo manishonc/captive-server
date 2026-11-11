@@ -18,7 +18,7 @@ import { db } from '../../firebase';
 import { COL, WHATSAPP_DOC_ID } from '../store/collections';
 import { tsMs } from '../store/time';
 import { whatsappTemplateIdFor } from '../core/runtime/ids';
-import { compileTemplate, metaLanguageFor } from '../core/whatsapp/template';
+import { headerOf, compileTemplate, metaLanguageFor } from '../core/whatsapp/template';
 import { displayStatus, type WaDisplay } from '../core/whatsapp/status';
 import {
   aiFixUnsentOf,
@@ -151,7 +151,11 @@ export async function applyWriterAnswer(
   const why = stillNeeded(local, viewsOf(docs, local));
   if (why) return superseded(why, local.targetTemplateId ? docs.find((d) => d.id === local.targetTemplateId) : null);
 
-  const source = sourceFromAnswer(out, local);
+  // PR image header: a fix keeps the template's picture, a translation the English one's (same name,
+  // same parts in every language); the writer only writes the words.
+  const target = (local.kind === 'fix' || local.kind === 'translation') && local.targetTemplateId ? docs.find((d) => d.id === local.targetTemplateId) : null;
+  const keptHeader = headerOf(target?.source);
+  const source = { ...(keptHeader ? { header: keptHeader } : {}), ...sourceFromAnswer(out, local) };
   const compiled = compileTemplate(source, { lang: local.lang, visitorBaseUrl: local.checkCtx.visitorBaseUrl });
   const at = new Date().toISOString();
   const aiBase: Omit<WaAiInfo, 'appliedVersion' | 'fixes'> = {

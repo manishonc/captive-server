@@ -69,6 +69,12 @@ export interface MetaClient {
   findByName(wabaId: string, name: string): Promise<unknown[]>;
   createTemplate(wabaId: string, body: MetaTemplateCreate): Promise<{ id: string; status: string | null; category: string | null }>;
   editTemplate(id: string, body: { components: MetaComponent[]; category?: string }): Promise<{ ok: boolean }>;
+  /**
+   * PR image header: the sample picture of an image template, through Meta's Resumable Upload API
+   * (`POST /{app-id}/uploads` → `upload:<id>`, then `POST /upload:<id>` with the bytes) → the handle
+   * the template's `example.header_handle` names. `appId`: the token's app (debug_token).
+   */
+  uploadSample(appId: string, file: { bytes: Uint8Array; type: 'image/jpeg' | 'image/png'; name: string }): Promise<string>;
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -150,7 +156,12 @@ export function createMetaClient(deps: MetaClientDeps = {}): MetaClient {
   const log = deps.log ?? ((line: string) => console.log(line));
   const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS;
 
-  async function call(method: 'GET' | 'POST', path: string, label: string, opts: { query?: Record<string, string>; body?: unknown } = {}): Promise<Record<string, unknown>> {
+  async function call(
+    method: 'GET' | 'POST',
+    path: string,
+    label: string,
+    opts: { query?: Record<string, string>; body?: unknown; bytes?: { data: Uint8Array; headers: Record<string, string> } } = {},
+  ): Promise<Record<string, unknown>> {
     const { token, emulator } = env();
     if (emulator) throw new MetaError('setup', 'The real Meta account is never used with the Firestore emulator (the sandbox Meta is)');
     if (!token) throw new MetaError('setup', 'WhatsApp is not configured on this server (no access token)');
@@ -165,8 +176,11 @@ export function createMetaClient(deps: MetaClientDeps = {}): MetaClient {
       try {
         res = await fetchImpl(url.toString(), {
           method,
-          headers: { Authorization: `Bearer ${token}`, ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
-          body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          // The upload step takes the token as `OAuth <token>` (Meta's Resumable Upload API), everything else as Bearer.
+          headers: opts.bytes
+            ? { Authorization: `OAuth ${token}`, ...opts.bytes.headers }
+            : { Authorization: `Bearer ${token}`, ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+          body: opts.bytes ? (opts.bytes.data as unknown as BodyInit) : opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
           signal: ctrl.signal,
           redirect: 'error',
         });
@@ -322,6 +336,19 @@ export function createMetaClient(deps: MetaClientDeps = {}): MetaClient {
       const json = await call('POST', `/${encodeURIComponent(id)}`, 'edit_template', { body });
       if (json.success === false) throw new MetaError('invalid', 'Meta did not accept the edit');
       return { ok: true };
+    },
+    async uploadSample(appId, file) {
+      if (!/^\d{1,30}$/.test(appId)) throw new MetaError('setup', 'The token’s app is unknown (Check connection first)');
+      const session = await call('POST', `/${appId}/uploads`, 'upload_session', {
+        query: { file_name: file.name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'sample', file_length: String(file.bytes.length), file_type: file.type },
+      });
+      const uploadId = strOrNull(session.id, 2000);
+      // `upload:<id>`, sometimes with a `?sig=…` that belongs in the URL as it is.
+      if (!uploadId || !/^upload:[A-Za-z0-9_\-=:.%+/?&]+$/.test(uploadId)) throw new MetaError('unknown', 'Meta answered without an upload session');
+      const done = await call('POST', `/${uploadId}`, 'upload_file', { bytes: { data: file.bytes, headers: { file_offset: '0' } } });
+      const handle = strOrNull(done.h, 4000);
+      if (!handle) throw new MetaError('unknown', 'Meta answered without a picture handle');
+      return handle;
     },
   };
 }
