@@ -16,7 +16,8 @@
  *     - any other refusal → back where it was, with Meta's words (`lastSubmitError`).
  */
 
-import { parseMetaTemplate } from '../core/whatsapp/template';
+import { headerOf, parseMetaTemplate, withHeaderHandle, type MetaComponent } from '../core/whatsapp/template';
+import { readWaImage } from './imageFetch';
 import { META_CREATES_PER_HOUR } from '../core/whatsapp/checks';
 import { conflict, validationFailed } from '../api/errors';
 import { HttpError, unavailable } from '../api/http';
@@ -113,6 +114,10 @@ export async function submitTemplate(
     throw new HttpError(409, 'not_eligible', 'Auto sends only templates of an Adaptive message');
   }
 
+  // PR image header: Meta reviews an image template with a sample picture — read it from the media
+  // library and upload it first (nothing changes if that fails: the template stays as it is).
+  const handle = headerOf(doc.compiled) ? await sampleHandle(doc, ops.connection?.appId ?? null, by) : null;
+
   let begun: Awaited<ReturnType<typeof beginSubmit>>;
   try {
     begun = await beginSubmit(id, {
@@ -170,12 +175,14 @@ export async function submitTemplate(
   }
 
   let created: { id: string; status: string | null; category: string | null } | null = null;
+  // The text compiled when the doc was read (the same version: beginSubmit compared it) with the sample's handle.
+  const components: MetaComponent[] = handle && headerOf(cur.compiled) ? withHeaderHandle(cur.compiled!.components, handle) : cur.compiled!.components;
   try {
     if (begun.kind === 'create') {
-      created = await client.createTemplate(wabaId, { name: cur.name, language: cur.language, category: cur.requestedCategory!, components: cur.compiled!.components });
+      created = await client.createTemplate(wabaId, { name: cur.name, language: cur.language, category: cur.requestedCategory!, components });
     } else {
       await client.editTemplate(cur.meta!.id!, {
-        components: cur.compiled!.components,
+        components,
         ...(cur.requestedCategory && cur.requestedCategory !== cur.meta?.category ? { category: cur.requestedCategory } : {}),
       });
     }
@@ -232,7 +239,7 @@ export async function submitTemplate(
         bodyText: d.compiled?.bodyText ?? null,
         footerText: d.compiled?.footerText ?? null,
         buttons: d.compiled?.button ? [{ type: 'URL', text: d.compiled.button.text, url: d.compiled.button.url, example: [d.compiled.button.example], otpType: null }] : [],
-        otherComponents: [],
+        otherComponents: headerOf(d.compiled) ? ['HEADER:IMAGE'] : [],
       },
       pools,
       new Date(),
@@ -345,4 +352,41 @@ export async function connectionAlert(e: MetaError): Promise<void> {
     subject: 'WhatsApp templates: the Meta connection is failing',
     text: `${ERR_WORDS[e.kind] ?? 'Meta refused the call'}. Meta said: “${e.userMsg}”.\n\nOpen Adaptive Campaigns → WhatsApp in the admin and press Check connection.`,
   });
+}
+
+/**
+ * The sample picture of an image template, uploaded to Meta → its handle. Refused (422/409/502, logged,
+ * nothing changed) when no sample is picked, the picture isn't one WhatsApp takes, the token's app is
+ * unknown or Meta refuses the upload.
+ */
+async function sampleHandle(doc: StoredTemplate, appId: string | null, by: WaActor): Promise<string> {
+  const where = { templateId: doc.id, name: doc.name, language: doc.language };
+  const blocked = async (summary: string) => writeLog({ kind: 'submit.blocked', level: 'warn', actor: by, summary }, where);
+  const sample = headerOf(doc.source)?.sample ?? headerOf(doc.compiled)?.sample ?? null;
+  if (!sample) {
+    await blocked(`Not sent to Meta: ${doc.name} (${doc.language}) has an image header but no sample picture`);
+    throw validationFailed('Pick a sample picture for Meta’s review first', [
+      { code: 'T25', severity: 'error', message: 'Pick a sample picture for Meta’s review (guests get the venue’s own picture)', path: 'source.header.sample' },
+    ]);
+  }
+  if (!appId) {
+    await blocked(`Not sent to Meta: the token's app is unknown, so the sample picture of ${doc.name} (${doc.language}) can't be uploaded`);
+    throw conflict('Check the Meta connection first (WhatsApp tab → Check connection): the sample picture needs the token’s app');
+  }
+  const pic = await readWaImage(sample);
+  if (!pic.ok) {
+    await blocked(`Not sent to Meta: the sample picture of ${doc.name} (${doc.language}) — ${pic.reason}`);
+    throw validationFailed(`The sample picture: ${pic.reason}`, [{ code: 'T25', severity: 'error', message: `The sample picture: ${pic.reason}`, path: 'source.header.sample' }]);
+  }
+  try {
+    return await metaClient().uploadSample(appId, { bytes: pic.bytes, type: pic.facts.type, name: `${doc.name}_${doc.language}.${pic.facts.type === 'image/png' ? 'png' : 'jpg'}` });
+  } catch (err) {
+    const e = err instanceof MetaError ? err : new MetaError('unknown', 'Unexpected failure while uploading the sample picture');
+    await writeLog(
+      { kind: 'submit.failed', level: 'warn', actor: by, summary: `Not sent to Meta: Meta didn't take the sample picture of ${doc.name} (${doc.language}) — ${e.userMsg}`, detail: metaErrorDetail(e) },
+      where,
+    );
+    if (e.kind === 'rate_limited') await updateOps({ backoffUntilMs: Date.now() + (e.info.retryAfterMs ?? 5 * 60_000) }).catch(() => undefined);
+    throw new HttpError(e.kind === 'rate_limited' ? 429 : 502, 'sample_upload_failed', `Meta didn’t take the sample picture: ${e.userMsg} — nothing was sent, try again`);
+  }
 }

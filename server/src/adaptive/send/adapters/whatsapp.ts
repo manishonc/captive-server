@@ -67,6 +67,8 @@ function retryAfterMs(headers: Headers | null): number | null {
 /** The request body for one template message (exported for the tests). */
 export function whatsappRequestBody(m: OutboundWhatsApp): Record<string, unknown> {
   const components: Array<Record<string, unknown>> = [];
+  // PR image header: the picture first (Meta's order: header, body, buttons).
+  if (m.headerImage?.link) components.push({ type: 'header', parameters: [{ type: 'image', image: { link: m.headerImage.link } }] });
   if (m.bodyParams.length) components.push({ type: 'body', parameters: m.bodyParams.map((text) => ({ type: 'text', text })) });
   if (m.button) components.push({ type: 'button', sub_type: 'url', index: String(m.button.index), parameters: [{ type: 'text', text: m.button.param }] });
   return {

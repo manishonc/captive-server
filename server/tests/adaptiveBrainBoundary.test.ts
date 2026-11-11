@@ -198,6 +198,8 @@ const BRAIN_MAY_REACH = new Set([
     'adaptive/brain/jobs/waTemplateWriter.ts',
     'adaptive/core/whatsapp/aiBrief.ts',
     'adaptive/core/whatsapp/checks.ts',
+    // PR image header: the checks' picture rules (pure: links and bytes only).
+    'adaptive/core/whatsapp/image.ts',
     'adaptive/core/whatsapp/status.ts',
     'adaptive/core/whatsapp/template.ts',
     'adaptive/core/registry/index.ts',

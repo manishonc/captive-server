@@ -16,7 +16,8 @@
  *
  * WhatsApp (PR PV: the owner's Send test), by the number's end: 0000 → rejected 131026 (not on
  * WhatsApp), 0001 → unknown, 0002 → retry 130429 (60 s), 0003 → rejected 190, config; 0004 →
- * rejected 132001 (Meta doesn't know the template in that language). The outbox doc keeps the
+ * rejected 132001 (Meta doesn't know the template in that language); PR image header: a picture
+ * whose link has `/broken` in it → rejected 131053 (Meta couldn't load the picture). The outbox doc keeps the
  * template, its values and the text the guest would read. PR W3: like Meta, a Mexican number
  * (+52…) comes back with WhatsApp's own id (+521…) as `recipientId`.
  */
@@ -52,6 +53,7 @@ function triggeredFailure(message: Outbound): ProviderResult | null {
     if (end === '0002') return { kind: 'retry', provider, reason: 'sandbox_rate_limit', retryAfterMs: SANDBOX_RETRY_AFTER_MS };
     if (end === '0003') return { kind: 'rejected', provider, code: '190', message: 'sandbox: the access token has expired', config: true };
     if (end === '0004') return { kind: 'rejected', provider, code: '132001', message: 'sandbox: template name does not exist in the translation' };
+    if (message.headerImage?.link.includes('/broken')) return { kind: 'rejected', provider, code: '131053', message: 'sandbox: media upload error (the picture could not be loaded)' };
     return null;
   }
   const digits = String(message.to ?? '').replace(/\D/g, '');
@@ -102,6 +104,7 @@ export function createSandboxAdapter(channel: 'email' | 'sms' | 'whatsapp'): Cha
               language: message.language,
               bodyParams: message.bodyParams,
               button: message.button,
+              headerImage: message.headerImage ?? null,
               text: message.previewText,
               sendKey: message.sendKey,
               providerMessageId,

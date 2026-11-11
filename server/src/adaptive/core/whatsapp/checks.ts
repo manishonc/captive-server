@@ -12,9 +12,11 @@
  *  T05 one category per name    T12 the button link            T19 utility = no promotion
  *  T06 body length              T13 names the venue            T20 the STOP footer
  *  T07 footer length            T14 no links/phones/emails     T21 formatting  · T22 creates/hour
+ *  T25 the image header (a sample picture for Meta's review, from the media library)
  */
 
 import { makeReport, error, warning, info, type Issue, type ValidationReport } from '../issues';
+import { waImageUrlProblem } from './image';
 import { parseMergeExpressions, canonicalField } from '../registry/mergeFields';
 import type { Lang } from '../constants';
 import {
@@ -29,6 +31,7 @@ import {
   WA_PROMO_FIELDS,
   WA_WORST_CASE_LENGTH,
   buttonUrlFor,
+  headerOf,
   normText,
   type MetaButton,
   type WaCompiled,
@@ -322,6 +325,18 @@ export function checkWhatsAppTemplate(d: DraftForCheck, ctx: CheckContext): Vali
     }
   } else if (d.requestedCategory === 'UTILITY' && compiled.footerText) {
     issues.push(warning('T20', 'An opt-out footer on a utility template nudges Meta to file it as marketing', 'source.footer'));
+  }
+
+  // T25 the image header: Meta reviews it with a sample picture. A template already at Meta keeps
+  // its sample there (an edit sends one again: submit.ts asks for it then), so only a create needs it.
+  const header = headerOf(source);
+  if (header) {
+    if (!header.sample) {
+      if (!d.atMeta) issues.push(error('T25', 'Pick a sample picture for Meta’s review (guests get the venue’s own picture)', 'source.header.sample'));
+    } else {
+      const bad = waImageUrlProblem(header.sample);
+      if (bad) issues.push(error('T25', `The sample picture: ${bad}`, 'source.header.sample'));
+    }
   }
 
   // T21 formatting Meta refuses

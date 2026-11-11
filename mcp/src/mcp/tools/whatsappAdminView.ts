@@ -47,7 +47,25 @@ export const listInputShape = {
 export const listInputSchema = z.object(listInputShape);
 
 /** A draft's text, as the editor writes it: named fields like {{contact.firstName}}, never {{1}}. */
+/** PR image header: a picture at the top; which picture is the venue's at each send, `sample` is the one Meta's reviewers see. */
+const headerChange = z
+  .object({
+    type: z.literal('image'),
+    sample: z
+      .string()
+      .trim()
+      .max(1000)
+      .nullable()
+      .optional()
+      .describe('The sample picture for Meta’s review: an https *.b-cdn.net link from the media library (list_venue_logos lists one account’s), JPEG or PNG, at most 5 MB. Needed before Send to Meta.'),
+  })
+  .strict();
+
 export const draftChangeShape = {
+  header: headerChange
+    .nullable()
+    .optional()
+    .describe('A picture at the top: {type: "image", sample}. null removes it, leave out to keep it. Guests get their venue’s WhatsApp picture (set_venue_whatsapp_image); venues without one get the templates without a picture. Approved templates can’t gain one: make a new template (create_whatsapp_draft).'),
   body: z.string().trim().min(1).max(2000).optional().describe('The new body text with named fields, e.g. "Hallo {{contact.firstName}}, …". Fields allowed for the message are in get_whatsapp_template (allowedFields).'),
   footer: z.string().trim().max(200).nullable().optional().describe('The footer (the stop line); null removes it, leave out to keep it.'),
   button: z
@@ -85,6 +103,35 @@ export const testSendShape = {
   offerSlot: z.string().regex(/^[a-z][a-z0-9_]{0,40}$/).optional().describe('The step’s offer blank (Win-back stages share one step).'),
   lang: z.enum(LANGS).optional().describe('The language (default en).'),
   recipientId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/).describe('A saved test phone number’s id (list_whatsapp_test_options). The number itself never travels.'),
+};
+
+/** PR image header: the venue's WhatsApp picture. */
+export const venueImageShape = {
+  tenantUserId: z.string().min(1).max(128).optional().describe('The account (default: the one picked when connecting).'),
+  venueId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).describe('The venue (list_whatsapp_test_options lists the account’s venues).'),
+};
+
+export const setVenueImageShape = {
+  ...venueImageShape,
+  url: z
+    .string()
+    .trim()
+    .max(1000)
+    .nullable()
+    .describe('An https *.b-cdn.net link from the account’s media library (list_venue_logos), JPEG or PNG, at most 5 MB; null removes the picture.'),
+};
+
+/** PR image header: a new draft (D1: an image version of a message is a new template, next to the approved plain one). */
+export const createDraftShape = {
+  journeyKey: z.string().regex(KEY).describe('The journey of the message (get_whatsapp_coverage).'),
+  poolKey: z.string().regex(KEY).describe('The message (pool).'),
+  lang: z.enum(LANGS),
+  category: z.enum(['MARKETING', 'UTILITY']).describe('Review asks and offers MARKETING, info messages UTILITY (the message’s rule).'),
+  header: draftChangeShape.header,
+  body: z.string().trim().min(1).max(2000).describe('The body with named fields, e.g. "Hallo {{contact.firstName | default:\"du\"}}, …" (allowedFields in get_whatsapp_template).'),
+  footer: z.string().trim().max(200).nullable().optional().describe('The footer (the STOP line for marketing).'),
+  button: draftChangeShape.button,
+  name: z.string().regex(/^hf_[a-z0-9_]{1,200}$/).optional().describe('Only for a new LANGUAGE of an existing template of ours (same message): its name. Leave out for a new template (the next hf_<pool>_<n>).'),
 };
 
 export const setSendingShape = {
@@ -226,7 +273,9 @@ export function templateDetail(r: Rec) {
     stage: t.stage,
     editable,
     canSendToMeta: editable && t.checks?.ok === true,
-    ourText: t.source ? { body: t.source.body, footer: t.source.footer ?? null, button: t.source.button ?? null } : null,
+    ourText: t.source ? { header: t.source.header ?? null, body: t.source.body, footer: t.source.footer ?? null, button: t.source.button ?? null } : null,
+    // PR image header: a picture at the top (guests get their venue's; `sample` is what Meta's reviewers see).
+    header: compiled?.header ?? t.preview?.header ?? null,
     metaBody: compiled?.bodyText ?? meta?.bodyText ?? null,
     metaFooter: compiled?.footerText ?? meta?.footerText ?? null,
     button: compiled?.button ?? null,
@@ -280,7 +329,9 @@ export function coverageView(o: Rec, journeyKey?: string) {
 /** The draft text the server checks/saves: the template's current text with the asked changes. */
 export function mergeSource(current: Rec | null, change: DraftChange) {
   const base = current ?? { body: '', footer: null, button: null };
+  const header = change.header === undefined ? (base.header?.type === 'image' ? { type: 'image', sample: base.header.sample ?? null } : null) : change.header ? { type: 'image', sample: change.header.sample ?? null } : null;
   return {
+    ...(header ? { header } : {}),
     body: change.body ?? base.body,
     footer: change.footer === undefined ? base.footer ?? null : change.footer,
     button: change.button === undefined ? base.button ?? null : change.button,
@@ -288,7 +339,7 @@ export function mergeSource(current: Rec | null, change: DraftChange) {
 }
 
 export function hasTextChange(change: DraftChange): boolean {
-  return change.body !== undefined || change.footer !== undefined || change.button !== undefined;
+  return change.header !== undefined || change.body !== undefined || change.footer !== undefined || change.button !== undefined;
 }
 
 /** The launch card's WhatsApp part: the switch, the three checks, and whether ON would pass. */

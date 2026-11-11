@@ -74,8 +74,10 @@ import { registerWhatsAppAdminTools } from './tools/whatsappAdmin';
  * Adaptive → WhatsApp tab and Launch & health), acting as that admin:
  *   whatsapp:      get_whatsapp_connection, list_whatsapp_templates, get_whatsapp_template,
  *                  get_whatsapp_coverage, check_whatsapp_draft, edit_whatsapp_draft,
- *                  suggest_whatsapp_template (billed AI run), send_whatsapp_template_to_meta
- *                  (confirm), sync_whatsapp_now, list_whatsapp_test_options, send_whatsapp_test,
+ *                  create_whatsapp_draft, suggest_whatsapp_template (billed AI run),
+ *                  send_whatsapp_template_to_meta (confirm), sync_whatsapp_now,
+ *                  list_whatsapp_test_options, send_whatsapp_test,
+ *                  get_venue_whatsapp_image, set_venue_whatsapp_image (PR image header),
  *                  get_whatsapp_sending, set_whatsapp_sending (ON needs "WHATSAPP ON")
  */
 export function buildMcpServer(opts: { admin?: boolean } = {}): McpServer {

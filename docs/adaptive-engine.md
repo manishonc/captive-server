@@ -698,6 +698,11 @@ Brief: `research/heidifi-adaptive-campaign-manager/prd/pr-w3-brief.md`. Journeys
   minute (`cachedWaPickContext`). `renderMessage(content, 'whatsapp', values)` renders the body (+ footer); every
   `{{n}}` needs a value (one line, never empty) and the link button its link, else the send is blocked
   (`missing_value:…`, `guest_info_missing`…). Priced flat (`creditsPerMessage`, 12).
+- **The picture** (PR image header): a venue with a WhatsApp picture (`AdaptiveVenues.whatsappImage`, status
+  `ok`) gets the message's **image templates** in that language where one is usable, else the plain ones; a venue
+  without one only the plain ones. The send carries `headerImage {link}` (Meta's header parameter, by link). A
+  refusal 131052/131053 (Meta couldn't load it) marks the picture `broken` (store/venueWhatsAppImage.ts): the
+  venue's next messages pick the plain templates until the owner saves a picture again. Same price.
 - **Live:** the links are minted with channel `whatsapp`; the button's variable is `s/<code>` of the button's
   link; Meta's button index from the template. The record keeps `whatsapp { templateId, name, language }`
   (test runs too). Meta's 131050 at send time = a WhatsApp STOP; 131026 / 131049 at send time hold the number.

@@ -194,6 +194,28 @@ turning it on:
    With it, the webhook's `X-Hub-Signature-256` is checked, and a guest's WhatsApp **START** gives their
    WhatsApp messages back. Without it a START isn't applied by Adaptive (a STOP always is).
 
+### 4d. A picture at the top of WhatsApp messages (PR image header)
+
+No new environment variable and no Meta setting: the sample upload uses the same token and the app Check
+connection already reads (`debug_token` → `appId`; run **Check connection** once if the tab shows no app).
+
+1. **Write an image version of a message** (WhatsApp tab → New template, or the MCP's
+   `create_whatsapp_draft`): Picture at the top → **The venue's picture**, and a **sample picture** for
+   Meta's review — a JPEG or PNG (≤ 5 MB) link from a media library (Dashboard → Media, copy the link; it
+   must be `https://….b-cdn.net/…`). It is a new name (`hf_<pool>_<n+1>`): keep the approved plain
+   template — venues without a picture keep getting it. Send it to Meta as usual (Manish's OK); the server
+   uploads the sample then (Meta's Resumable Upload API) and Meta reviews it with that picture.
+2. **Give each venue its picture**: owner portal → Campaign Manager → Adaptive → the venue card →
+   **WhatsApp picture** (pick from Media; JPEG or PNG ≤ 5 MB, landscape looks best), or the MCP's
+   `set_venue_whatsapp_image`. It is checked once when saved.
+3. From then on that venue's guests get the image version (where one is approved in their language, else
+   the plain one) with the venue's picture at the top. If Meta can't load the picture at a send
+   (131052/131053), that message isn't sent, the picture shows **not working** on the card, and the
+   venue's next messages go without a picture until it is saved again.
+
+The admin's journey page and the owner's "See what guests get" show the picture in the phone; the
+WhatsApp Send test sends it too (the venue's picture, else the template's sample).
+
 ### 5. Create Message Templates
 
 1. In Meta app → **WhatsApp** → **Message Templates** → **Create Template**

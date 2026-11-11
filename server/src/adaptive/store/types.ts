@@ -154,6 +154,10 @@ export interface AdaptiveVenueDoc {
   audience?: { sms: 'verified' | 'all'; email: 'verified' | 'all' };
   audienceUpdatedAt?: StoredTime;
   audienceUpdatedBy?: string | null;
+  /** PR image header: the picture at the top of the venue's WhatsApp image templates (service/whatsappImage.ts). */
+  whatsappImage?: import('../core/whatsapp/image').WaVenueImage | null;
+  whatsappImageUpdatedAt?: StoredTime;
+  whatsappImageUpdatedBy?: string | null;
 }
 
 export interface VenueJourneyConfigDoc {

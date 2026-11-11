@@ -47,6 +47,8 @@ import type { ProviderResult } from '../send/adapters/types';
 import { whatsappTestAdapter } from '../send/adapters/whatsappTestSend';
 import { waBodyValues } from '../core/whatsapp/sendValues';
 import { loadWaPickContext, pickWaTemplate } from '../whatsapp/pick';
+import { headerOf } from '../core/whatsapp/template';
+import { venueWhatsAppImageUrl } from '../store/venueWhatsAppImage';
 import { writeLog } from '../whatsapp/store';
 import { resolveStayTimes } from '../stays/times';
 import { now, refreshClock } from '../engine/clock';
@@ -382,7 +384,9 @@ async function testSendWhatsApp(a: WhatsAppTestInput) {
   const { input } = a;
   if (!a.definition.pools?.[a.pool]?.channels.includes('whatsapp')) throw new ApiError('bad_request', 'This message doesn’t go by WhatsApp');
   const lang: Lang = input.lang ?? 'en';
-  const pick = pickWaTemplate(await loadWaPickContext(), { journeyKey: input.journeyKey, poolKey: a.pool }, lang, { approvedOnly: true });
+  // PR image header: the venue's picture picks the templates as at a real send (image ones when it has one).
+  const venueImage = await venueWhatsAppImageUrl(a.tenantUserId, a.venueId);
+  const pick = pickWaTemplate(await loadWaPickContext(), { journeyKey: input.journeyKey, poolKey: a.pool }, lang, { approvedOnly: true, image: Boolean(venueImage) });
   const source = pick?.template.source;
   const compiled = pick?.template.compiled;
   if (!pick || !source || !compiled) {
@@ -439,6 +443,10 @@ async function testSendWhatsApp(a: WhatsAppTestInput) {
   const metaIndex = pick.template.meta?.buttons?.findIndex((b) => b.type === 'URL') ?? -1;
   // The tests' link placeholder (`s/xxxxxxxx`): the button's URL is the visitor host + this.
   const placeholder = `s/${'x'.repeat(SHORT_CODE_LENGTH)}`;
+  // An image template's picture: the venue's own, else (a test only) the sample Meta reviewed.
+  const header = headerOf(compiled) ?? headerOf(source);
+  const headerLink = header ? venueImage ?? header.sample : null;
+  if (header && !headerLink) throw new HttpError(422, 'validation_failed', 'This template has a picture at the top, but the venue has no WhatsApp picture and the template no sample', { reason: 'whatsapp_image_missing' });
   const result = await adapter.send({
     kind: 'whatsapp',
     to,
@@ -446,6 +454,7 @@ async function testSendWhatsApp(a: WhatsAppTestInput) {
     language: pick.template.language,
     bodyParams: body.params,
     button: button ? { index: metaIndex >= 0 ? metaIndex : 0, param: placeholder } : null,
+    headerImage: headerLink ? { link: headerLink } : null,
     previewText: body.text,
     sendKey,
   });
@@ -485,6 +494,7 @@ async function testSendWhatsApp(a: WhatsAppTestInput) {
     to: masked,
     ...(sent ? {} : { problem: whatsappTestProblem(result) }),
     preview: {
+      ...(headerLink ? { header: { type: 'image' as const, url: headerLink, isSample: !venueImage } } : {}),
       text: waBodyValues(source, compiled, maskSecretValues(values)).text,
       footer: source.footer ?? null,
       button: button ? { text: button.text } : null,

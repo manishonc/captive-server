@@ -56,6 +56,8 @@ export interface OutboundWhatsApp {
   bodyParams: string[];
   /** Meta's index of the template's link button and the value of its variable. */
   button: { index: number; param: string } | null;
+  /** PR image header: the picture of the template's image header (a public https link), or none. */
+  headerImage?: { link: string } | null;
   /** The body as the guest reads it — kept by the sandbox outbox, never sent. */
   previewText: string;
   sendKey: string;

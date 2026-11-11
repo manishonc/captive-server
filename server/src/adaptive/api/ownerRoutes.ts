@@ -9,6 +9,7 @@
  *   stays/:id      POST unlink {expectContactId} · POST link {contactId, expectContactId?}
  *   guest-info     GET · PUT {locales, baseVersion}          (the on/off switch stays PR 1's POST)
  *   audience       GET · PUT {sms, email}
+ *   whatsapp-image GET · PUT {url | null}   (the venue's WhatsApp picture: the top of its image templates)
  *   test-send      POST {journeyKey, nodeId?, channel, lang?, recipientId}
  *   results        GET ?venueId&from&to&journeys&detail   (detail: the owner dashboard)
  *   guests         GET ?cursor&limit&lang · GET /:contactId?lang · POST /:contactId/marketing {action, scope}
@@ -28,6 +29,7 @@ import { idParam, makeHandle, ownerActorOf, rateLimiter, tenantOf, tooManyReques
 import { checkStayFeed, deleteStayFeed, getStayFeed, linkStayByOwner, saveStayFeed, syncStayFeedNow, unlinkStay } from '../service/stays';
 import { getGuestInfoContent, saveGuestInfoContent } from '../service/guestInfo';
 import { getAudience, putAudience } from '../service/audience';
+import { getWhatsAppImage, putWhatsAppImage } from '../service/whatsappImage';
 import { testSend } from '../service/testSend';
 import { getResults } from '../service/results';
 import { findGuest, getGuest, listGuests, listMessages, setGuestMarketing } from '../service/guests';
@@ -84,6 +86,21 @@ router.put(`${V}/guest-info`, handle(async (req) => saveGuestInfoContent(tenantO
 
 router.get(`${V}/audience`, handle(async (req) => getAudience(tenantOf(req), venueOf(req))));
 router.put(`${V}/audience`, handle(async (req) => putAudience(tenantOf(req), venueOf(req), req.body, ownerActorOf(req))));
+
+// ── The venue's WhatsApp picture ─────────────────────────────────────────────
+
+// Saving reads the picture from the media library once: a few per hour per account.
+const imageLimit = rateLimiter(60, 60 * 60_000);
+router.get(`${V}/whatsapp-image`, handle(async (req) => getWhatsAppImage(tenantOf(req), venueOf(req))));
+router.put(
+  `${V}/whatsapp-image`,
+  handle(async (req) => {
+    const actor = ownerActorOf(req);
+    const t = tenantOf(req);
+    if (!imageLimit(t)) throw tooManyRequests('Too many picture changes — try again in a while');
+    return putWhatsAppImage(t, venueOf(req), req.body, actor);
+  }),
+);
 
 // ── Send test, numbers ───────────────────────────────────────────────────────
 

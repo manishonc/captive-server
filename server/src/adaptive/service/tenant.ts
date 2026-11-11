@@ -65,6 +65,7 @@ import { getEntitlements, isLapsedForSending } from '../../services/entitlements
 import { applyAudienceToStats } from './audience';
 import { launchAwareOverview } from './startSending';
 import { previewVersionsFor, type PreviewVersion } from './previewVersions';
+import { venueWhatsAppImageUrl } from '../store/venueWhatsAppImage';
 import { loadPreviewBrand } from '../send/designBrand';
 import { blocksTemplateText } from '../core/emailBlocks';
 import { cachedEngineSettings, whatsappSendingOn } from '../store/engineSettings';
@@ -397,6 +398,8 @@ export async function preview(tenantUserId: string, body: unknown): Promise<{ jo
     slots,
     offers: content.offerMenuDefaults,
     design: { brand, poweredBy },
+    // PR image header: the venue's picture decides which WhatsApp templates its guests get.
+    ...(input.venueId ? { venueImage: await venueWhatsAppImageUrl(tenantUserId, input.venueId) } : {}),
   });
   messages.forEach((m, i) => {
     const v = versions[i];

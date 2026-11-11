@@ -9,7 +9,7 @@ import { loadCatalogue } from '../service/catalogue';
 import { journeyDefinitionSchema, type JourneyDefinition } from '../core/schemas';
 import { whatsappPools, type PoolRow } from '../core/whatsapp/pools';
 import { checkImportedTemplate, checkWhatsAppTemplate, type CheckContext, type DraftForCheck, type SiblingInfo, type ValidationReport } from '../core/whatsapp/checks';
-import { WA_BODY_FIELDS, WA_DATE_FIELDS, buttonUrlFor, normText, sampleFor, WA_BUTTON_EXAMPLE, type WaUse } from '../core/whatsapp/template';
+import { WA_BODY_FIELDS, WA_DATE_FIELDS, buttonUrlFor, compiledContentParts, headerOf, metaHeaderKind, normText, sampleFor, WA_BUTTON_EXAMPLE, type WaUse } from '../core/whatsapp/template';
 import { displayStatus, rejectionWords, usable, type WaDisplay } from '../core/whatsapp/status';
 import { renderText } from '../core/render';
 import { error, makeReport } from '../core/issues';
@@ -24,18 +24,29 @@ import type { Lang } from '../core/constants';
 
 /** Our compiled parts in Meta's shape (for comparing with what Meta holds). */
 export function compiledParts(c: WaCompiled) {
-  return { bodyText: c.bodyText, footerText: c.footerText, buttons: c.button ? [{ text: c.button.text, url: c.button.url }] : [] };
+  return compiledContentParts(c);
 }
 
 /**
- * The parts we compile, from ours (`mine`) or from Meta's copy: the body, the footer, and — only when
- * we compile one — the link button (Meta's first URL button). Other buttons (a fixed link, "Stop
- * promotions", a phone number) are Meta's own and never count as drift.
+ * The parts we compile, from ours (`mine`) or from Meta's copy: the image header, the body, the
+ * footer, and — only when we compile one — the link button (Meta's first URL button). Other buttons
+ * (a fixed link, "Stop promotions", a phone number) are Meta's own and never count as drift. A header
+ * at Meta that we don't compile is T24's (a part we don't handle), not drift.
  */
-function driftKey(c: WaCompiled, meta: { bodyText: string | null; footerText: string | null; buttons: Array<{ type: string; text: string | null; url: string | null }> }, mine: boolean): string {
+function driftKey(
+  c: WaCompiled,
+  meta: { headerText: string | null; otherComponents: string[]; bodyText: string | null; footerText: string | null; buttons: Array<{ type: string; text: string | null; url: string | null }> },
+  mine: boolean,
+): string {
   if (mine) return contentKey(compiledParts(c));
   const url = meta.buttons.find((b) => b.type === 'URL');
-  return contentKey({ bodyText: meta.bodyText, footerText: meta.footerText, buttons: c.button && url ? [{ text: url.text, url: url.url }] : c.button ? [{ text: null, url: null }] : [] });
+  const metaHeader = metaHeaderKind(meta);
+  return contentKey({
+    header: headerOf(c) ? metaHeader ?? 'NONE' : null,
+    bodyText: meta.bodyText,
+    footerText: meta.footerText,
+    buttons: c.button && url ? [{ text: url.text, url: url.url }] : c.button ? [{ text: null, url: null }] : [],
+  });
 }
 
 /** Buttons that never need a value at send time (besides a link without a variable). */
@@ -48,11 +59,16 @@ const PLAIN_BUTTONS = new Set(['QUICK_REPLY', 'PHONE_NUMBER']);
  * drop them. `ourButton`: we fill Meta's first link button (a linked or our own template with a
  * button; for a template not linked yet, the link would).
  */
-export function unhandledParts(meta: { headerText: string | null; otherComponents: string[]; buttons: Array<{ type: string; url: string | null }> }, ourButton: boolean): string[] {
+export function unhandledParts(
+  meta: { headerText: string | null; otherComponents: string[]; buttons: Array<{ type: string; url: string | null }> },
+  ourButton: boolean,
+  /** PR image header: we fill Meta's image header (a template of ours with one, or one being linked / edited). */
+  ourImage = false,
+): string[] {
   const out: string[] = [];
   if (meta.headerText) out.push('a header');
   // Meta's own names (HEADER:IMAGE, CAROUSEL…) in words.
-  out.push(...meta.otherComponents.map((c) => (c.startsWith('HEADER:') ? `a header with ${c.slice(7).toLowerCase() || 'media'}` : `a ${c.toLowerCase().replace(/_/g, ' ')}`)));
+  out.push(...meta.otherComponents.filter((c) => !(ourImage && c === 'HEADER:IMAGE')).map((c) => (c.startsWith('HEADER:') ? `a header with ${c.slice(7).toLowerCase() || 'media'}` : `a ${c.toLowerCase().replace(/_/g, ' ')}`)));
   const firstUrl = meta.buttons.findIndex((b) => b.type === 'URL');
   meta.buttons.forEach((b, i) => {
     if (PLAIN_BUTTONS.has(b.type)) return;
@@ -155,7 +171,8 @@ export function reportFor(d: StoredTemplate, ctx: CheckContext): ValidationRepor
   // miss them, an edit would drop them.
   // Meta's first link button is ours to fill — or, while a rejected/paused template is edited, ours to
   // replace or drop (the edit sends our buttons), so removing our button never locks the template.
-  const parts = d.source && d.meta ? unhandledParts(d.meta, editPending || Boolean(d.compiled?.button)) : [];
+  // The same for an image header: ours to fill when our text has one, or to drop while it's edited.
+  const parts = d.source && d.meta ? unhandledParts(d.meta, editPending || Boolean(d.compiled?.button), editPending || Boolean(headerOf(d.compiled))) : [];
   const unmodelled = parts.length ? [error('T24', `Meta’s template has parts this tab doesn’t handle (${parts.join(', ')}): it isn’t used, and it can’t be edited here`)] : [];
   const extra = [...metaButton, ...drift, ...unmodelled];
   return extra.length ? makeReport([...ours.issues, ...extra]) : ours;
@@ -183,11 +200,12 @@ function previewValues(lang: Lang): Record<string, string> {
   return out;
 }
 
-export function previewOf(d: StoredTemplate): { body: string; footer: string | null; button: { text: string; url: string } | null } {
+export function previewOf(d: StoredTemplate): { header: { type: 'image'; sample: string | null } | null; body: string; footer: string | null; button: { text: string; url: string } | null } {
   const lang = d.lang ?? 'en';
   if (d.source) {
     const body = renderText(d.source.body, previewValues(lang)).text;
     return {
+      header: headerOf(d.source),
       body,
       footer: d.source.footer,
       button: d.source.button ? { text: d.source.button.text, url: buttonUrlFor(visitorBaseUrl()).replace('{{1}}', WA_BUTTON_EXAMPLE) } : null,
@@ -195,6 +213,7 @@ export function previewOf(d: StoredTemplate): { body: string; footer: string | n
   }
   const urlButton = d.meta?.buttons.find((b) => b.type === 'URL') ?? d.meta?.buttons[0];
   return {
+    header: d.meta?.otherComponents.includes('HEADER:IMAGE') ? { type: 'image', sample: null } : null,
     body: d.meta?.bodyText ?? '',
     footer: d.meta?.footerText ?? null,
     button: urlButton ? { text: urlButton.text ?? '', url: urlButton.url ?? '' } : null,
@@ -244,14 +263,14 @@ export function templateView(d: StoredTemplate, pools: PoolRow[], ctx: CheckCont
     ...line,
     checks: report,
     source: d.source,
-    compiled: d.compiled ? { bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, button: d.compiled.button, params: d.compiled.params, components: d.compiled.components } : null,
+    compiled: d.compiled ? { header: headerOf(d.compiled), bodyText: d.compiled.bodyText, footerText: d.compiled.footerText, button: d.compiled.button, params: d.compiled.params, components: d.compiled.components } : null,
     meta: d.meta ? toJson({ ...d.meta }) : null,
     /**
      * What neither a link nor an edit here can handle in Meta's template (empty: everything): the cms
      * offers no Link, Edit or Send. Meta's first link button is never listed — linking (again) or an
      * edit fills it; a template that has it but no button of ours shows T24 in its checks instead.
      */
-    unhandled: d.meta ? unhandledParts(d.meta, true) : [],
+    unhandled: d.meta ? unhandledParts(d.meta, true, true) : [],
     submit: d.submit ? toJson(d.submit) : null,
     allowedFields: pool?.allowedFields ?? null,
     linkField: pool?.linkField ?? null,

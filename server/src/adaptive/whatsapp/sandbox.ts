@@ -43,7 +43,7 @@ export const SANDBOX_FAULTS = [
   'no_waba_scope',
 ] as const;
 export type SandboxFault = (typeof SANDBOX_FAULTS)[number];
-export type SandboxOp = 'debug' | 'phones' | 'list' | 'get' | 'find' | 'create' | 'edit' | 'subscriptions' | 'any';
+export type SandboxOp = 'debug' | 'phones' | 'list' | 'get' | 'find' | 'create' | 'edit' | 'subscriptions' | 'upload' | 'any';
 
 const col = () => db.collection(COL.sandboxWhatsAppTemplates);
 
@@ -262,6 +262,11 @@ export function createSandboxMetaClient(): MetaClient {
       if (!snap.exists) throw new MetaError('not_found', '(sandbox) Object does not exist', { status: 400, code: 100, subcode: 33 });
       await ref.update({ componentsJson: JSON.stringify(body.components), ...(body.category ? { category: body.category } : {}), status: 'PENDING', rejected_reason: null });
       return { ok: true };
+    },
+    async uploadSample(appId, file) {
+      await failIfQueued('upload', 'POST');
+      if (appId !== SANDBOX_APP_ID) throw new MetaError('invalid', '(sandbox) Unknown app');
+      return `4::sandbox-${file.type.slice(6)}-${file.bytes.length}`;
     },
   };
 }
