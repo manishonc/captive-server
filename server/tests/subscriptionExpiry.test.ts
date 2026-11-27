@@ -25,6 +25,7 @@ import {
   needsGraceRepair,
   daysUntil,
   dueRenewalEmail,
+  toDate,
 } from '../src/services/subscriptionState';
 
 let passed = 0;
@@ -195,6 +196,19 @@ test('the deactivation email is sent once, after expiry', () => {
     dueRenewalEmail({ status: 'expired', renewalEmailsSent: { deactivated: NOW } }, NOW),
     null,
   );
+});
+
+console.log('\nrenewal email dates\n');
+
+test('toDate reads the grace clock in every form the sweep holds it', () => {
+  // The run that starts grace emails straight away, with the Date it just
+  // wrote. Only a Timestamp used to be read, so that email said "shortly".
+  const graceEndsAt = addDays(NOW, GRACE_PERIOD_DAYS);
+  assertEqual(toDate(graceEndsAt)?.getTime(), graceEndsAt.getTime(), 'plain Date');
+  assertEqual(toDate(timestamp(graceEndsAt))?.getTime(), graceEndsAt.getTime(), 'Timestamp');
+  assertEqual(toDate(graceEndsAt.toISOString())?.getTime(), graceEndsAt.getTime(), 'ISO string');
+  assertEqual(toDate(null), null, 'absent');
+  assertEqual(toDate('not a date'), null, 'unparseable');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

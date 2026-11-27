@@ -33,6 +33,8 @@ import {
   daysUntil,
   dueRenewalEmail,
   entitlementEndsAt,
+  toDate,
+  type DateLike,
 } from './subscriptionState';
 import { sendRenewalEmail } from './renewalEmails';
 import { invalidateEntitlements } from './entitlements';
@@ -178,8 +180,10 @@ async function sendDueEmail(candidate: Candidate, now: Date): Promise<string | n
     // plan the tenant recognises is the one they selected.
     planName: (data.selectedPlanName as string) || (data.planName as string),
     endsAt: endsAt === null ? null : new Date(endsAt),
-    graceEndsAt: (data.graceEndsAt as { toDate?: () => Date })?.toDate?.() ?? null,
-    daysLeft: daysUntil(data.graceEndsAt as never, now),
+    // `toDate`, not `.toDate()`: in the run that starts grace, the grace clock
+    // was set moments ago and is still a plain Date, not a Timestamp.
+    graceEndsAt: toDate(data.graceEndsAt as DateLike),
+    daysLeft: daysUntil(data.graceEndsAt as DateLike, now),
     graceDays: GRACE_PERIOD_DAYS,
   });
   if (!sent) {
