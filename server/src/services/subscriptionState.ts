@@ -136,7 +136,7 @@ export type RenewalEmailStage =
   | 'deactivated'
   | 'reactivated';
 
-type DateLike = { toDate?: () => Date } | Date | string | null | undefined;
+export type DateLike = { toDate?: () => Date } | Date | string | null | undefined;
 
 /**
  * Firestore Timestamp | Date | ISO string -> epoch ms, or null when the value
@@ -148,6 +148,16 @@ export function toMillis(value: DateLike): number | null {
   const date = (value as { toDate?: () => Date })?.toDate?.() ?? (value as Date | string);
   const time = date instanceof Date ? date.getTime() : new Date(date).getTime();
   return Number.isFinite(time) ? time : null;
+}
+
+/**
+ * Firestore Timestamp | Date | ISO string -> Date, or null. The sweep holds
+ * dates in both forms: read from Firestore they are Timestamps, but a value it
+ * has just written (a grace clock it set this run) is still a plain Date.
+ */
+export function toDate(value: DateLike): Date | null {
+  const time = toMillis(value);
+  return time === null ? null : new Date(time);
 }
 
 export function addDays(date: Date, days: number): Date {

@@ -166,6 +166,9 @@ export function renderHtml(content: StageContent): string {
 </body></html>`;
 }
 
+/** Stages whose whole point is the date the grace period ends. */
+const GRACE_DATE_STAGES: RenewalEmailStage[] = ['graceStarted', 'graceMidpoint', 'graceFinal'];
+
 /**
  * Send one stage of the sequence.
  *
@@ -183,10 +186,19 @@ export async function sendRenewalEmail(
   stage: RenewalEmailStage,
   ctx: RenewalEmailContext,
 ): Promise<boolean> {
+  const graceEndsAt = formatDate(ctx.graceEndsAt);
+  // The grace emails exist to tell the tenant the date their account stops.
+  // Without that date, send nothing: the caller leaves the stage unmarked and
+  // the next sweep retries, which beats telling them "until shortly".
+  if (!graceEndsAt && GRACE_DATE_STAGES.includes(stage)) {
+    console.warn(`[RENEWAL EMAIL] ${stage} not sent: no grace end date`);
+    return false;
+  }
+
   const content = stageContent(stage, {
     planName: ctx.planName || 'Your plan',
     endsAt: formatDate(ctx.endsAt) ?? 'recently',
-    graceEndsAt: formatDate(ctx.graceEndsAt) ?? 'shortly',
+    graceEndsAt: graceEndsAt ?? 'shortly',
     daysLeft: ctx.daysLeft ?? 0,
     graceDays: ctx.graceDays ?? GRACE_PERIOD_DAYS,
   });
